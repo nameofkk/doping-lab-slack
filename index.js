@@ -192,7 +192,8 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
 }
 
 // ── 실제 작업 모드: 레포 클론 → claude 코드 작업 → 브랜치 push → PR → 보고 ──
-let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {};
+let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {};
+function drainFeedback(channel) { const f = (feedback[channel] || []).join('\n'); feedback[channel] = []; return f; } // 작업 중 사용자가 끼어든 수정요청 모아서 반환
 // 답변/완료 시 요청자를 @멘션 (자리 비웠어도 핑 가게). 채널의 마지막 요청자 기준
 function mention(channel) { const u = (activeWork[channel] && activeWork[channel].by) || lastRequester[channel]; return u ? `<@${u}> ` : ''; }
 function workStatusCtx(channel) {
@@ -244,7 +245,9 @@ async function runPRD(client, channel, thread_ts, task) {
   const devil = byName('안다연');
   for (let round = 1; round <= MAX; round++) {
     if (workCancel[channel]) return null;
-    await postAs(client, channel, thread_ts, LEAD, round === 1 ? '먼저 각자 자기 파트부터 던져봐.' : `${round}라운드. 지금 PRD에서 부족한 부분만 보강하자.`);
+    const fb = drainFeedback(channel); // 사용자가 중간에 끼어든 수정요청 반영
+    if (fb) { convo += `\n[사용자가 중간에 준 수정/지시 — 반드시 이대로 PRD를 고쳐라]\n${fb}\n`; await postAs(client, channel, thread_ts, LEAD, `사용자가 중간에 "${fb.replace(/\n/g, ' ').slice(0, 50)}" 줬어, 이거 반영해서 다시 잡을게.`); }
+    await postAs(client, channel, thread_ts, LEAD, round === 1 ? '먼저 각자 자기 파트부터 던져봐.' : `${round}라운드. 지금 PRD에서 부족한 부분이랑 방금 사용자 피드백 반영해서 보강하자.`);
     for (const p of planTeam()) {
       if (workCancel[channel]) return null;
       const guide = round === 1 ? '네 담당 관점에서 이걸 어떻게 만들지 핵심 2~3개 구체적으로.' : '지금 PRD에서 네 영역에 빠졌거나 약한 부분만 콕 집어 보강해. 반복 말고 새로 더할 것만.';
@@ -466,7 +469,8 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const assetHeavy = /게임|game|sprite|스프라이트|캐릭터|에셋|asset|픽셀|pixel|애니메이션|아케이드|arcade|2d|3d|canvas|phaser/i.test(task);
   // UI/화면 관련이거나 신규 프로젝트일 때만 디자인 규칙 적용 (백엔드·봇 자가수정 등엔 노이즈라 빼)
   const uiish = newProject || /ui|화면|디자인|프론트|컴포넌트|페이지|버튼|css|스타일|레이아웃|frontend|react|html|랜딩|사이트|홈페이지|게임/i.test(task);
-  const res = await runClaude(`${intro}${rulesCtx(channel)}${PLAIN}${uiish ? DESIGN_RULE : ''}${newProject ? LAUNCH_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}\n\n요청: ${task}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000);
+  const fbBuild = drainFeedback(channel); // 제작 직전 들어온 사용자 수정요청도 반영
+  const res = await runClaude(`${intro}${rulesCtx(channel)}${PLAIN}${uiish ? DESIGN_RULE : ''}${newProject ? LAUNCH_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}${fbBuild ? '\n\n[사용자가 추가로 준 지시 — 반드시 반영]\n' + fbBuild : ''}\n\n요청: ${task}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000);
   if (res.limited) { await postAs(client, channel, thread_ts, LEAD, '⏳ 제작 중에 클로드 사용량 한도에 걸렸어. 지금까지 만든 건 안 올렸어, 한도 리셋되면 이어서 만들게.'); return; }
   await sh('git add -A', dir);
   const repoUrl = `https://github.com/${repo}`;
@@ -827,6 +831,7 @@ async function guardBusy(client, channel, thread_ts) {
 }
 // 작업 실행(activeWork 세팅 + runWork + 정리) 공통
 function launchWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName) {
+  feedback[channel] = []; // 새 작업 시작 → 묵은 피드백 정리
   activeWork[channel] = { task, started: Date.now(), by: lastRequester[channel] };
   runWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName)
     .catch(e => postAs(client, channel, thread_ts, LEAD, '작업 오류: ' + String(e).slice(0, 300)))
@@ -878,6 +883,12 @@ async function handle(event, client) {
     if (/하지\s?마|하지말|그만|중단|멈춰|스톱|stop|아니\s?야|취소해|관둬/i.test(raw)) {
       workCancel[channel] = true;
       await postAs(client, channel, thread_ts, LEAD, '오케이 멈출게. 진행 중이던 거 있으면 main엔 안 올리고 중단할게.');
+      return;
+    }
+    // 작업 진행 중에 사용자가 끼어들어 수정/지시하면 → 새 작업 만들지 말고 "진행 중인 작업"에 반영(피드백 버퍼). 짧은 안부/상태 질문은 아래로 흘려보냄
+    if (activeWork[channel] && (/(바꿔|바꾸|수정|추가|빼|말고|대신|아니|틀렸|틀려|반영|변경|고쳐|하지\s?마|로 ?해|로 ?가|넣어|이렇게|저렇게|말고|먼저|우선|강조|제외)/.test(raw) || raw.length > 14)) {
+      (feedback[channel] = feedback[channel] || []).push(raw);
+      await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, 그거 지금 진행 중인 거에 반영할게. (${(feedback[channel].length)}개 반영 대기)`);
       return;
     }
     // 규칙 관리
