@@ -696,6 +696,12 @@ async function handoffChecklist(client, channel, thread_ts, repo, task) {
   await postAs(client, channel, thread_ts, LEAD, `자 정리할게. 우리가 할 수 있는 건 다 했고, 너만 할 수 있는 것만 추렸어.\n\n[우리가 끝낸 거]\n${fmt(done, '✅')}\n\n[너가 해줘야 진짜 상용 오픈 가능 — 체크리스트]\n${fmt(todo, '☐')}\n\n이 중에 내가 대신 할 수 있는 건(도메인 연결, 마케팅 자료, 통계 코드 심기 등) 말만 해주면 또 해줄게. 계정·결제·스토어 제출처럼 너만 되는 건 끝나면 알려줘, 그담 단계 이어갈게.`);
 }
 
+// 이 채널에서 무거운 작업이 도는 중이면 새로 시작 막고 안내 (진행상태 덮어쓰기/리소스 충돌 방지)
+async function guardBusy(client, channel, thread_ts) {
+  if (!activeWork[channel]) return false;
+  await postAs(client, channel, thread_ts, LEAD, `지금 "${(activeWork[channel].task || '').slice(0, 40)}" 하는 중이라 그것부터 끝내고 할게. 급하면 "중단"이라고 해줘.`);
+  return true;
+}
 async function handle(event, client) {
   if (!event || !event.ts) return;
   if (event.subtype || event.bot_id) return;          // 사람 메시지만 (봇/시스템/수정 무시 → 무한루프 방지)
@@ -749,6 +755,7 @@ async function handle(event, client) {
       const match = svcList().find(s => raw.includes(s.repo.split('/').pop()));
       const target = (match && match.repo) || lastRepo[channel];
       if (!target) { await postAs(client, channel, thread_ts, win, '어느 레포 배포할지 알려줘. (만든 적 있는 거면 "서비스 목록"으로 이름 확인돼)'); return; }
+      if (await guardBusy(client, channel, thread_ts)) return;
       activeWork[channel] = { task: '재배포 ' + target, started: Date.now() };
       (async () => {
         const id = ++workSeq; const dir = `/tmp/dp${id}`;
@@ -765,12 +772,14 @@ async function handle(event, client) {
       const rr = rest.match(/^([\w.-]+\/[\w.-]+)\s+([\s\S]+)$/);
       if (rr) { repo = rr[1]; rest = rr[2]; }
       const newProject = !rr && /(포트폴리오|portfolio|홈페이지|랜딩|사이트|새\s*프로젝트|처음부터|new\s*project)/i.test(rest);
+      if (await guardBusy(client, channel, thread_ts)) return;
       activeWork[channel] = { task: rest, started: Date.now() };
       runWork(client, channel, event.thread_ts || event.ts, repo, rest, newProject, !!settings.approval[channel]).catch(e => postAs(client, channel, thread_ts, LEAD, '작업 오류: ' + String(e).slice(0, 300))).finally(() => { activeWork[channel] = null; });
       return;
     }
     const m = raw.match(/^(기획|토론|회의)\s*[:：]\s*([\s\S]*)$/);
     if (m && m[2].trim()) {
+      if (await guardBusy(client, channel, thread_ts)) return;
       activeWork[channel] = { task: m[2].trim(), started: Date.now() };
       runDebate(client, channel, event.thread_ts || event.ts, m[2].trim(), null).catch(() => {}).finally(() => { activeWork[channel] = null; });
       return;
@@ -791,6 +800,29 @@ async function handle(event, client) {
     // 사용량/번레이트 (오늘 Claude 호출·토큰·한도걸림)
     if (/(사용량|번레이트|토큰.*얼마|클로드.*사용|usage)/.test(raw)) {
       await postAs(client, channel, thread_ts, LEAD, `오늘 우리 사용량이야.\n호출 ${usageStat.calls}회 · 출력토큰 약 ${usageStat.outTokens.toLocaleString()} · 한도걸림 ${usageStat.limitedHits}번.${usageStat.limitedHits ? ' 한도 자주 걸리면 팀원 모델 sonnet 유지하거나 작업 텀을 두자.' : ''}`);
+      return;
+    }
+    // 의존성 점검 — 취약점(npm audit) + 오래된 패키지(npm outdated) 리포트
+    if (/(의존성|디펜던시|dependency|패키지|취약점).*(점검|확인|스캔|업데이트|체크|봐|상태)/.test(raw)) {
+      const sec = byName('우정잉') || LEAD;
+      const target = (svcList().find(s => raw.includes(s.repo.split('/').pop())) || {}).repo || lastRepo[channel];
+      if (!target) { await postAs(client, channel, thread_ts, sec, '어느 레포 의존성 볼지 알려줘. ("서비스 목록"으로 이름 확인돼)'); return; }
+      if (!GITHUB_TOKEN) { await postAs(client, channel, thread_ts, sec, 'GITHUB_TOKEN이 없어서 못 까봐.'); return; }
+      if (await guardBusy(client, channel, thread_ts)) return;
+      activeWork[channel] = { task: '의존성 점검 ' + target, started: Date.now() };
+      await postAs(client, channel, thread_ts, sec, `${target} 의존성 까볼게. 취약점이랑 오래된 패키지 본다.`);
+      (async () => {
+        const id = ++workSeq; const dir = `/tmp/dep${id}`;
+        const cl = await sh(`rm -rf ${dir} && git clone --depth 1 https://x-access-token:${GITHUB_TOKEN}@github.com/${target}.git ${dir} && chmod -R 777 ${dir}`);
+        if (cl.code !== 0) { await postAs(client, channel, thread_ts, sec, '클론 실패ㅠ\n' + (cl.err || '').slice(0, 200)); return; }
+        const hasPkg = await sh('test -f package.json && echo yes || echo no', dir);
+        if (!hasPkg.out.includes('yes')) { await postAs(client, channel, thread_ts, sec, 'package.json이 없어서 npm 의존성 점검은 해당 없어.'); return; }
+        await sh('npm install --no-audit --no-fund 2>&1 | tail -2', dir);
+        const au = await sh('npm audit 2>&1 | tail -15', dir);
+        const od = await sh('npm outdated 2>&1 | head -20', dir);
+        const clean = /0 vulnerabilities/.test(au.out);
+        await postAs(client, channel, thread_ts, sec, `${target} 의존성 점검 결과\n\n[취약점]\n${clean ? '깨끗해, 0개야.' : (au.out || '').slice(-700)}\n\n[오래된 패키지]\n${((od.out || '').trim()) || '다 최신이야.'}`.slice(0, 2800));
+      })().catch(e => postAs(client, channel, thread_ts, sec, '의존성 점검 오류: ' + String(e).slice(0, 200))).finally(() => { activeWork[channel] = null; });
       return;
     }
     // 서비스 재시작 (라이브가 맛이 갔을 때)
@@ -814,6 +846,7 @@ async function handle(event, client) {
       const mrepo = lastRepo[channel];
       if (!mrepo) { await postAs(client, channel, thread_ts, byName('영듀') || LEAD, '어느 서비스 마케팅 할지 모르겠어. 먼저 만든 거 있어야 그거 마케팅하지. 레포 이름 알려주거나 뭐 하나 만들고 말해줘.'); return; }
       await postAs(client, channel, thread_ts, byName('영듀') || LEAD, `${mrepo} 마케팅 자료 만들게. 포지셔닝부터 런칭 카피까지 정리해서 레포에 넣을게.`);
+      if (await guardBusy(client, channel, thread_ts)) return;
       activeWork[channel] = { task: '마케팅 자료', started: Date.now() };
       runWork(client, channel, event.thread_ts || event.ts, mrepo, '이 서비스 마케팅 자료를 만들어라. 포지셔닝, 타겟과 사용맥락, 핵심 한 줄 메시지, 채널별 전략(SEO·콘텐츠·SNS·커뮤니티), 런칭 카피 몇 개, 4주치 콘텐츠 캘린더, 핵심 SEO 키워드까지 MARKETING.md로 저장해. 그리고 사이트의 title/description/OG 메타태그도 더 매력적으로 다듬어라. 마케팅 담당이 메인으로.', false, !!settings.approval[channel]).catch(e => postAs(client, channel, thread_ts, LEAD, '마케팅 작업 오류: ' + String(e).slice(0, 300))).finally(() => { activeWork[channel] = null; });
       return;
