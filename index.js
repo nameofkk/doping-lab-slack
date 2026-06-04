@@ -363,8 +363,8 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   if (cl.code !== 0) { await postAs(client, channel, thread_ts, LEAD, '클론 실패ㅠ\n' + (cl.err || '').slice(0, 600)); return; }
   await sh(`git config user.name "doping-lab[bot]" && git config user.email "bot@doping.lab"`, dir);
   const intro = newProject
-    ? '이 빈 저장소에 다음 요청대로 프로젝트를 처음부터 만들어라. 적절한 기술스택을 직접 고르고 실행 가능한 형태로, README도 작성해라.'
-    : '이 저장소에서 다음 작업을 실제로 수행해라. 파일을 직접 수정하고, 필요하면 의존성 설치하고 테스트까지 돌려서 동작을 확인해라.';
+    ? '이 빈 저장소에 다음 요청대로 프로젝트를 처음부터 만들어라. 적절한 기술스택을 직접 고르고, README도 작성해라. 중요: 데모가 아니라 바로 상용으로 오픈해도 되는 수준으로 완성해라 — 실제 콘텐츠(로렘입숨·더미텍스트 금지), 에러·로딩·빈 상태 처리, 반응형 완비, 깨진 링크·콘솔 에러 없음, 환경변수 정리, npm run build 통과. 대충 만들고 끝내지 마.'
+    : '이 저장소에서 다음 작업을 실제로 수행해라. 파일을 직접 수정하고, 필요하면 의존성 설치하고 테스트까지 돌려서 동작을 확인해라. 상용 수준으로, 어설프게 끝내지 마라.';
   // 신규 프로젝트는 제작 전에 팀이 라이브로 기획 핑퐁(구어체) → 그 PRD로 제작
   const prd = newProject ? await runPRD(client, channel, thread_ts, task) : '';
   if (workCancel[channel]) { delete workCancel[channel]; await postAs(client, channel, thread_ts, LEAD, '기획 단계에서 중단했어. 아무것도 안 올렸어.'); return; }
@@ -385,6 +385,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
       if (!n) await postAs(client, channel, thread_ts, LEAD, (res.text || '').trim().slice(0, 1500));
       await verifyBuild(client, channel, thread_ts, dir, repo);
       await postAs(client, channel, thread_ts, LEAD, `다 끝냈어! ${repoUrl} (${WORK_BASE}에 반영). 빌드 확인이랑 라이브/스크린샷은 위에 우정잉이 올린 거 봐줘.`);
+      if (newProject) await handoffChecklist(client, channel, thread_ts, repo, task);
       return;
     }
     mainErr = (pushMain.err || '').slice(0, 250);
@@ -399,6 +400,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   if (!n2) await postAs(client, channel, thread_ts, LEAD, (res.text || '').trim().slice(0, 1500));
   await verifyBuild(client, channel, thread_ts, dir, repo);
   await postAs(client, channel, thread_ts, LEAD, `다 끝냈어! ${forcePR ? '승인모드라 PR로 올렸어 (머지하면 반영).' : 'PR로 올렸어.'}\nPR: ${url}`);
+  if (newProject) await handoffChecklist(client, channel, thread_ts, repo, task);
 }
 
 const ALL = TEAM.concat(LEAD);
@@ -625,6 +627,30 @@ async function checkServices(client, channel, announce = true) {
   await postAs(client, channel, undefined, sre, '서비스 헬스체크 결과\n' + lines.join('\n'));
   const down = list.filter(s => s.lastStatus === 'down');
   if (down.length) await postAs(client, channel, undefined, byName('윈터') || LEAD, `⚠️ ${down.length}개 다운됐어. 확인 필요: ${down.map(s => s.repo).join(', ')}. 라이브가 진짜 죽은 건지 내가 로그 봐야겠어.`);
+}
+
+// 제작 끝나고 핸드오프 — 에이전트가 끝낸 것(✅)과 사람만 할 수 있는 것(☐ 체크리스트)을 구분해서 보고
+async function handoffChecklist(client, channel, thread_ts, repo, task) {
+  const t = task || '';
+  const url = (services[repo] && services[repo].url) || null;
+  const done = [
+    '코드 제작 (PRD대로, 상용 수준 목표)',
+    '빌드 실제로 돌려서 통과 확인',
+    url ? `라이브 배포 (${url})` : '라이브 배포 시도 (주소는 위 메시지 참고)',
+    'SEO·공유 메타·sitemap·robots 넣음',
+    '개인정보처리방침·이용약관 초안 작성',
+    '서비스 대장 등록 + 매일 자동 헬스체크 켜둠',
+  ];
+  const todo = [];
+  todo.push('커스텀 도메인 (지금은 임시 주소야. 도메인 사두면 "도메인 연결해줘" 하면 내가 붙여줄게)');
+  if (!process.env.ANALYTICS_SNIPPET) todo.push('접속 통계(애널리틱스) 키 (방문자·유입 보려면 필요. 키 주면 코드에 심을게)');
+  if (!process.env.CONTACT_ENDPOINT) todo.push('문의폼 받는 곳 (이메일이나 폼서비스 연결 안 하면 문의가 어디로도 안 가)');
+  if (/결제|유료|구독|판매|쇼핑|커머스|payment|subscribe|pricing/i.test(t)) todo.push('결제·수익화 계정 (유료 기능 있으면 결제 연동에 너 계정 필요)');
+  if (/앱|android|ios|안드로이드|아이폰|모바일 ?앱|store/i.test(t)) todo.push('앱스토어·플레이스토어 제출 (개발자 계정 + 심사, 이건 너만 가능)');
+  todo.push('법무페이지에 실제 연락처·사업자 정보 채우기 (지금 TODO로 비워뒀어)');
+  todo.push('마케팅 채널 계정 (X·블로그·메일로 실제 발행하려면 그 계정/키)');
+  const fmt = (arr, mark) => arr.map(x => `${mark} ${x}`).join('\n');
+  await postAs(client, channel, thread_ts, LEAD, `자 정리할게. 우리가 할 수 있는 건 다 했고, 너만 할 수 있는 것만 추렸어.\n\n[우리가 끝낸 거]\n${fmt(done, '✅')}\n\n[너가 해줘야 진짜 상용 오픈 가능 — 체크리스트]\n${fmt(todo, '☐')}\n\n이 중에 내가 대신 할 수 있는 건(도메인 연결, 마케팅 자료, 통계 코드 심기 등) 말만 해주면 또 해줄게. 계정·결제·스토어 제출처럼 너만 되는 건 끝나면 알려줘, 그담 단계 이어갈게.`);
 }
 
 async function handle(event, client) {
