@@ -1136,7 +1136,7 @@ async function handle(event, client) {
     // 주기 스케줄 등록 (간격 또는 매일 특정시각)
     const daily = parseDaily(raw);
     const ims = daily ? null : parseIntervalMs(raw);
-    if ((daily || ims) && !/만들|제작|개발|처음부터|새\s*프로젝트|짜줘|짜봐|구현/.test(raw)) { // 신규제작 요청에 '매일' 들어간 거 스케줄로 오등록 방지, "하루한번 점검"은 포함
+    if ((daily || ims) && !/만들|제작|개발|처음부터|새\s*프로젝트|짜줘|짜봐|구현/.test(raw) && !/(앱|어플|사이트|웹사이트|홈페이지|랜딩|게임|서비스|플랫폼|툴|봇)\s*$/.test(raw)) { // 신규제작 요청에 '매일' 들어간 거 스케줄로 오등록 방지, "하루한번 점검"은 포함. 동사 없이 제품명사로 끝나면(예: "매주 장보기 리스트 앱") 빌드 요청 → 스케줄 제외
       const taskText = raw.replace(/(\d+\s*(초|분|시간|일|주)\s*마다|매일|매주|매시간|주기적으로|주기별로|(오전|아침|오후|저녁|밤)?\s*\d{1,2}\s*시(?:\s*\d{1,2}\s*분)?)/g, '').replace(/\s+/g, ' ').trim();
       const it = await classifyIntent(taskText || raw);
       const id = ++schedSeq;
