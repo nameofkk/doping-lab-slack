@@ -192,7 +192,7 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
 }
 
 // ── 실제 작업 모드: 레포 클론 → claude 코드 작업 → 브랜치 push → PR → 보고 ──
-let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {};
+let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {};
 // 답변/완료 시 요청자를 @멘션 (자리 비웠어도 핑 가게). 채널의 마지막 요청자 기준
 function mention(channel) { const u = lastRequester[channel]; return u ? `<@${u}> ` : ''; }
 function workStatusCtx(channel) {
@@ -775,6 +775,31 @@ async function guardBusy(client, channel, thread_ts) {
   await postAs(client, channel, thread_ts, LEAD, `지금 "${(activeWork[channel].task || '').slice(0, 40)}" 하는 중이라 그것부터 끝내고 할게. 급하면 "중단"이라고 해줘.`);
   return true;
 }
+// 작업 실행(activeWork 세팅 + runWork + 정리) 공통
+function launchWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName) {
+  activeWork[channel] = { task, started: Date.now() };
+  runWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName)
+    .catch(e => postAs(client, channel, thread_ts, LEAD, '작업 오류: ' + String(e).slice(0, 300)))
+    .finally(() => { activeWork[channel] = null; });
+}
+// 작업(신규 제작이든 기존 수정이든) 시작 전, 정말 방향이 갈리는 중요한 결정이 있으면 사용자에게 먼저 물어봄 (없으면 그냥 진행)
+async function planQuestions(task, newProject) {
+  try {
+    const r = await runClaude(`${newProject ? '새 프로젝트' : '기존 프로젝트 수정/작업'} 요청: ${JSON.stringify(task)}\n\n이걸 ${newProject ? '만들기' : '작업하기'} 전에 사용자한테 꼭 확인해야 할 중요한 결정이 있으면 1~3개만 질문으로 뽑아. 정말 방향이 크게 갈려서 잘못 정하면 다시 해야 하는 것만(예: 핵심 컨셉/타겟, 꼭 필요한 기능 범위, 톤·스타일, 플랫폼, 어떤 방식으로 구현할지 갈리는 선택). 사소하거나 네가 알아서 정해도 되는 건 절대 묻지 마 — 요청에 이미 명확하면 빈 배열. JSON만 출력: {"questions":["...","..."]}`, 'haiku');
+    const m = (r.text || '').match(/\{[\s\S]*\}/);
+    const o = m ? JSON.parse(m[0]) : {};
+    return Array.isArray(o.questions) ? o.questions.filter(q => typeof q === 'string' && q.trim()).slice(0, 3) : [];
+  } catch { return []; }
+}
+async function startWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName) {
+  const qs = await planQuestions(task, newProject);
+  if (qs.length) {
+    pendingProject[channel] = { repo, task, newProject, forcePR, projName, at: Date.now() };
+    await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오 좋다. ${newProject ? '만들기' : '작업'} 전에 이것만 먼저 정해주라:\n${qs.map((q, i) => `${i + 1}. ${q}`).join('\n')}\n\n답 주면 그대로 들어갈게. 알아서 정해도 되면 "알아서 해"라고 해도 돼.`);
+    return;
+  }
+  launchWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName);
+}
 async function handle(event, client) {
   if (!event || !event.ts) return;
   if (event.subtype || event.bot_id) return;          // 사람 메시지만 (봇/시스템/수정 무시 → 무한루프 방지)
@@ -786,8 +811,18 @@ async function handle(event, client) {
   if (!raw) return;
   recordMsg(channel, '사용자', raw);
   if (event.user) lastRequester[channel] = event.user; // 완료 시 이 사람을 @멘션
-  ensureMembers(channel).catch(() => {});
   const thread_ts = event.thread_ts;
+  // 새 프로젝트 시작 전 물어본 질문에 대한 답 → 그 답대로 기획 시작
+  if (pendingProject[channel]) {
+    if (/^(취소|그만|안\s?해|관둬|됐어|아니[ ,]?다|중단|멈춰|스톱|stop)/i.test(raw)) { delete pendingProject[channel]; await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, 그건 접을게.`); return; }
+    if (!activeWork[channel]) {
+      const pp = pendingProject[channel]; delete pendingProject[channel];
+      await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이 그렇게 갈게, 바로 들어간다.`);
+      launchWork(client, channel, thread_ts, pp.repo, `${pp.task}\n\n[사용자가 정해준 방향]\n${raw}`, pp.newProject, pp.forcePR, pp.projName);
+      return;
+    }
+  }
+  ensureMembers(channel).catch(() => {});
   try {
     // 중단/취소 — 작업 트리거 금지 + 진행 중이면 push 전에 중단
     if (/하지\s?마|하지말|그만|중단|멈춰|스톱|stop|아니\s?야|취소해|관둬/i.test(raw)) {
@@ -850,8 +885,7 @@ async function handle(event, client) {
       if (rr) { repo = rr[1]; rest = rr[2]; }
       const newProject = !rr && /(포트폴리오|portfolio|홈페이지|랜딩|사이트|새\s*프로젝트|처음부터|new\s*project)/i.test(rest);
       if (await guardBusy(client, channel, thread_ts)) return;
-      activeWork[channel] = { task: rest, started: Date.now() };
-      runWork(client, channel, event.thread_ts || event.ts, repo, rest, newProject, !!settings.approval[channel]).catch(e => postAs(client, channel, thread_ts, LEAD, '작업 오류: ' + String(e).slice(0, 300))).finally(() => { activeWork[channel] = null; });
+      startWork(client, channel, event.thread_ts || event.ts, repo, rest, newProject, !!settings.approval[channel]);
       return;
     }
     const m = raw.match(/^(기획|토론|회의)\s*[:：]\s*([\s\S]*)$/);
@@ -1010,8 +1044,8 @@ async function handle(event, client) {
     if (intent && intent.action === 'work' && intent.task) {
       const newProject = !!intent.newProject;
       const repo = newProject ? WORK_DEFAULT_REPO : resolveR(intent.repo);
-      activeWork[channel] = { task: intent.task, started: Date.now() };
-      runWork(client, channel, event.thread_ts || event.ts, repo, intent.task, newProject, !!settings.approval[channel], intent.name).catch(e => postAs(client, channel, thread_ts, LEAD, '작업 오류: ' + String(e).slice(0, 300))).finally(() => { activeWork[channel] = null; });
+      // 시작 전에 정말 애매한 중요 결정 있으면 먼저 물어보고(없으면 바로 진행) — 신규·수정 둘 다
+      startWork(client, channel, event.thread_ts || event.ts, repo, intent.task, newProject, !!settings.approval[channel], intent.name);
       return;
     }
     if (intent && intent.action === 'report' && intent.task) {
