@@ -77,3 +77,6 @@
 - 증상: 작업A를 중단(pausedWork=A) 후 작업B를 새로 하면, pausedWork에 A가 남아 나중에 "이어서" 하면 B가 아니라 옛날 A가 재개됨.
 - 수정: launchWork(새 작업 시작) 시 pausedWork[channel] 삭제 → 새 작업이 시작되면 옛 중단작업은 잊음.
 - 점검완료(이상없음): resolveR("__named__")는 named가 truthy일 때만 설정돼 null 위험 없음. 스케줄 work는 forcePR=true로 자율변경 안전. selfHeal 대상(doping-lab-slack)은 build/index.html 없어 verifyBuild→liveCheck 안 돎(배포·스크린샷 시도 안 함). mention은 launchWork에서 by 스냅샷.
+
+### 저빈도 감시 틱5: 이상없음
+- persist load 폴백·botClient 할당순서·세마포어 release·distributeReport/ROLE_MAP·MAX_CLAUDE큐 전부 정독 확인. 새 버그 없음, 코드 변경 없음.
