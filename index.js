@@ -58,7 +58,19 @@ const SELF = '\n\n[너에 대한 사실 — 물어보면 이것만 정직하게,
 // 작업/조사 보고용 — 마크다운 금지 + 사람 말투 (길이는 제한 안 함)
 const PLAIN = '\n\n[형식·말투 규칙] 마크다운 절대 금지: 별표(**), 샵(#), 표(|), 대시(—,–,ㅡ). 딱딱한 보고체("~다", "~상태다", "~된다", "~음") 쓰지 말고, 친한 동료한테 말하듯 편한 구어체로 써(예: ~야, ~거든, ~더라, ~인데). AI 말투(말씀드리면, ~할 수 있습니다) 금지. 내용은 충분히 쓰되 줄바꿈으로 읽기 쉽게.';
 // 디자인 작업 시 항상 적용 — 사용자가 늘 쓰던 디자인 기준(PRD 기반)
-const DESIGN_RULE = '\n\n[디자인 규칙 — 항상 적용] UI·화면·프론트·디자인 작업이면 코드 만지기 전에 반드시: (1) 그 프로젝트의 design-system 폴더(MASTER.md, pages/[페이지].md)와 .impeccable.md(있으면)를 먼저 읽고 색·타이포(Pretendard 700/600/500/400)·간격(4px 그리드)·radius(최소 12px)·그림자(claymorphism)를 엄격히 따른다. 페이지별 파일이 MASTER보다 우선. (2) impeccable.style 기준으로 AI slop 안티패턴을 절대 만들지 않는다: 이모지를 아이콘으로 쓰기 금지(Lucide 같은 실제 아이콘 사용), gradient hero 금지, nested cards 금지, 텍스트 대비 4.5:1 이상, 모든 클릭요소에 cursor-pointer, 한국어 UI(브랜드명 제외), 빈 상태 화면엔 캐릭터/안내 꼭, prefers-reduced-motion 존중, 반응형 375/768/1024/1440px. (3) 끝나면 가능하면 Playwright로 스크린샷 찍어 확인.';
+const DESIGN_RULE = `
+
+[디자인 규칙 — UI·화면·프론트·디자인 작업이면 코드 짜기 전에 반드시 이 순서로. 출처: Anthropic 공식 frontend-design 스킬의 frontend_aesthetics + impeccable.style]
+0) 무드 선언 먼저: 코드 짜기 전에 "이번 화면의 방향(레퍼런스 1~2개, 폰트, 지배색+강조색, 모션 컨셉)"을 한두 줄로 정해서 먼저 말해라. 방향 없이 바로 코딩하면 그게 AI slop의 원인이다. 절대 금지.
+1) 기존 디자인시스템이 최우선: 그 프로젝트에 design-system 폴더(MASTER.md, pages/[페이지].md)나 .impeccable.md가 있으면 먼저 읽고 거기 색·타이포·간격·radius·그림자를 그대로 따른다(페이지 파일이 MASTER보다 우선). 기존 시스템이 있으면 아래 2)의 폰트/컬러 자유선택보다 기존 시스템이 항상 이긴다.
+2) 기존 시스템이 없는 신규 디자인일 때만 — '뻔한 AI 디자인'을 피해 과감하게 정한다:
+   타이포: Inter/Roboto/Open Sans/Lato/Arial/시스템폰트/Space Grotesk 같은 뻔한 거 절대 금지. 무드로 골라라. 코드감=JetBrains Mono·Fira Code, 에디토리얼=Playfair Display·Fraunces·Crimson Pro, 스타트업=Clash Display·Satoshi·Cabinet Grotesk, 테크=IBM Plex, 개성=Bricolage Grotesque·Newsreader. 대비 크게(100/200 vs 800/900), 크기 점프 3배 이상. 폰트 하나 정해서 결단력 있게, Google Fonts 로드. 코딩 전에 고른 폰트를 말해라.
+   컬러: 하나의 일관된 무드에 올인. CSS 변수로 통일. 균등하게 퍼진 소심한 팔레트 말고 '지배색 + 날카로운 강조색'. 흰 배경에 보라 그라데이션 같은 제일 흔한 AI 티는 절대 금지.
+   모션: 흩뿌리지 말고 임팩트 한 방. 페이지 로드 때 staggered reveal(animation-delay)이 자잘한 마이크로인터랙션 여러개보다 낫다. HTML은 CSS-only, React는 Motion 라이브러리.
+   배경: 단색만 깔지 말고 분위기/깊이를 줘라. 은은한 CSS 그라데이션 레이어, 기하 패턴, 맥락에 맞는 효과.
+3) AI slop 안티패턴 금지(impeccable.style): 이모지를 아이콘으로 쓰기 금지(Lucide 등 실제 아이콘), nested cards 금지, 예측가능한 3카드 그리드 같은 뻔한 레이아웃 금지, 텍스트 대비 4.5:1 이상, 모든 클릭요소 cursor-pointer, 한국어 UI(브랜드명 제외), 빈 상태 화면엔 캐릭터/안내, prefers-reduced-motion 존중, 반응형 375/768/1024/1440px.
+4) 한 번에 다 만들지 말고 컴포넌트 단위로(히어로 → 카드 → 가격/기능 → 푸터 순). shadcn/ui 쓰면 기존 토큰·패턴 따르고 직접 space-y 남발 금지.
+5) 끝나면 Playwright로 실제 스크린샷 찍어 눈으로 확인. "될 것이다/잘 나왔을 것이다" 금지, 못 본 건 미확인이라고 말해라.`;
 
 const app = new App({ token: SLACK_BOT_TOKEN, appToken: SLACK_APP_TOKEN, socketMode: true });
 const clientCache = new Map();
