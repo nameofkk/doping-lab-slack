@@ -321,6 +321,24 @@ async function liveCheck(client, channel, thread_ts, dir, repo) {
   finally { if (srv) try { srv.kill('SIGKILL'); } catch (_) {} }
 }
 
+// 품질 게이트 — 빌드 통과 후 테스트 실행 + 의존성 취약점 스캔 + 우정잉 코드/보안 리뷰
+async function qaGate(client, channel, thread_ts, dir) {
+  const qa = byName('우정잉') || LEAD;
+  // 1) 테스트 (test 스크립트가 실제로 있고 기본 placeholder가 아니면)
+  const ht = await sh(`grep -q '"test"' package.json && ! grep -q 'no test specified' package.json && echo yes || echo no`, dir);
+  if (ht.out.includes('yes')) {
+    const tr = await sh('npm test 2>&1', dir);
+    await postAs(client, channel, thread_ts, qa, tr.code === 0 ? '테스트도 돌려봤어, 다 통과했어.' : '테스트 돌렸더니 일부 깨졌어. 이거 짚고 가자:\n' + (tr.out || '').slice(-500));
+  }
+  // 2) 의존성 취약점 스캔
+  const au = await sh('npm audit --omit=dev 2>&1 | tail -10', dir);
+  if (/0 vulnerabilities/.test(au.out)) await postAs(client, channel, thread_ts, qa, '의존성 취약점 스캔도 깨끗해.');
+  else if ((au.out || '').trim()) await postAs(client, channel, thread_ts, qa, '의존성에 취약점 좀 떴어. 심각한 건 잡자:\n' + au.out.slice(-400));
+  // 3) 코드/보안 리뷰 (진짜 문제만)
+  const rev = await runClaude(`이 저장소를 보안·버그 관점에서 빠르게 리뷰해라. 진짜 문제만 짚어 (하드코딩된 시크릿/키, 입력검증 누락, 명백한 버그, 인증·권한 허점, 위험한 패턴). 없으면 솔직히 "큰 문제 없음"이라고 해. 지어내지 마.${PLAIN}`, 'sonnet', dir, WORK_PERMISSION_MODE, 180000);
+  if (rev.text && rev.ok !== false && !rev.limited) await postAs(client, channel, thread_ts, qa, '코드 보안/버그 리뷰했어:\n' + rev.text.trim().slice(0, 900));
+}
+
 // 제작 후 실제 빌드 검증 — npm 설치+빌드를 진짜로 돌려서 통과/실패를 정직하게 보고. 깨지면 1회 수정 시도.
 async function verifyBuild(client, channel, thread_ts, dir, repo) {
   const has = await sh('test -f package.json && grep -q \'"build"\' package.json && echo yes || echo no', dir);
@@ -329,7 +347,7 @@ async function verifyBuild(client, channel, thread_ts, dir, repo) {
   await postAs(client, channel, thread_ts, qa, '잠깐, 코드만 올리고 끝내면 안 되지. 실제로 빌드되는지 내가 돌려볼게.');
   await sh('npm install --no-audit --no-fund 2>&1 | tail -3', dir);
   let bd = await sh('npm run build 2>&1', dir);
-  if (bd.code === 0) { await postAs(client, channel, thread_ts, qa, '빌드 통과 확인했어. 실제로 컴파일까지 돼.'); await liveCheck(client, channel, thread_ts, dir, repo); return; }
+  if (bd.code === 0) { await postAs(client, channel, thread_ts, qa, '빌드 통과 확인했어. 실제로 컴파일까지 돼.'); await qaGate(client, channel, thread_ts, dir); await liveCheck(client, channel, thread_ts, dir, repo); return; }
   // 실패 → 1회 자동 수정
   await postAs(client, channel, thread_ts, qa, '빌드가 깨졌네. 에러 보고 한 번 고쳐볼게.\n' + (bd.out || '').slice(-500));
   const fix = await runClaude(`이 저장소 빌드가 다음 에러로 실패했어. 원인 찾아서 실제로 고쳐. 추측 말고 에러 그대로 보고 고쳐라.\n\n[에러]\n${(bd.out || '').slice(-2500)}`, 'sonnet', dir, WORK_PERMISSION_MODE, 300000);
@@ -367,7 +385,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   if (cl.code !== 0) { await postAs(client, channel, thread_ts, LEAD, '클론 실패ㅠ\n' + (cl.err || '').slice(0, 600)); return; }
   await sh(`git config user.name "doping-lab[bot]" && git config user.email "bot@doping.lab"`, dir);
   const intro = newProject
-    ? '이 빈 저장소에 다음 요청대로 프로젝트를 처음부터 만들어라. 적절한 기술스택을 직접 고르고, README도 작성해라. 중요: 데모가 아니라 바로 상용으로 오픈해도 되는 수준으로 완성해라 — 실제 콘텐츠(로렘입숨·더미텍스트 금지), 에러·로딩·빈 상태 처리, 반응형 완비, 깨진 링크·콘솔 에러 없음, 환경변수 정리, npm run build 통과. 대충 만들고 끝내지 마.'
+    ? '이 빈 저장소에 다음 요청대로 프로젝트를 처음부터 만들어라. 적절한 기술스택을 직접 고르고, README도 작성해라. 중요: 데모가 아니라 바로 상용으로 오픈해도 되는 수준으로 완성해라 — 실제 콘텐츠(로렘입숨·더미텍스트 금지), 에러·로딩·빈 상태 처리, 반응형 완비, 깨진 링크·콘솔 에러 없음, 환경변수 정리, npm run build 통과. 핵심 로직엔 테스트 코드도 짜서 npm test로 돌려 통과시키고, CHANGELOG.md에 이번에 만든 걸 적어라. 대충 만들고 끝내지 마.'
     : '이 저장소에서 다음 작업을 실제로 수행해라. 파일을 직접 수정하고, 필요하면 의존성 설치하고 테스트까지 돌려서 동작을 확인해라. 상용 수준으로, 어설프게 끝내지 마라.';
   // 신규 프로젝트는 제작 전에 팀이 라이브로 기획 핑퐁(구어체) → 그 PRD로 제작
   const prd = newProject ? await runPRD(client, channel, thread_ts, task) : '';
