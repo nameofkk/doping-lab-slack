@@ -203,6 +203,11 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
 // ── 실제 작업 모드: 레포 클론 → claude 코드 작업 → 브랜치 push → PR → 보고 ──
 let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {};
 function drainFeedback(channel) { const f = (feedback[channel] || []).join('\n'); feedback[channel] = []; return f; } // 작업 중 사용자가 끼어든 수정요청 모아서 반환
+// 명확한 "중단/취소 명령"일 때만 true (문장 속에 '중단','스톱' 단어가 섞인 일반 요청은 제외 — "중단했던 거 이어서", "스톱워치 추가" 등 오작동 방지)
+function isStopMsg(s) {
+  const t = (s || '').trim();
+  return /^(그만(해|하자|좀|둬)?|중단(해|하자|시켜|해줘)?|멈춰(줘)?|스톱|stop|취소(해|해줘)?|관둬|일단\s*(중단|그만|멈춰|스톱))$/i.test(t) || (t.length <= 6 && /(그만|중단|멈춰|스톱|stop|취소)/i.test(t));
+}
 // 답변/완료 시 요청자를 @멘션 (자리 비웠어도 핑 가게). 채널의 마지막 요청자 기준
 function mention(channel) { const u = (activeWork[channel] && activeWork[channel].by) || lastRequester[channel]; return u ? `<@${u}> ` : ''; }
 function workStatusCtx(channel) {
@@ -882,7 +887,7 @@ async function handle(event, client) {
   const thread_ts = event.thread_ts;
   // 새 프로젝트 시작 전 물어본 질문에 대한 답 → 그 답대로 기획 시작
   if (pendingProject[channel]) {
-    if (/^(취소|그만|안\s?해|관둬|됐어|아니[ ,]?다|중단|멈춰|스톱|stop)/i.test(raw)) { delete pendingProject[channel]; persistPending(); await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, 그건 접을게.`); return; }
+    if (isStopMsg(raw) || /^(안\s?해|관둬|됐어|아니[ ,]?다)$/.test(raw.trim())) { delete pendingProject[channel]; persistPending(); await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, 그건 접을게.`); return; }
     if (!activeWork[channel]) {
       const pp = pendingProject[channel]; delete pendingProject[channel]; persistPending();
       await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이 그렇게 갈게, 바로 들어간다.`);
@@ -892,8 +897,8 @@ async function handle(event, client) {
   }
   ensureMembers(channel).catch(() => {});
   try {
-    // 중단/취소 — 작업 트리거 금지 + 진행 중이면 push 전에 중단
-    if (/하지\s?마|하지말|그만|중단|멈춰|스톱|stop|아니\s?야|취소해|관둬/i.test(raw)) {
+    // 중단/취소 — 명확한 중단 명령일 때만 (문장 속 '중단/스톱' 부분일치로 오작동하던 거 수정)
+    if (isStopMsg(raw)) {
       workCancel[channel] = true;
       await postAs(client, channel, thread_ts, LEAD, '오케이 멈출게. 진행 중이던 거 있으면 main엔 안 올리고 중단할게.');
       return;
