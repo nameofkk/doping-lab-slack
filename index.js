@@ -161,6 +161,15 @@ function ghPost(path, payload) {
     req.on('error', () => resolve(null)); req.write(data); req.end();
   });
 }
+function ghGet(path) {
+  return new Promise(resolve => {
+    const req = https.request({ hostname: 'api.github.com', path, method: 'GET',
+      headers: { Authorization: `token ${GITHUB_TOKEN}`, Accept: 'application/vnd.github+json', 'User-Agent': 'doping-lab' } },
+      r => { let b = ''; r.on('data', d => b += d); r.on('end', () => { try { resolve(JSON.parse(b)); } catch { resolve(null); } }); });
+    req.on('error', () => resolve(null)); req.end();
+  });
+}
+const GH_OWNER = 'nameofkk';
 async function runWork(client, channel, thread_ts, repo, task, newProject, forcePR) {
   if (!GITHUB_TOKEN) { await postAs(client, channel, thread_ts, LEAD, 'GITHUB_TOKEN이 아직 없어서 작업 모드는 못 돌려요. 토큰만 넣으면 바로 돼요.'); return; }
   const id = ++workSeq;
@@ -171,8 +180,13 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
       : ((task.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 28)) || `doping-app-${id}`);
     await postAs(client, channel, thread_ts, LEAD, `🆕 새 프로젝트 만들게요: ${name}\n요청: ${task}\nGitHub에 레포 만들고 처음부터 짜볼게요. 좀 걸려요.`);
     const created = await ghPost('/user/repos', { name, private: true, auto_init: true, description: '도핑연구소 자동 생성' });
-    if (!created || !created.full_name) { await postAs(client, channel, thread_ts, LEAD, '레포 생성 실패ㅠ (같은 이름이 이미 있을 수도)\n' + JSON.stringify(created || {}).slice(0, 250)); return; }
-    repo = created.full_name;
+    if (created && created.full_name) { repo = created.full_name; }
+    else {
+      // 같은 이름 레포가 이미 있으면 새로 만들지 말고 그걸 이어서 씀
+      const existing = await ghGet(`/repos/${GH_OWNER}/${name}`);
+      if (existing && existing.full_name) { repo = existing.full_name; await postAs(client, channel, thread_ts, LEAD, `${name} 레포가 이미 있어서 그걸 이어서 채울게.`); }
+      else { await postAs(client, channel, thread_ts, LEAD, '레포 생성 실패ㅠ\n' + JSON.stringify(created || {}).slice(0, 250)); return; }
+    }
   } else {
     await postAs(client, channel, thread_ts, LEAD, `🛠️ 작업 받았어요\n레포: ${repo}\n할 일: ${task}\n클론하고 코드 손본 다음 ${WORK_BASE}에 바로 반영할게요. 좀 걸려요.`);
   }
