@@ -403,6 +403,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   if (newProject && prd === null) return; // 한도/중단 → runPRD가 이미 안내함, 제작 안 들어감
   if (newProject) await postAs(client, channel, thread_ts, LEAD, '좋아 PRD 확정됐고, 이제 이 PRD 그대로 실제 코드 짤게. 좀 걸려.');
   const res = await runClaude(`${intro}${rulesCtx(channel)}${PLAIN}${DESIGN_RULE}${newProject ? LAUNCH_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}\n\n요청: ${task}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000);
+  if (res.limited) { await postAs(client, channel, thread_ts, LEAD, '⏳ 제작 중에 클로드 사용량 한도에 걸렸어. 지금까지 만든 건 안 올렸어, 한도 리셋되면 이어서 만들게.'); return; }
   await sh('git add -A', dir);
   const repoUrl = `https://github.com/${repo}`;
   const chk = await sh('git diff --cached --quiet; echo $?', dir);
@@ -838,7 +839,9 @@ async function handle(event, client) {
     }
     // 특정 단어 없어도 AI가 의도 판단 → 작업이면 알아서 수행
     const ctx = recentCtx(channel);
-    const intent = await classifyIntent(raw, ctx);
+    // 짧은 인사·맞장구는 분류기(haiku) 안 돌리고 바로 잡담 처리 → 사용량 절약
+    const trivial = raw.length <= 8 && /^(ㅎㅇ|하이|안녕(하세요)?|hi|hello|헬로|ㅇㅇ|ㅇㅋ|오케이|오키|ok|굿|good|ㄳ|고마워|고맙|땡큐|thx|ㅋㅋ+|ㅎㅎ+|ㄷㄷ+|응|넹|네+|예+|좋아|좋네|오+|와+|헐)$/i.test(raw);
+    const intent = trivial ? { action: 'chat' } : await classifyIntent(raw, ctx);
     if (['work', 'report', 'debate'].includes(intent && intent.action) && !canCommand(event.user)) {
       await postAs(client, channel, thread_ts, LEAD, '그건 지정된 사람만 시킬 수 있어. ("권한 나만"으로 잠그거나 "권한 모두"로 풀 수 있어)');
       return;
