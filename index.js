@@ -310,11 +310,11 @@ async function railwayDeploy(client, channel, thread_ts, dir, repo) {
   // 업로드에서 무거운/불필요 파일 제외 (빌드 산출물 node_modules·.next·.git 등)
   await sh(`printf 'node_modules\\n.next\\n.git\\ndist\\nbuild\\n.turbo\\n' > .railwayignore`, dir);
   // 계정토큰이면 빌드 전용 프로젝트(BUILDS_PROJECT_ID)에 링크 (컨테이너 자동주입 RAILWAY_PROJECT_ID와 분리). </dev/null로 대화형 멈춤 방지
-  if (process.env.BUILDS_PROJECT_ID) await sh(`RAILWAY_TOKEN= railway link --project ${process.env.BUILDS_PROJECT_ID} --environment ${process.env.BUILDS_ENV || 'production'} </dev/null 2>&1`, dir);
+  if (process.env.BUILDS_PROJECT_ID) await sh(`env -u RAILWAY_TOKEN railway link --project ${process.env.BUILDS_PROJECT_ID} --environment ${process.env.BUILDS_ENV || 'production'} </dev/null 2>&1`, dir);
   // railway up --service 가 서비스를 자동 생성하므로 별도 add 안 함 (add는 대화형이라 멈춤)
-  const up = await sh(`RAILWAY_TOKEN= railway up --service ${svc} --ci </dev/null 2>&1`, dir);
+  const up = await sh(`env -u RAILWAY_TOKEN railway up --service ${svc} --ci </dev/null 2>&1`, dir);
   if (up.code !== 0) { await postAs(client, channel, thread_ts, arch, '레일웨이 배포가 막혔어:\n' + ((up.out || up.err) || '').slice(-500)); return null; }
-  const dom = await sh(`RAILWAY_TOKEN= railway domain --service ${svc} </dev/null 2>&1`, dir);
+  const dom = await sh(`env -u RAILWAY_TOKEN railway domain --service ${svc} </dev/null 2>&1`, dir);
   const m = (dom.out || '').match(/https?:\/\/[^\s'"]+/);
   const url = m ? m[0] : null;
   if (url) await postAs(client, channel, thread_ts, arch, `라이브 올라갔어: ${url}`);
@@ -537,6 +537,14 @@ function resolveRepo(hint) {
   if (hint.includes('/')) return hint;
   const m = { sponono: 'nameofkk/sponono', 스포노노: 'nameofkk/sponono', wewantpeace: 'nameofkk/wewantpeace', 위원트피스: 'nameofkk/wewantpeace', myungjak: 'nameofkk/myungjak', 명작: 'nameofkk/myungjak', bot: 'nameofkk/doping-lab-slack', 봇: 'nameofkk/doping-lab-slack', 도핑봇: 'nameofkk/doping-lab-slack' };
   return m[hint] || m[hint.toLowerCase()] || `nameofkk/${hint}`;
+}
+// 메시지에서 명시된 레포 이름을 뽑아냄 (분류기가 모르는 doping-portfolio 같은 것도 인식)
+function extractRepo(raw) {
+  let m = raw.match(/\b([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+)\b/); if (m) return m[1]; // owner/repo
+  const svc = svcList().find(s => raw.includes(s.repo.split('/').pop())); if (svc) return svc.repo; // 등록된 서비스
+  m = raw.match(/\b(doping-[a-z0-9-]+|[a-z0-9][a-z0-9-]{2,}-(?:game|app|web|site|portfolio|tool|bot))\b/i); // doping-* 또는 -game/-app 등으로 끝나는 토큰
+  if (m) return `${GH_OWNER}/${m[1].toLowerCase()}`;
+  return null;
 }
 async function runReport(client, channel, thread_ts, reporter, repo, task) {
   if (!GITHUB_TOKEN) { await postAs(client, channel, thread_ts, reporter, 'GITHUB_TOKEN이 없어서 조사를 못 해요.'); return; }
@@ -763,12 +771,11 @@ async function handle(event, client) {
     if (/^태스크\s*(목록|보드|리스트)/.test(raw)) { const l = tasks[channel] || []; await postAs(client, channel, thread_ts, LEAD, l.length ? '📋 할 일 보드:\n' + l.map(t => `#${t.id} [${t.done ? '완료' : '진행'}] ${t.text}`).join('\n') : '등록된 태스크가 없어.'); return; }
     if ((tm = raw.match(/^태스크\s*완료\s*(\d+)/))) { const t = (tasks[channel] || []).find(x => x.id === parseInt(tm[1])); if (t) { t.done = true; persistTasks(); await postAs(client, channel, thread_ts, LEAD, `#${tm[1]} 완료 처리했어.`); } else await postAs(client, channel, thread_ts, LEAD, '그 태스크 못 찾겠어.'); return; }
     if ((tm = raw.match(/^태스크\s*삭제\s*(\d+)/))) { tasks[channel] = (tasks[channel] || []).filter(x => x.id !== parseInt(tm[1])); persistTasks(); await postAs(client, channel, thread_ts, LEAD, `#${tm[1]} 삭제했어.`); return; }
-    // 배포 — 특정/직전 레포를 Railway에 다시 올림
-    if (/배포\s*(해|하자|해줘|좀|시작|go|다시|재)/i.test(raw) || /재배포|다시\s*배포/.test(raw)) {
+    // 배포 — 특정/직전 레포를 Railway에 다시 올림 (단, 고치고/만들고 같은 작업 의도가 있으면 여기서 안 잡고 작업으로 보냄)
+    if ((/배포\s*(해|하자|해줘|좀|시작|go|다시|재)/i.test(raw) || /재배포|다시\s*배포/.test(raw)) && !/고치|고쳐|수정|버그|만들|추가|개선|구현|바꿔|바꾸|업데이트|기능|넣어|반영/.test(raw)) {
       const win = byName('윈터') || LEAD;
       if (!process.env.RAILWAY_API_TOKEN) { await postAs(client, channel, thread_ts, win, '라이브 배포는 RAILWAY_API_TOKEN 있어야 돼. 넣으면 바로 해줄게.'); return; }
-      const match = svcList().find(s => raw.includes(s.repo.split('/').pop()));
-      const target = (match && match.repo) || lastRepo[channel];
+      const target = extractRepo(raw) || lastRepo[channel];
       if (!target) { await postAs(client, channel, thread_ts, win, '어느 레포 배포할지 알려줘. (만든 적 있는 거면 "서비스 목록"으로 이름 확인돼)'); return; }
       if (await guardBusy(client, channel, thread_ts)) return;
       activeWork[channel] = { task: '재배포 ' + target, started: Date.now() };
@@ -820,7 +827,7 @@ async function handle(event, client) {
     // 의존성 업데이트 → 안전하게 올리고 빌드 확인 후 PR
     if (/(의존성|디펜던시|패키지|dependency).*(업데이트|갱신|올려|올리|update)/.test(raw)) {
       const sec = byName('우정잉') || LEAD;
-      const target = (svcList().find(s => raw.includes(s.repo.split('/').pop())) || {}).repo || lastRepo[channel];
+      const target = extractRepo(raw) || lastRepo[channel];
       if (!target) { await postAs(client, channel, thread_ts, sec, '어느 레포 의존성 올릴지 알려줘.'); return; }
       if (await guardBusy(client, channel, thread_ts)) return;
       activeWork[channel] = { task: '의존성 업데이트 ' + target, started: Date.now() };
@@ -830,7 +837,7 @@ async function handle(event, client) {
     // 의존성 점검 — 취약점(npm audit) + 오래된 패키지(npm outdated) 리포트
     if (/(의존성|디펜던시|dependency|패키지|취약점).*(점검|확인|스캔|체크|봐|상태)/.test(raw)) {
       const sec = byName('우정잉') || LEAD;
-      const target = (svcList().find(s => raw.includes(s.repo.split('/').pop())) || {}).repo || lastRepo[channel];
+      const target = extractRepo(raw) || lastRepo[channel];
       if (!target) { await postAs(client, channel, thread_ts, sec, '어느 레포 의존성 볼지 알려줘. ("서비스 목록"으로 이름 확인돼)'); return; }
       if (!GITHUB_TOKEN) { await postAs(client, channel, thread_ts, sec, 'GITHUB_TOKEN이 없어서 못 까봐.'); return; }
       if (await guardBusy(client, channel, thread_ts)) return;
@@ -854,14 +861,13 @@ async function handle(event, client) {
     if (/재시작|리스타트|restart/i.test(raw)) {
       const win = byName('윈터') || LEAD;
       if (!process.env.RAILWAY_API_TOKEN) { await postAs(client, channel, thread_ts, win, '재시작은 RAILWAY_API_TOKEN 있어야 돼.'); return; }
-      const match = svcList().find(s => raw.includes(s.repo.split('/').pop()));
-      const target = (match && match.repo) || lastRepo[channel];
+      const target = extractRepo(raw) || lastRepo[channel];
       if (!target) { await postAs(client, channel, thread_ts, win, '어느 서비스 재시작할지 알려줘 (레포 이름).'); return; }
       const svc = (target.split('/').pop() || '').replace(/[^a-zA-Z0-9-]/g, '').slice(0, 28);
       await postAs(client, channel, thread_ts, win, `${svc} 재시작할게.`);
       (async () => {
-        const link = process.env.BUILDS_PROJECT_ID ? `RAILWAY_TOKEN= railway link --project ${process.env.BUILDS_PROJECT_ID} --environment ${process.env.BUILDS_ENV || 'production'} </dev/null >/dev/null 2>&1; ` : '';
-        const r = await sh(`${link}RAILWAY_TOKEN= railway restart --service ${svc} </dev/null 2>&1`, '/tmp');
+        const link = process.env.BUILDS_PROJECT_ID ? `env -u RAILWAY_TOKEN railway link --project ${process.env.BUILDS_PROJECT_ID} --environment ${process.env.BUILDS_ENV || 'production'} </dev/null >/dev/null 2>&1; ` : '';
+        const r = await sh(`${link}env -u RAILWAY_TOKEN railway restart --service ${svc} </dev/null 2>&1`, '/tmp');
         await postAs(client, channel, thread_ts, win, r.code === 0 ? '재시작 보냈어. 곧 다시 뜰 거야.' : '재시작이 막혔어:\n' + ((r.out || r.err) || '').slice(-300));
       })();
       return;
@@ -927,9 +933,12 @@ async function handle(event, client) {
       await postAs(client, channel, thread_ts, LEAD, `지금 "${(activeWork[channel].task || '').slice(0, 40)}" 하는 중이라 그것부터 끝내고 할게. 급하면 "중단"이라고 해줘.`);
       return;
     }
-    const resolveR = (r) => r === '__last__' ? lastRepo[channel] : resolveRepo(r);
+    const named = extractRepo(raw); // 메시지에 명시된 레포(doping-portfolio 등)
+    const resolveR = (r) => r === '__last__' ? lastRepo[channel] : r === '__named__' ? named : resolveRepo(r);
     // 새로 만들/개발하라는 신호가 있으면 lastRepo로 끌고가지 말고 무조건 새 프로젝트로 (직전 레포 오염 방지)
     if (intent && intent.action === 'work' && /\b만들|만들어|만들고|제작|개발|새로 ?만|하나 ?만들|새 게임|새 앱|새 사이트|새 서비스|오마주|클론(?!해)/.test(raw)) { intent.newProject = true; intent.repo = 'new'; }
+    // 명시된 레포가 있고 신규생성이 아니면 그 레포로 (분류기가 모르는 이름도 인식 → 엉뚱한 lastRepo 방지)
+    if (named && intent && ['work', 'report', 'debate'].includes(intent.action) && !intent.newProject) { intent.repo = '__named__'; }
     if (['work', 'report', 'debate'].includes(intent && intent.action) && intent.repo === 'unknown') {
       // 이 채널이 방금 다룬 레포가 있으면 그걸로 이어감 (추측이 아니라 직전 문맥 — "이거 보여줘/고쳐줘" 같은 후속)
       if (lastRepo[channel]) { intent.repo = '__last__'; intent.newProject = false; }
