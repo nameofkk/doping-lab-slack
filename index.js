@@ -612,7 +612,9 @@ function resolveRepo(hint) {
 }
 // 메시지에서 명시된 레포 이름을 뽑아냄 (분류기가 모르는 doping-portfolio 같은 것도 인식)
 function extractRepo(raw) {
-  let m = raw.match(/\b([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+)\b/); if (m) return m[1]; // owner/repo
+  // owner/repo — 단, client/server·24/7·and/or·TCP/IP 같은 일반 표현 오탐 방지(소유자 명시되거나 레포명에 하이픈/숫자 있는 진짜 레포꼴만)
+  let m = raw.match(/\b([A-Za-z][\w.-]{1,38}\/[A-Za-z0-9][\w.-]{1,38})\b/);
+  if (m && (/^nameofkk\//i.test(m[1]) || /[-\d]/.test(m[1].split('/')[1]))) return m[1];
   for (const k of ['sponono', '스포노노', 'wewantpeace', '위원트피스', 'myungjak', '명작']) if (raw.includes(k)) return resolveRepo(k); // 알려진 프로젝트 별칭
   const svc = svcList().find(s => raw.includes(s.repo.split('/').pop())); if (svc) return svc.repo; // 등록된 서비스
   m = raw.match(/\b(doping-[a-z0-9-]+|[a-z0-9][a-z0-9-]{2,}-(?:game|app|web|site|portfolio|tool|bot))\b/i); // doping-* 또는 -game/-app 등으로 끝나는 토큰
