@@ -305,6 +305,20 @@ async function uploadShot(channel, thread_ts, file, comment) {
   try { await botClient.files.uploadV2({ channel_id: channel, thread_ts, file: fs.readFileSync(file), filename: file.split('/').pop(), initial_comment: comment }); return true; }
   catch (e) { return false; }
 }
+// 코드 자체를 슬랙에 압축해서 올림 (프라이빗 레포 안 거치고 바로 받아보게). files:write 있을 때만 동작
+async function uploadCodeZip(channel, thread_ts, dir, repo) {
+  try {
+    const name = (repo.split('/').pop() || 'code');
+    const tgz = `/tmp/${name}-${Date.now().toString(36)}.tgz`;
+    await sh(`cd ${dir} && tar --exclude=node_modules --exclude=.git --exclude=.next --exclude=dist --exclude=build --exclude=.turbo -czf ${tgz} . 2>&1`, dir, 120000);
+    if (!fs.existsSync(tgz)) return false;
+    const sz = fs.statSync(tgz).size;
+    if (sz > 45 * 1024 * 1024) { try { fs.unlinkSync(tgz); } catch {} return false; } // 너무 크면 스킵
+    await botClient.files.uploadV2({ channel_id: channel, thread_ts, file: fs.readFileSync(tgz), filename: `${name}.tgz`, initial_comment: '코드 통째로 압축해서 올렸어. 받아서 풀면 깃허브 안 거쳐도 바로 볼 수 있어.' });
+    try { fs.unlinkSync(tgz); } catch {}
+    return true;
+  } catch (e) { return false; }
+}
 // 라이브 배포 (Railway). RAILWAY_TOKEN 있을 때만. 윈터(아키텍트)가 담당.
 async function railwayDeploy(client, channel, thread_ts, dir, repo) {
   const arch = byName('윈터') || LEAD;
@@ -453,7 +467,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
       const n = await distributeReport(client, channel, thread_ts, res.text);
       if (!n) await postAs(client, channel, thread_ts, LEAD, (res.text || '').trim().slice(0, 1500));
       await verifyBuild(client, channel, thread_ts, dir, repo);
-      await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}다 끝냈어! ${repoUrl} (${WORK_BASE}에 반영). 빌드 확인이랑 라이브/스크린샷은 위에 우정잉이 올린 거 봐줘.`);
+      await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}다 끝냈어! ${repoUrl} (${WORK_BASE}에 반영)\n코드 브라우저로 보려면: https://github.dev/${repo}\n빌드·라이브·스크린샷은 위에 확인해줘. (코드 파일로 받고 싶으면 "코드 줘"라고 해)`);
       if (newProject) await handoffChecklist(client, channel, thread_ts, repo, task);
       return;
     }
@@ -468,7 +482,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const n2 = await distributeReport(client, channel, thread_ts, res.text);
   if (!n2) await postAs(client, channel, thread_ts, LEAD, (res.text || '').trim().slice(0, 1500));
   await verifyBuild(client, channel, thread_ts, dir, repo);
-  await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}다 끝냈어! ${forcePR ? '승인모드라 PR로 올렸어 (머지하면 반영).' : 'PR로 올렸어.'}\nPR: ${url}`);
+  await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}다 끝냈어! ${forcePR ? '승인모드라 PR로 올렸어 (머지하면 반영).' : 'PR로 올렸어.'}\nPR: ${url}\n코드 브라우저로 보려면: https://github.dev/${repo}`);
   if (newProject) await handoffChecklist(client, channel, thread_ts, repo, task);
   } finally { await prog.done(); }
 }
@@ -910,6 +924,25 @@ async function handle(event, client) {
       if (!list.length) { await postAs(client, channel, thread_ts, LEAD, '아직 우리가 운영하는 서비스가 없어. 하나 만들어서 배포되면 여기 올라가.'); return; }
       const fmt = list.map(s => `· ${s.repo}${s.url ? ' → ' + s.url : ' (라이브 미배포)'}${s.lastStatus ? ' [' + (s.lastStatus === 'up' ? '🟢' : '🔴') + ']' : ''}`).join('\n');
       await postAs(client, channel, thread_ts, LEAD, `우리가 운영 중인 서비스 (${list.length}개)\n${fmt}`);
+      return;
+    }
+    // 코드 받기 — 레포 코드를 압축해서 슬랙에 올림 (프라이빗 우회, 요청할 때만 / 매번 자동 아님)
+    if ((/(코드|소스|파일).*(줘|받|다운|보여|zip|압축)/.test(raw) || /^(코드|zip)\s*(줘|받)/.test(raw)) && !/리뷰|점검|보안|취약|마케팅/.test(raw)) {
+      const win = byName('윈터') || LEAD;
+      const target = extractRepo(raw) || lastRepo[channel];
+      if (!target) { await postAs(client, channel, thread_ts, win, '어느 레포 코드 줄지 알려줘. ("서비스 목록"으로 이름 확인돼)'); return; }
+      if (!GITHUB_TOKEN) { await postAs(client, channel, thread_ts, win, 'GITHUB_TOKEN이 없어서 못 가져와.'); return; }
+      if (await guardBusy(client, channel, thread_ts)) return;
+      await postAs(client, channel, thread_ts, win, `${target} 코드 압축해서 올릴게. 잠깐만.`);
+      activeWork[channel] = { task: '코드 zip ' + target, started: Date.now(), by: lastRequester[channel] };
+      (async () => {
+        const id = ++workSeq; const dir = `/tmp/cz${id}`;
+        const cl = await sh(`rm -rf ${dir} && git clone --depth 1 https://x-access-token:${GITHUB_TOKEN}@github.com/${target}.git ${dir} && chmod -R 777 ${dir}`);
+        if (cl.code !== 0) { await postAs(client, channel, thread_ts, win, `${mention(channel)}클론 실패ㅠ\n` + (cl.err || '').slice(0, 200)); return; }
+        const ok = await uploadCodeZip(channel, thread_ts, dir, target);
+        if (ok) await postAs(client, channel, thread_ts, win, `${mention(channel)}코드 올렸어 ↑ 받아서 풀면 돼.`);
+        else await postAs(client, channel, thread_ts, win, `${mention(channel)}슬랙에 파일 올리는 게 막혔어(봇 앱에 files:write 권한 추가가 필요해). 대신 github.dev로 봐: https://github.dev/${target}`);
+      })().catch(e => postAs(client, channel, thread_ts, win, '코드 가져오기 오류: ' + String(e).slice(0, 200))).finally(() => { activeWork[channel] = null; });
       return;
     }
     if (/(헬스\s?체크|운영\s?점검|상태\s?점검|서비스.*점검|모니터링)/.test(raw)) {
