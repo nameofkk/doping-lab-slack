@@ -48,3 +48,8 @@
 - 증상: 토론(기획:/토론:)이 TEAM 8명 x ROUNDS = 16+ 호출인데 루프에 workCancel·한도 체크가 없어 "중단"해도 끝까지 돌고, 한도 걸려도 계속 시도.
 - 수정: 각 발언 전 workCancel 체크해 즉시 멈춤("토론 중단했어"), 한도(limited)면 안내하고 종료. (runPRD엔 있었는데 runDebate엔 누락이었음)
 - 점검완료(이상없음): recentCtx — 진행인디케이터/업로드는 postAs 안 거쳐 컨텍스트 오염 없음, 25개 슬라이스 정상. 태스크 정규식 "태스크추가"(공백없음)도 \s* 로 매칭됨. 채널별 상태(activeWork 등) key 격리 정상.
+
+### #10 PR 브랜치명 충돌 + runReport 종합 중단 누락 [수정함]
+- 브랜치: PR 경로 브랜치명이 doping/{workSeq}인데 재시작하면 workSeq=0부터라 같은 이름 재사용 → 리모트에 이미 있으면 push 실패 → 시각 꼬리표 붙여 유니크화.
+- runReport: 팀장 최종 종합 직전에 workCancel 체크 추가(중단 시 종합 안 함). 안다연 반론은 이미 체크 있었음.
+- 점검완료(이상없음): qaGate/verifyBuild는 빌드 통과 후 짧게 도는 단계라 중단 누락 영향 작음(다음 작업 시 workCancel 리셋). startProgress chat.update 실패는 try/catch로 무시되고 done()이 finally에서 정리. selfHeal은 5분/30분 쿨다운 + activeWork 가드로 재진입 안전.

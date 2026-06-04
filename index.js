@@ -513,7 +513,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
     }
     mainErr = (pushMain.err || '').slice(0, 250);
   }
-  const branch = `doping/${id}`;
+  const branch = `doping/${id}-${Date.now().toString(36).slice(-5)}`; // 재시작으로 id 리셋돼도 안 겹치게 시각 꼬리표
   await sh(`git checkout -b ${branch}`, dir);
   const pushB = await sh(`git push origin ${branch}`, dir);
   if (pushB.code !== 0) { await postAs(client, channel, thread_ts, LEAD, `push 실패ㅠ\n${mainErr ? 'main: ' + mainErr + '\n' : ''}branch: ${(pushB.err || '').slice(0, 250)}`); return; }
@@ -644,6 +644,7 @@ async function runReport(client, channel, thread_ts, reporter, repo, task) {
       if (dr.text && dr.ok !== false && !dr.limited) { devilText = dr.text.trim(); await postAs(client, channel, thread_ts, devil, devilText.slice(0, 1200)); }
     }
     // 팀장 한로로 — 의견들 + 반론 다 검토해서 최종 실행안으로 종합·보완 (그냥 의견 나열로 끝내지 않게)
+    if (workCancel[channel]) { delete workCancel[channel]; return; } // 중단 요청 시 종합 안 함
     const synth = await runClaude(`${LEAD.prompt}${PLAIN}\n\n[사용자 질문]\n${task}\n\n[팀 의견]\n${(res.text || '').slice(0, 2500)}\n\n[안다연 반론]\n${devilText.slice(0, 1200)}\n\n위를 다 검토해서 "최종안"으로 종합·보완해라. 의견 충돌은 네가 정리하고, 우선순위(1·2·3)를 매기고, 코드로 확인 안 된 가정은 빼거나 "확인 필요"로 표시해라. 바로 실행 가능한 구체적 액션으로 끝내. 마크다운 금지.`, LEAD.model, WORKDIR, CLAUDE_PERMISSION_MODE, 180000);
     if (synth.text && synth.ok !== false) await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}📌 최종안 (팀 의견+반론 종합)\n${synth.text.trim().slice(0, 2500)}`);
     else await postAs(client, channel, thread_ts, reporter, `${mention(channel)}다 정리했어, 위에 봐줘!`);
