@@ -283,6 +283,8 @@ async function railwayDeploy(client, channel, thread_ts, dir, repo) {
   if (!process.env.RAILWAY_API_TOKEN && !process.env.RAILWAY_TOKEN) { await postAs(client, channel, thread_ts, arch, '라이브 URL로 띄우려면 RAILWAY_API_TOKEN 하나만 넣어줘. 넣으면 새로 만들 때마다 자동으로 띄워서 주소 줄게.'); return null; }
   const svc = (repo.split('/').pop() || 'app').replace(/[^a-zA-Z0-9-]/g, '').slice(0, 28) || 'app';
   await postAs(client, channel, thread_ts, arch, '라이브로 띄울게. 레일웨이에 올리는 중이라 몇 분 걸려.');
+  // 업로드에서 무거운/불필요 파일 제외 (빌드 산출물 node_modules·.next·.git 등)
+  await sh(`printf 'node_modules\\n.next\\n.git\\ndist\\nbuild\\n.turbo\\n' > .railwayignore`, dir);
   // 계정토큰이면 빌드 전용 프로젝트(BUILDS_PROJECT_ID)에 링크 (컨테이너 자동주입 RAILWAY_PROJECT_ID와 분리)
   if (process.env.BUILDS_PROJECT_ID) await sh(`RAILWAY_TOKEN= railway link --project ${process.env.BUILDS_PROJECT_ID} --environment ${process.env.BUILDS_ENV || 'production'} 2>&1`, dir);
   await sh(`RAILWAY_TOKEN= railway add --service ${svc} 2>&1`, dir); // 이미 있으면 무시
@@ -304,7 +306,7 @@ async function liveCheck(client, channel, thread_ts, dir, repo) {
   target = url;
   try {
     if (!target) {
-      const port = 4399;
+      const port = 4300 + (parseInt((dir.match(/(\d+)/) || [])[1] || '1', 10) % 600); // 동시 빌드 포트 충돌 방지
       srv = spawn('bash', ['-lc', `cd ${dir} && PORT=${port} npm start`], { env: { ...process.env, HOME: '/tmp' }, stdio: 'ignore' });
       if (await waitHttp(`http://localhost:${port}`, 25000)) target = `http://localhost:${port}`;
     }
