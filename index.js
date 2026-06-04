@@ -187,6 +187,7 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
   let transcript = `[토론 주제]\n${idea}\n${facts}`, stopped = false;
   for (let r = 1; r <= ROUNDS && !stopped; r++) {
     for (const p of TEAM) {
+      bumpWork(channel); // 토론은 자체 스피너가 없어서 여기서 생존신호 갱신 (긴 토론이 워치독에 안 끊기게)
       if (workCancel[channel]) { stopped = true; break; } // "중단"하면 토론 즉시 멈춤
       const guide = (r === 1
         ? '네 입장과 핵심 근거를 말해. 앞 사람 의견 있으면 동의/반박도 같이.'
@@ -266,6 +267,7 @@ async function runPRD(client, channel, thread_ts, task) {
     if (fb) { convo += `\n[사용자가 중간에 준 수정/지시 — 반드시 이대로 PRD를 고쳐라]\n${fb}\n`; await postAs(client, channel, thread_ts, LEAD, `사용자가 중간에 "${fb.replace(/\n/g, ' ').slice(0, 50)}" 줬어, 이거 반영해서 다시 잡을게.`); }
     await postAs(client, channel, thread_ts, LEAD, round === 1 ? '먼저 각자 자기 파트부터 던져봐.' : `${round}라운드. 지금 PRD에서 부족한 부분이랑 방금 사용자 피드백 반영해서 보강하자.`);
     for (const p of planTeam()) {
+      bumpWork(channel); // PRD 핑퐁 도는 동안 생존신호(외부 스피너가 덮지만 이중 보강)
       if (workCancel[channel]) return null;
       const guide = round === 1 ? '네 담당 관점에서 이걸 어떻게 만들지 핵심 2~3개 구체적으로.' : '지금 PRD에서 네 영역에 빠졌거나 약한 부분만 콕 집어 보강해. 반복 말고 새로 더할 것만.';
       const r = await runClaude(`${p.prompt}${STYLE}${rulesCtx(channel)}\n\n[지금까지 기획/PRD]\n${convo}\n\n${guide} 친한 동료처럼 편하게, 마크다운 금지.`, p.model, WORKDIR, CLAUDE_PERMISSION_MODE, 120000);
@@ -836,6 +838,8 @@ async function selfHeal(client, channel, thread_ts, errText) {
   } catch (e) { try { await postAs(client, channel, thread_ts, sec, '자가수정 시도 중에 또 막혔어: ' + String(e).slice(0, 150)); } catch (_) {} }
   finally { selfHealing = false; }
 }
+// 작업 생존신호(heartbeat) — 진행 중이면 beat 갱신. "오래 걸린다"고 살아있는 작업을 죽은 걸로 오인하지 않게 (워치독/스테일해제가 시작시각 아닌 beat 기준으로 판단)
+function bumpWork(channel) { if (activeWork[channel]) activeWork[channel].beat = Date.now(); }
 // 진행 상황 라이브 표시 — 한 메시지를 계속 갱신하며 경과시간·단계를 보여줌 (긴 작업도 살아있다는 신호)
 function startProgress(channel, thread_ts, label = '진행', persona = LEAD) {
   const wc = clientFor(persona) || botClient;
@@ -843,7 +847,7 @@ function startProgress(channel, thread_ts, label = '진행', persona = LEAD) {
   let ts = null, phase = label, started = Date.now(), tick = 0, stopped = false;
   const render = (tail) => { const s = Math.floor((Date.now() - started) / 1000); const m = Math.floor(s / 60); return `${stopped ? '☑️' : frames[tick % 12]} ${phase} ${tail || `(벌써 ${m ? m + '분 ' : ''}${s % 60}초째 하고 있어, 좀만 기다려)`}`; };
   (async () => { try { const r = await wc.chat.postMessage({ channel, thread_ts, text: render() }); ts = r.ts; } catch (e) {} })();
-  const timer = setInterval(async () => { tick++; if (stopped || !ts) return; try { await wc.chat.update({ channel, ts, text: render() }); } catch (e) {} }, 12000);
+  const timer = setInterval(async () => { tick++; bumpWork(channel); if (stopped || !ts) return; try { await wc.chat.update({ channel, ts, text: render() }); } catch (e) {} }, 12000); // 스피너 도는 동안 = 작업 살아있음 → beat 갱신
   return {
     phase: (p) => { phase = p; },
     done: async () => { if (stopped) return; stopped = true; clearInterval(timer); if (ts) { try { await wc.chat.update({ channel, ts, text: render('이 단계는 끝!') }); } catch (e) {} } }
@@ -858,7 +862,7 @@ async function guardBusy(client, channel, thread_ts) {
 // 작업 실행(activeWork 세팅 + runWork + 정리) 공통
 function launchWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName) {
   feedback[channel] = []; delete pausedWork[channel]; // 새 작업 시작 → 묵은 피드백·옛 중단작업 정리(스테일 "이어서" 방지)
-  activeWork[channel] = { task, started: Date.now(), by: lastRequester[channel], repo, newProject, forcePR, projName }; // 재개(이어서)용 컨텍스트 포함
+  activeWork[channel] = { task, started: Date.now(), beat: Date.now(), by: lastRequester[channel], repo, newProject, forcePR, projName }; // 재개(이어서)용 컨텍스트 포함
   runWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName)
     .catch(e => postAs(client, channel, thread_ts, LEAD, '작업 오류: ' + String(e).slice(0, 300)))
     .finally(() => { activeWork[channel] = null; });
@@ -915,10 +919,13 @@ async function handle(event, client) {
       await postAs(client, channel, thread_ts, LEAD, (had ? '오케이 멈출게. 진행 중이던 거 main엔 안 올리고 중단할게.' : '오케이, 지금 도는 작업은 없어. 깨끗하게 풀어놨어.') + (pausedWork[channel] ? ' ("이어서"라고 하면 그 작업 다시 이어갈게)' : ''));
       return;
     }
-    // 스테일 activeWork 자동 해제 — 12분 넘게 잡혀있는데 안 끝났으면 끊긴 걸로 보고 풀어줌 (피드백 무한루프/벽돌화 방지)
-    if (activeWork[channel] && activeWork[channel].started && Date.now() - activeWork[channel].started > 12 * 60 * 1000) { activeWork[channel] = null; feedback[channel] = []; }
+    // 스테일 activeWork 자동 해제 — 생존신호(beat)가 12분 넘게 끊겼으면 진짜 죽은 걸로 보고 풀어줌 (정상적으로 오래 걸리는 작업은 beat가 계속 갱신돼서 안 끊김 → 벽돌화/피드백 무한루프만 방지)
+    if (activeWork[channel] && Date.now() - (activeWork[channel].beat || activeWork[channel].started || 0) > 12 * 60 * 1000) {
+      if (activeWork[channel].repo !== undefined) pausedWork[channel] = { ...activeWork[channel] }; // 재개("이어서"/"다시 해") 가능하게 보관
+      activeWork[channel] = null; feedback[channel] = [];
+    }
     // 재개 — 중단했던 작업을 새로 만들지 말고 그대로 이어감
-    if (!activeWork[channel] && pausedWork[channel] && (/^(이어서|이어가|이어|계속(해|하자|진행)?|마저|다시\s*진행|아까\s*거|이전\s*거)/.test(raw) || /(이전에|전에|아까)\s*하던\s*거|하던\s*거\s*(그대로|다시|이어)/.test(raw))) {
+    if (!activeWork[channel] && pausedWork[channel] && (/^(이어서|이어가|이어|계속(해|하자|진행)?|마저|아까\s*거|이전\s*거)/.test(raw) || /^다시(\s*(해|해줘|진행|시작|시켜|돌려|돌려줘))?\s*$/.test(raw) || /(이전에|전에|아까)\s*하던\s*거|하던\s*거\s*(그대로|다시|이어)/.test(raw))) {
       const pw = pausedWork[channel]; delete pausedWork[channel];
       await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, 아까 "${(pw.task || '').slice(0, 40)}" 그거 다시 이어갈게.`);
       launchWork(client, channel, thread_ts, pw.repo, pw.task, pw.newProject, pw.forcePR, pw.projName);
@@ -1250,10 +1257,14 @@ app.event('app_mention', async ({ event, client }) => { await handle(event, clie
   let opsLastDay = null;
   const OPS_HOUR = parseInt(process.env.OPS_HOUR || '10', 10); // 매일 이 시각(KST)에 운영 헬스체크 자동
   setInterval(() => {
-    // 워치독: 작업이 25분 넘게 안 끝나면(어딘가 멈춤) 채널을 풀어줌 → 영구 블록 방지
+    // 워치독: 생존신호(beat)가 25분 넘게 끊긴 작업만 풀어줌 → 영구 블록 방지. 정상적으로 오래 도는 작업(PRD 핑퐁+빌드 등)은 beat가 계속 갱신되니 안 끊음(예전엔 시작시각 기준이라 살아있는 작업을 죽여서 "풀어둘게" 쏘고 실제론 완성되는 레이스가 있었음)
     for (const ch of Object.keys(activeWork)) {
       const w = activeWork[ch];
-      if (w && w.started && Date.now() - w.started > 25 * 60 * 1000) { activeWork[ch] = null; postAs(botClient, ch, undefined, LEAD, '아까 그 작업이 너무 오래 걸려서 일단 풀어둘게. 결과 안 떴으면 다시 시켜줘.').catch(() => {}); }
+      if (w && Date.now() - (w.beat || w.started || 0) > 25 * 60 * 1000) {
+        if (w.repo !== undefined) pausedWork[ch] = { ...w }; // 재개 가능하게 보관
+        activeWork[ch] = null;
+        postAs(botClient, ch, undefined, LEAD, '아까 그 작업이 응답이 끊긴 거 같아서 일단 풀어둘게. "다시 해"나 "이어서"라고 하면 이어갈게.').catch(() => {});
+      }
     }
     const n = kstNow();
     for (const s of schedules) {
