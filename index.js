@@ -522,7 +522,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
 
 const ALL = TEAM.concat(LEAD);
 // 역할별 보고를 각 담당 직원 이름으로 분배
-const ROLE_MAP = { PM: '김채원 (PM)', 기획: '김채원 (PM)', 리서처: '아이유 (리서처)', 리서치: '아이유 (리서처)', UX: '정소민 (UX)', 디자인: '정소민 (UX)', 화면: '정소민 (UX)', 비주얼: '정소민 (UX)', 아키텍트: '윈터 (아키텍트)', 구조: '윈터 (아키텍트)', 백엔드: '윈터 (아키텍트)', 빌드: '윈터 (아키텍트)', 테스트: '윈터 (아키텍트)', 배포: '윈터 (아키텍트)', 운영: '윈터 (아키텍트)', 데브옵스: '윈터 (아키텍트)', 인프라: '윈터 (아키텍트)', 보안: '우정잉 (보안)', 취약점: '우정잉 (보안)', 마케터: '영듀 (마케터)', 마케팅: '영듀 (마케터)', 그로스: '영듀 (마케터)', 팀장: '한로로 (팀장)' };
+const ROLE_MAP = { PM: '김채원 (PM)', 기획: '김채원 (PM)', 김채원: '김채원 (PM)', 채원: '김채원 (PM)', 리서처: '아이유 (리서처)', 리서치: '아이유 (리서처)', 아이유: '아이유 (리서처)', UX: '정소민 (UX)', 디자인: '정소민 (UX)', 화면: '정소민 (UX)', 비주얼: '정소민 (UX)', 정소민: '정소민 (UX)', 소민: '정소민 (UX)', 아키텍트: '윈터 (아키텍트)', 구조: '윈터 (아키텍트)', 백엔드: '윈터 (아키텍트)', 빌드: '윈터 (아키텍트)', 테스트: '윈터 (아키텍트)', 배포: '윈터 (아키텍트)', 운영: '윈터 (아키텍트)', 데브옵스: '윈터 (아키텍트)', 인프라: '윈터 (아키텍트)', 윈터: '윈터 (아키텍트)', 보안: '우정잉 (보안)', 취약점: '우정잉 (보안)', 우정잉: '우정잉 (보안)', 정잉: '우정잉 (보안)', 마케터: '영듀 (마케터)', 마케팅: '영듀 (마케터)', 그로스: '영듀 (마케터)', 영듀: '영듀 (마케터)', 반론자: '안다연 (반론자)', 안다연: '안다연 (반론자)', 다연: '안다연 (반론자)', 팀장: '한로로 (팀장)', 한로로: '한로로 (팀장)' };
 // 메인 앱이 활동하는 채널에 직원 봇 7명을 자동 초대 (채널당 1회)
 const joinedChannels = new Set();
 async function ensureMembers(channel) {
@@ -882,6 +882,10 @@ async function handle(event, client) {
   const thread_ts = event.thread_ts;
   // 새 프로젝트 시작 전 물어본 질문에 대한 답 → 그 답대로 기획 시작
   if (pendingProject[channel]) {
+    // 30분 넘은 미응답은 묵은 컨텍스트 — 새 메시지를 엉뚱하게 답으로 처리하지 않게 정리
+    if (Date.now() - (pendingProject[channel].at || 0) > 30 * 60 * 1000) { delete pendingProject[channel]; persistPending(); }
+  }
+  if (pendingProject[channel]) {
     if (/^(취소|그만|안\s?해|관둬|됐어|아니[ ,]?다|중단|멈춰|스톱|stop)/i.test(raw)) { delete pendingProject[channel]; persistPending(); await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, 그건 접을게.`); return; }
     if (!activeWork[channel]) {
       const pp = pendingProject[channel]; delete pendingProject[channel]; persistPending();
@@ -894,8 +898,13 @@ async function handle(event, client) {
   try {
     // 중단/취소 — 작업 트리거 금지 + 진행 중이면 push 전에 중단
     if (/하지\s?마|하지말|그만|중단|멈춰|스톱|stop|아니\s?야|취소해|관둬/i.test(raw)) {
-      workCancel[channel] = true;
-      await postAs(client, channel, thread_ts, LEAD, '오케이 멈출게. 진행 중이던 거 있으면 main엔 안 올리고 중단할게.');
+      if (activeWork[channel] || pendingProject[channel]) {
+        workCancel[channel] = true;
+        if (pendingProject[channel]) { delete pendingProject[channel]; persistPending(); }
+        await postAs(client, channel, thread_ts, LEAD, '오케이 멈출게. 진행 중이던 거 있으면 main엔 안 올리고 중단할게.');
+      } else {
+        await postAs(client, channel, thread_ts, LEAD, '지금 진행 중인 게 없어. 뭔가 시작되면 그때 멈춰줄게.');
+      }
       return;
     }
     // 작업 진행 중에 사용자가 끼어들어 수정/지시하면 → 새 작업 만들지 말고 "진행 중인 작업"에 반영(피드백 버퍼). 짧은 안부/상태 질문은 아래로 흘려보냄

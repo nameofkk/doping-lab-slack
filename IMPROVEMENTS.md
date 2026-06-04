@@ -32,5 +32,10 @@
 - ASSET_RULE: 게임/비주얼 프로젝트는 대충 도형 금지, CC0 고품질 팩(Kenney 등) 받아쓰거나 디테일 SVG/스프라이트, ASSETS.md 기록, 스크린샷 검증.
 - CS 폼: Slack webhook이면 no-cors POST로 보내게 빌드 규칙 보강.
 
+## #7 (배포됨)
+- pending project 30분 타임아웃: planQuestions 후 30분 이상 무응답이면 대기 컨텍스트를 자동 정리 → 오래된 질문에 새 메시지가 엉뚱하게 "답"으로 처리되던 UX 버그 수정.
+- "중단" 핸들러 개선: 진행 중인 작업/대기 중인 질문이 없을 때 "중단" 하면 workCancel 플래그를 true로 남기지 않음 → 다음 스케줄 작업이 stale 플래그에 걸려 취소되던 버그 수정. pendingProject도 함께 정리.
+- ROLE_MAP 직원 이름 키 추가: "한로로:", "아이유:", "정소민:", "윈터:", "우정잉:", "영듀:", "안다연:" 등 이름으로 시작하는 보고 줄도 distributeReport가 잡게 수정 → Claude가 역할 레이블 대신 이름으로 보고할 때 분배가 안 되던 문제 수정.
+
 ## 상태
-코드 ⚙️ 개선 거의 소진. 남은 건 사용자 계정 연결(DodoPayments 키·Sentry DSN·애널리틱스·도메인·Slack webhook·files:write)뿐.
+코드 ⚙️ 주요 런타임 버그 정리됨. 남은 건 사용자 계정 연결(DodoPayments 키·Sentry DSN·애널리틱스·도메인·Slack webhook·files:write)뿐.
