@@ -926,6 +926,24 @@ async function handle(event, client) {
       await postAs(client, channel, thread_ts, LEAD, `우리가 운영 중인 서비스 (${list.length}개)\n${fmt}`);
       return;
     }
+    // 스크린샷 받기 — 라이브 서비스 화면을 찍어서 슬랙에 올림 (요청할 때)
+    if ((/(스크린샷|캡쳐|캡처|스샷).*(줘|보여|찍어|올려|첨부)/.test(raw) || /화면\s*(줘|보여|찍어|캡)/.test(raw)) && !/검증/.test(raw)) {
+      const ux = byName('정소민') || LEAD;
+      const target = extractRepo(raw) || lastRepo[channel];
+      const url = target && services[target] && services[target].url;
+      if (!url) { await postAs(client, channel, thread_ts, ux, '그 서비스 라이브 주소가 없어서 화면을 못 찍어. 먼저 배포돼 있어야 돼 ("서비스 목록"으로 확인). 아니면 레포 이름 알려줘.'); return; }
+      if (await guardBusy(client, channel, thread_ts)) return;
+      await postAs(client, channel, thread_ts, ux, `${target.split('/').pop()} 화면 찍어서 올릴게. 잠깐만.`);
+      activeWork[channel] = { task: '스크린샷 ' + target, started: Date.now(), by: lastRequester[channel] };
+      (async () => {
+        const shots = await captureShots(url, 'cap' + (++workSeq));
+        let any = false;
+        for (const s of shots) any = (await uploadShot(channel, thread_ts, s.path, s.label)) || any;
+        if (any) await postAs(client, channel, thread_ts, ux, `${mention(channel)}화면 올렸어 ↑`);
+        else await postAs(client, channel, thread_ts, ux, `${mention(channel)}스크린샷 업로드가 막혔어(봇 앱에 files:write 권한 필요). 화면은 여기서 봐: ${url}`);
+      })().catch(e => postAs(client, channel, thread_ts, ux, '스크린샷 오류: ' + String(e).slice(0, 200))).finally(() => { activeWork[channel] = null; });
+      return;
+    }
     // 코드 받기 — 레포 코드를 압축해서 슬랙에 올림 (프라이빗 우회, 요청할 때만 / 매번 자동 아님)
     if ((/(코드|소스|파일).*(줘|받|다운|보여|zip|압축)/.test(raw) || /^(코드|zip)\s*(줘|받)/.test(raw)) && !/리뷰|점검|보안|취약|마케팅/.test(raw)) {
       const win = byName('윈터') || LEAD;
