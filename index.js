@@ -267,12 +267,12 @@ async function waitHttp(url, ms) {
   return false;
 }
 // Playwright로 첫 화면 스크린샷 (스크롤 안 함 → 진입 애니메이션 미작동 버그가 그대로 드러남)
-async function captureShots(url) {
+async function captureShots(url, prefix = 'shot') {
   const { chromium } = require('playwright');
   const b = await chromium.launch({ args: ['--no-sandbox', '--disable-dev-shm-usage'] });
   const out = [];
   try {
-    for (const [w, h, label, file] of [[1440, 900, '데스크탑 첫 화면 (로드 직후, 스크롤 전)', '/tmp/shot_d.png'], [375, 812, '모바일 첫 화면', '/tmp/shot_m.png']]) {
+    for (const [w, h, label, file] of [[1440, 900, '데스크탑 첫 화면 (로드 직후, 스크롤 전)', `/tmp/${prefix}_d.png`], [375, 812, '모바일 첫 화면', `/tmp/${prefix}_m.png`]]) {
       const p = await b.newPage({ viewport: { width: w, height: h } });
       await p.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
       await p.waitForTimeout(1800);
@@ -321,8 +321,10 @@ async function liveCheck(client, channel, thread_ts, dir, repo) {
       if (await waitHttp(`http://localhost:${port}`, 25000)) target = `http://localhost:${port}`;
     }
     if (!target) { await postAs(client, channel, thread_ts, qa, '실제 화면을 띄워서는 못 봤어(서버 기동 실패). 코드랑 빌드는 통과한 상태야.'); return; }
+    if (url) await waitHttp(url, 60000); // 라이브(Railway)는 배포 직후 준비 안 됐을 수 있으니 떠서 응답할 때까지 대기 → 빈 화면 촬영 방지
     await postAs(client, channel, thread_ts, qa, '실제 화면 띄워서 스크린샷 찍는 중...');
-    const shots = await captureShots(target);
+    const prefix = 'shot' + ((dir.match(/(\d+)/) || [])[1] || '0'); // 동시 빌드 스크린샷 파일명 충돌 방지
+    const shots = await captureShots(target, prefix);
     let any = false;
     for (const s of shots) any = (await uploadShot(channel, thread_ts, s.path, s.label)) || any;
     if (any) await postAs(client, channel, thread_ts, qa, '첫 화면(로드 직후, 스크롤 전) 스크린샷 올렸어. 히어로 밑이 비어 보이면 스크롤 진입 애니메이션이 화면 밖에서 안 켜지는 문제니까 그건 잡아야 돼.');
