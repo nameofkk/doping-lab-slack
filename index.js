@@ -80,7 +80,21 @@ const LAUNCH_RULE = `
 2) 출시 필수 페이지: 개인정보처리방침(/privacy)과 이용약관(/terms)을 한국어 기본 틀로 작성. 연락처 자리는 비워두고 "TODO 연락처" 표시.
 3) 성능·접근성: 이미지 최적화랑 lazy-load, 의미있는 alt, 키보드 접근, 기본적인 Lighthouse 신경.
 ${process.env.ANALYTICS_SNIPPET ? '4) 접속 통계(애널리틱스): 다음 스니펫을 head에 그대로 넣어라:\n' + process.env.ANALYTICS_SNIPPET + '\n' : '4) 접속 통계(애널리틱스): 아직 키가 안 주어졌으니 들어갈 자리만 주석 TODO로 잡아두고 실제 코드는 비워둬.'}
-5) 문의/CS: 문의폼 제출은 ${process.env.CONTACT_ENDPOINT ? '다음 주소로 POST 보내게 해: ' + process.env.CONTACT_ENDPOINT : '동작하는 폼 서비스(예: Formspree) 자리표시자로 두고, 제출하면 "접수됐어요" 안내 화면을 보여주게'}. 개인정보 받는 폼이니까 최소한 스팸 막는 허니팟 한 개랑 제출 후 확인 안내는 꼭 넣어.`;
+5) 문의/CS: 문의폼 제출은 ${process.env.CONTACT_ENDPOINT ? '다음 주소로 POST 보내게 해(Slack Incoming Webhook이면 브라우저 CORS 때문에 fetch에 mode:"no-cors" 쓰고 본문은 {text: ...} JSON으로): ' + process.env.CONTACT_ENDPOINT : '동작하는 폼 서비스(예: Formspree) 자리표시자로 두고, 제출하면 "접수됐어요" 안내 화면을 보여주게'}. 개인정보 받는 폼이니까 최소한 스팸 막는 허니팟 한 개랑 제출 후 확인 안내는 꼭 넣어.
+6) 결제(유료 기능 있을 때만): 결제는 도도페이먼츠(DodoPayments)를 쓴다. ${process.env.DODO_API_KEY ? 'DODO_API_KEY가 환경변수로 있으니 DodoPayments 체크아웃/구독 연동을 실제로 붙여라(서버에서 키 사용, 클라이언트 노출 금지).' : 'DODO_API_KEY가 아직 없으니, 결제 버튼·플랜 UI까지만 만들고 실제 연동부는 DodoPayments SDK 자리만 TODO 주석으로 잡아둬(키는 비워둠).'} 결제 키는 절대 프론트 코드에 하드코딩하지 마라.`;
+
+// 게임/비주얼 많은 프로젝트 — 에셋을 상용 수준으로 (대충 도형 금지)
+const ASSET_RULE = `
+
+[에셋·아트 규칙 — 게임이나 비주얼 비중 큰 프로젝트면 반드시. 대충 도형 금지]
+1) 코드 짜기 전에 아트 디렉션이랑 에셋 목록부터 정의해라: 캐릭터/배경/오브젝트/UI/이펙트/사운드 각각 몇 개, 통일된 스타일·팔레트·크기(픽셀 그리드). ASSETS.md에 적어.
+2) 절대 금지: 회색 네모를 적, 동그라미를 공, 단색 사각형을 건물로 대충 붙이고 "에셋"이라 하기. 진짜 출시 게임에 써도 될 수준이어야 함.
+3) 에셋 우선순위:
+   (a) 무료 CC0 고품질 에셋 팩을 받아서 써라 — Kenney.nl(kenney.nl, 전부 CC0)·OpenGameArt(CC0 필터)·itch.io CC0 팩. 게임 컨셉에 맞는 팩을 curl/wget으로 받아 public/assets에 넣고, 출처·라이선스를 ASSETS.md에 기록(CC0/저작자표시 여부 확인).
+   (b) 직접 그려야 하면 디테일 있는 SVG나 Canvas로: 레이어·음영·하이라이트·외곽선, 캐릭터는 idle/걷기/액션 여러 프레임으로 애니메이션. 단색 단순도형 한 개로 때우지 마.
+4) 일관성: 모든 에셋이 같은 아트 스타일·팔레트·해상도. 짜깁기 금지.
+5) 사운드: 필요하면 CC0 효과음/BGM(예: Kenney audio, freesound CC0) 받아서 넣어.
+6) 끝나면 Playwright 스크린샷으로 실제 화면 확인 — 도형 덩어리로 보이면 통과 아님, 다시 해.${process.env.IMAGE_API_KEY ? '\n7) 진짜 커스텀 스프라이트가 필요하면 IMAGE_API_KEY로 이미지 생성 API를 호출해서 만들어라.' : ''}`;
 
 const app = new App({ token: SLACK_BOT_TOKEN, appToken: SLACK_APP_TOKEN, socketMode: true });
 const clientCache = new Map();
@@ -295,12 +309,12 @@ async function railwayDeploy(client, channel, thread_ts, dir, repo) {
   await postAs(client, channel, thread_ts, arch, '라이브로 띄울게. 레일웨이에 올리는 중이라 몇 분 걸려.');
   // 업로드에서 무거운/불필요 파일 제외 (빌드 산출물 node_modules·.next·.git 등)
   await sh(`printf 'node_modules\\n.next\\n.git\\ndist\\nbuild\\n.turbo\\n' > .railwayignore`, dir);
-  // 계정토큰이면 빌드 전용 프로젝트(BUILDS_PROJECT_ID)에 링크 (컨테이너 자동주입 RAILWAY_PROJECT_ID와 분리)
-  if (process.env.BUILDS_PROJECT_ID) await sh(`RAILWAY_TOKEN= railway link --project ${process.env.BUILDS_PROJECT_ID} --environment ${process.env.BUILDS_ENV || 'production'} 2>&1`, dir);
-  await sh(`RAILWAY_TOKEN= railway add --service ${svc} 2>&1`, dir); // 이미 있으면 무시
-  const up = await sh(`RAILWAY_TOKEN= railway up --service ${svc} --ci 2>&1`, dir);
+  // 계정토큰이면 빌드 전용 프로젝트(BUILDS_PROJECT_ID)에 링크 (컨테이너 자동주입 RAILWAY_PROJECT_ID와 분리). </dev/null로 대화형 멈춤 방지
+  if (process.env.BUILDS_PROJECT_ID) await sh(`RAILWAY_TOKEN= railway link --project ${process.env.BUILDS_PROJECT_ID} --environment ${process.env.BUILDS_ENV || 'production'} </dev/null 2>&1`, dir);
+  // railway up --service 가 서비스를 자동 생성하므로 별도 add 안 함 (add는 대화형이라 멈춤)
+  const up = await sh(`RAILWAY_TOKEN= railway up --service ${svc} --ci </dev/null 2>&1`, dir);
   if (up.code !== 0) { await postAs(client, channel, thread_ts, arch, '레일웨이 배포가 막혔어:\n' + ((up.out || up.err) || '').slice(-500)); return null; }
-  const dom = await sh(`RAILWAY_TOKEN= railway domain --service ${svc} 2>&1`, dir);
+  const dom = await sh(`RAILWAY_TOKEN= railway domain --service ${svc} </dev/null 2>&1`, dir);
   const m = (dom.out || '').match(/https?:\/\/[^\s'"]+/);
   const url = m ? m[0] : null;
   if (url) await postAs(client, channel, thread_ts, arch, `라이브 올라갔어: ${url}`);
@@ -404,7 +418,8 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   if (workCancel[channel]) { delete workCancel[channel]; await postAs(client, channel, thread_ts, LEAD, '기획 단계에서 중단했어. 아무것도 안 올렸어.'); return; }
   if (newProject && prd === null) return; // 한도/중단 → runPRD가 이미 안내함, 제작 안 들어감
   if (newProject) await postAs(client, channel, thread_ts, LEAD, '좋아 PRD 확정됐고, 이제 이 PRD 그대로 실제 코드 짤게. 좀 걸려.');
-  const res = await runClaude(`${intro}${rulesCtx(channel)}${PLAIN}${DESIGN_RULE}${newProject ? LAUNCH_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}\n\n요청: ${task}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000);
+  const assetHeavy = /게임|game|sprite|스프라이트|캐릭터|에셋|asset|픽셀|pixel|애니메이션|아케이드|arcade|2d|3d|canvas|phaser/i.test(task);
+  const res = await runClaude(`${intro}${rulesCtx(channel)}${PLAIN}${DESIGN_RULE}${newProject ? LAUNCH_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}\n\n요청: ${task}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000);
   if (res.limited) { await postAs(client, channel, thread_ts, LEAD, '⏳ 제작 중에 클로드 사용량 한도에 걸렸어. 지금까지 만든 건 안 올렸어, 한도 리셋되면 이어서 만들게.'); return; }
   await sh('git add -A', dir);
   const repoUrl = `https://github.com/${repo}`;
@@ -802,8 +817,18 @@ async function handle(event, client) {
       await postAs(client, channel, thread_ts, LEAD, `오늘 우리 사용량이야.\n호출 ${usageStat.calls}회 · 출력토큰 약 ${usageStat.outTokens.toLocaleString()} · 한도걸림 ${usageStat.limitedHits}번.${usageStat.limitedHits ? ' 한도 자주 걸리면 팀원 모델 sonnet 유지하거나 작업 텀을 두자.' : ''}`);
       return;
     }
+    // 의존성 업데이트 → 안전하게 올리고 빌드 확인 후 PR
+    if (/(의존성|디펜던시|패키지|dependency).*(업데이트|갱신|올려|올리|update)/.test(raw)) {
+      const sec = byName('우정잉') || LEAD;
+      const target = (svcList().find(s => raw.includes(s.repo.split('/').pop())) || {}).repo || lastRepo[channel];
+      if (!target) { await postAs(client, channel, thread_ts, sec, '어느 레포 의존성 올릴지 알려줘.'); return; }
+      if (await guardBusy(client, channel, thread_ts)) return;
+      activeWork[channel] = { task: '의존성 업데이트 ' + target, started: Date.now() };
+      runWork(client, channel, event.thread_ts || event.ts, target, '의존성을 안전하게 최신으로 업데이트해라. 메이저 버전 업은 호환성 깨질 수 있으니 신중히(마이너·패치 위주). package.json 갱신하고 npm install + npm run build로 안 깨지는지 꼭 확인한 다음, 뭘 올렸는지 보고해라.', false, true).catch(e => postAs(client, channel, thread_ts, sec, '업데이트 오류: ' + String(e).slice(0, 200))).finally(() => { activeWork[channel] = null; });
+      return;
+    }
     // 의존성 점검 — 취약점(npm audit) + 오래된 패키지(npm outdated) 리포트
-    if (/(의존성|디펜던시|dependency|패키지|취약점).*(점검|확인|스캔|업데이트|체크|봐|상태)/.test(raw)) {
+    if (/(의존성|디펜던시|dependency|패키지|취약점).*(점검|확인|스캔|체크|봐|상태)/.test(raw)) {
       const sec = byName('우정잉') || LEAD;
       const target = (svcList().find(s => raw.includes(s.repo.split('/').pop())) || {}).repo || lastRepo[channel];
       if (!target) { await postAs(client, channel, thread_ts, sec, '어느 레포 의존성 볼지 알려줘. ("서비스 목록"으로 이름 확인돼)'); return; }
@@ -835,8 +860,8 @@ async function handle(event, client) {
       const svc = (target.split('/').pop() || '').replace(/[^a-zA-Z0-9-]/g, '').slice(0, 28);
       await postAs(client, channel, thread_ts, win, `${svc} 재시작할게.`);
       (async () => {
-        const link = process.env.BUILDS_PROJECT_ID ? `RAILWAY_TOKEN= railway link --project ${process.env.BUILDS_PROJECT_ID} --environment ${process.env.BUILDS_ENV || 'production'} >/dev/null 2>&1; ` : '';
-        const r = await sh(`${link}RAILWAY_TOKEN= railway restart --service ${svc} 2>&1`, '/tmp');
+        const link = process.env.BUILDS_PROJECT_ID ? `RAILWAY_TOKEN= railway link --project ${process.env.BUILDS_PROJECT_ID} --environment ${process.env.BUILDS_ENV || 'production'} </dev/null >/dev/null 2>&1; ` : '';
+        const r = await sh(`${link}RAILWAY_TOKEN= railway restart --service ${svc} </dev/null 2>&1`, '/tmp');
         await postAs(client, channel, thread_ts, win, r.code === 0 ? '재시작 보냈어. 곧 다시 뜰 거야.' : '재시작이 막혔어:\n' + ((r.out || r.err) || '').slice(-300));
       })();
       return;

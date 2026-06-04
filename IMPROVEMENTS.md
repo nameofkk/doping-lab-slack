@@ -25,5 +25,12 @@
 - 의존성 점검 기능 추가: "(레포) 의존성 점검" → 클론해서 npm audit(취약점) + npm outdated(오래된 패키지) 리포트.
 - restart 명령은 이미 BUILDS_PROJECT_ID 링크 + RAILWAY_TOKEN= 무력화로 견고 → 변경 없음(확인).
 
+## #6 (배포됨) — "안된 것들 직접 다 하기"
+- Railway 자동배포 실전 검증 → 진짜 버그 발견·수정: `railway add`가 대화형으로 멈춰서 컨테이너에서 무한대기할 뻔. `up --service`가 서비스 자동생성하므로 add 제거, 모든 railway 명령에 </dev/null로 멈춤 방지. doping-portfolio 실제 배포 성공(HTTP 200): https://doping-portfolio-production.up.railway.app
+- 의존성 자동 업데이트 명령("(레포) 의존성 업데이트") → 안전 업데이트 후 빌드확인 + PR.
+- DodoPayments 결제 훅: 유료 기능 빌드 시 DodoPayments 연동(DODO_API_KEY 있으면 실연동, 없으면 UI+TODO).
+- ASSET_RULE: 게임/비주얼 프로젝트는 대충 도형 금지, CC0 고품질 팩(Kenney 등) 받아쓰거나 디테일 SVG/스프라이트, ASSETS.md 기록, 스크린샷 검증.
+- CS 폼: Slack webhook이면 no-cors POST로 보내게 빌드 규칙 보강.
+
 ## 상태
-명백히 안전한 후보는 대부분 소진. 추가 개선은 사용자 계정 필요(에러트래킹·애널리틱스·결제·마케팅 채널) 또는 큰 변경(스테이징 환경 등)이라 임의로 진행하지 않음.
+코드 ⚙️ 개선 거의 소진. 남은 건 사용자 계정 연결(DodoPayments 키·Sentry DSN·애널리틱스·도메인·Slack webhook·files:write)뿐.
