@@ -145,7 +145,7 @@ async function runClaudeOnce(prompt, model, cwd = WORKDIR, perm = CLAUDE_PERMISS
     const child = spawn('claude', args, opts);
     let out = '', err = '', done = false;
     const finish = (r) => { if (done) return; done = true; clearTimeout(killer); claudeRelease(); resolve(r); };
-    const killer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) {} finish({ ok: false, timedout: true, text: '어 지금 딴 거 하느라 바빠서, 좀 있다 답할게.' }); }, timeoutMs);
+    const killer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) {} finish({ ok: false, timedout: true, text: '(방금 건 처리가 제한시간을 넘겨서 한 번 끊겼어 — 게으름이 아니라 응답이 너무 길어진 거야. 다시 시도해줘.)' }); }, timeoutMs);
     child.stdout.on('data', d => (out += d));
     child.stderr.on('data', d => (err += d));
     child.on('error', e => finish({ ok: false, text: String(e) }));
