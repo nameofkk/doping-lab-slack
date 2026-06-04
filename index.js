@@ -530,6 +530,7 @@ async function runReport(client, channel, thread_ts, reporter, repo, task) {
   const cl = await sh(`rm -rf ${dir} && git clone --depth 1 https://x-access-token:${GITHUB_TOKEN}@github.com/${repo}.git ${dir} && chmod -R 777 ${dir}`);
   if (cl.code !== 0) { await postAs(client, channel, thread_ts, reporter, `${repo} 레포를 못 찾았어요ㅠ (이름 확인 필요)\n${(cl.err || '').slice(0, 200)}`); return; }
   const res = await runClaude(`이 저장소를 실제로 열어보고, 사용자의 요청 "${task}"에 직접 답해라. 단순 현황 나열이 아니라, 레포에서 확인한 사실을 근거로 실제 답·제안·전략을 내라. 코드는 읽기만 해. 레포에 없는 시장·경쟁사·트렌드·벤치마크는 웹서치(WebSearch)로 찾아서 근거로 써도 돼. 모르는 건 추측이라 표시.\n\n역할별로 각자 그 요청에 대한 자기 분야의 답/제안을 줘. 각 줄 "역할: 답/제안" 형식(관련된 역할만, PM/리서처/UX/아키텍트/보안/마케터). 질문 분야의 담당이 메인으로 구체적인 안을 내고(예: 마케팅 질문이면 마케터가 채널·메시지·실행안까지), 나머지는 거들어. 한 역할당 2~4줄.${PLAIN}`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000);
+  if (res.limited) { await postAs(client, channel, thread_ts, reporter, '⏳ 조사 중에 클로드 사용량 한도에 걸렸어. 리셋되면 다시 봐줄게.'); return; }
   const n = await distributeReport(client, channel, thread_ts, res.text);
   if (!n) await postAs(client, channel, thread_ts, reporter, (res.text || '(내용 없음)').trim().slice(0, 3000));
 }
@@ -741,8 +742,23 @@ async function handle(event, client) {
     if (/^태스크\s*(목록|보드|리스트)/.test(raw)) { const l = tasks[channel] || []; await postAs(client, channel, thread_ts, LEAD, l.length ? '📋 할 일 보드:\n' + l.map(t => `#${t.id} [${t.done ? '완료' : '진행'}] ${t.text}`).join('\n') : '등록된 태스크가 없어.'); return; }
     if ((tm = raw.match(/^태스크\s*완료\s*(\d+)/))) { const t = (tasks[channel] || []).find(x => x.id === parseInt(tm[1])); if (t) { t.done = true; persistTasks(); await postAs(client, channel, thread_ts, LEAD, `#${tm[1]} 완료 처리했어.`); } else await postAs(client, channel, thread_ts, LEAD, '그 태스크 못 찾겠어.'); return; }
     if ((tm = raw.match(/^태스크\s*삭제\s*(\d+)/))) { tasks[channel] = (tasks[channel] || []).filter(x => x.id !== parseInt(tm[1])); persistTasks(); await postAs(client, channel, thread_ts, LEAD, `#${tm[1]} 삭제했어.`); return; }
-    // 배포 (아직 미연동)
-    if (/배포\s*(해|하자|해줘|좀|시작|go)/i.test(raw)) { await postAs(client, channel, thread_ts, LEAD, '이제 신규 빌드는 통과하면 자동으로 라이브(Railway)까지 올라가. 특정 레포를 다시 띄우고 싶으면 "(레포이름) 다시 배포해줘"처럼 말해줘.'); return; }
+    // 배포 — 특정/직전 레포를 Railway에 다시 올림
+    if (/배포\s*(해|하자|해줘|좀|시작|go|다시|재)/i.test(raw) || /재배포|다시\s*배포/.test(raw)) {
+      const win = byName('윈터') || LEAD;
+      if (!process.env.RAILWAY_API_TOKEN) { await postAs(client, channel, thread_ts, win, '라이브 배포는 RAILWAY_API_TOKEN 있어야 돼. 넣으면 바로 해줄게.'); return; }
+      const match = svcList().find(s => raw.includes(s.repo.split('/').pop()));
+      const target = (match && match.repo) || lastRepo[channel];
+      if (!target) { await postAs(client, channel, thread_ts, win, '어느 레포 배포할지 알려줘. (만든 적 있는 거면 "서비스 목록"으로 이름 확인돼)'); return; }
+      activeWork[channel] = { task: '재배포 ' + target, started: Date.now() };
+      (async () => {
+        const id = ++workSeq; const dir = `/tmp/dp${id}`;
+        await postAs(client, channel, thread_ts, win, `${target} 다시 띄울게. 클론하고 레일웨이에 올린다.`);
+        const cl = await sh(`rm -rf ${dir} && git clone --depth 1 https://x-access-token:${GITHUB_TOKEN}@github.com/${target}.git ${dir} && chmod -R 777 ${dir}`);
+        if (cl.code !== 0) { await postAs(client, channel, thread_ts, win, '클론 실패ㅠ\n' + (cl.err || '').slice(0, 200)); return; }
+        await railwayDeploy(client, channel, thread_ts, dir, target);
+      })().catch(e => postAs(client, channel, thread_ts, win, '배포 오류: ' + String(e).slice(0, 200))).finally(() => { activeWork[channel] = null; });
+      return;
+    }
     const wm = raw.match(/^(작업|구현|개발|제작)\s*[:：]\s*([\s\S]*)$/);
     if (wm && wm[2].trim()) {
       let rest = wm[2].trim(); let repo = WORK_DEFAULT_REPO;
