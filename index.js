@@ -184,18 +184,21 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
   const HONEST = facts
     ? ' 위 [프로젝트 실제 정보]를 근거로만 말해. 거기 없는 건 추측이라고 표시해.'
     : ' 이 프로젝트가 정확히 뭔지 모르면 절대 지어내지 마. 모르면 솔직히 "이거 뭔지 정확히 모르겠다"고 하고 사용자한테 어떤 건지 물어봐.';
-  let transcript = `[토론 주제]\n${idea}\n${facts}`;
-  for (let r = 1; r <= ROUNDS; r++) {
+  let transcript = `[토론 주제]\n${idea}\n${facts}`, stopped = false;
+  for (let r = 1; r <= ROUNDS && !stopped; r++) {
     for (const p of TEAM) {
+      if (workCancel[channel]) { stopped = true; break; } // "중단"하면 토론 즉시 멈춤
       const guide = (r === 1
         ? '네 입장과 핵심 근거를 말해. 앞 사람 의견 있으면 동의/반박도 같이.'
         : `지금 ${r}라운드야. 앞 의견 중 약한 부분을 콕 집어 반박하고 네 주장을 다듬어. 반복 금지.`) + HONEST;
       const res = await runClaude(`${p.prompt}${STYLE}${rulesCtx(channel)}\n\n[지금까지 토론]\n${transcript}\n\n${guide}`, p.model);
+      if (res.limited) { await postAs(client, channel, thread_ts, LEAD, '⏳ 한도 걸려서 토론 더 못 돌려. 리셋되면 다시 하자.'); return; }
       const msg = (res.text || '(무응답)').trim().slice(0, 1200);
       await postAs(client, channel, thread_ts, p, msg);
       transcript += `\n[${p.name}] ${msg}\n`;
     }
   }
+  if (stopped) { delete workCancel[channel]; await postAs(client, channel, thread_ts, LEAD, '토론 중단했어.'); return; }
   const synth = await runClaude(`${LEAD.prompt}${STYLE}${rulesCtx(channel)}\n\n[토론 전체]\n${transcript}\n\n이 토론을 종합해. 의견 갈린 지점 짚고, 가장 설득력 있는 쪽으로 최적 결론을 내려. 단순 요약 말고 결정과 다음 액션까지.${HONEST}`, LEAD.model);
   await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}📋 결론\n` + (synth.text || '').trim().slice(0, 2800));
 }
