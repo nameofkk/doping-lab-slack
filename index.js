@@ -246,13 +246,15 @@ async function uploadShot(channel, thread_ts, file, comment) {
 // 라이브 배포 (Railway). RAILWAY_TOKEN 있을 때만. 윈터(아키텍트)가 담당.
 async function railwayDeploy(client, channel, thread_ts, dir, repo) {
   const arch = byName('윈터') || LEAD;
-  if (!process.env.RAILWAY_TOKEN) { await postAs(client, channel, thread_ts, arch, '라이브 URL로 띄우려면 RAILWAY_TOKEN(레일웨이 프로젝트 토큰) 하나만 넣어줘. 넣으면 새로 만들 때마다 자동으로 띄워서 주소 줄게.'); return null; }
+  if (!process.env.RAILWAY_API_TOKEN && !process.env.RAILWAY_TOKEN) { await postAs(client, channel, thread_ts, arch, '라이브 URL로 띄우려면 RAILWAY_API_TOKEN 하나만 넣어줘. 넣으면 새로 만들 때마다 자동으로 띄워서 주소 줄게.'); return null; }
   const svc = (repo.split('/').pop() || 'app').replace(/[^a-zA-Z0-9-]/g, '').slice(0, 28) || 'app';
   await postAs(client, channel, thread_ts, arch, '라이브로 띄울게. 레일웨이에 올리는 중이라 몇 분 걸려.');
-  await sh(`railway add --service ${svc} 2>&1`, dir); // 이미 있으면 무시
-  const up = await sh(`railway up --service ${svc} --ci 2>&1`, dir);
+  // 계정토큰이면 빌드 전용 프로젝트(BUILDS_PROJECT_ID)에 링크 (컨테이너 자동주입 RAILWAY_PROJECT_ID와 분리)
+  if (process.env.BUILDS_PROJECT_ID) await sh(`RAILWAY_TOKEN= railway link --project ${process.env.BUILDS_PROJECT_ID} --environment ${process.env.BUILDS_ENV || 'production'} 2>&1`, dir);
+  await sh(`RAILWAY_TOKEN= railway add --service ${svc} 2>&1`, dir); // 이미 있으면 무시
+  const up = await sh(`RAILWAY_TOKEN= railway up --service ${svc} --ci 2>&1`, dir);
   if (up.code !== 0) { await postAs(client, channel, thread_ts, arch, '레일웨이 배포가 막혔어:\n' + ((up.out || up.err) || '').slice(-500)); return null; }
-  const dom = await sh(`railway domain --service ${svc} 2>&1`, dir);
+  const dom = await sh(`RAILWAY_TOKEN= railway domain --service ${svc} 2>&1`, dir);
   const m = (dom.out || '').match(/https?:\/\/[^\s'"]+/);
   const url = m ? m[0] : null;
   if (url) await postAs(client, channel, thread_ts, arch, `라이브 올라갔어: ${url}`);
