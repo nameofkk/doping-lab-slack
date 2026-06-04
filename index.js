@@ -301,7 +301,7 @@ async function runPRD(client, channel, thread_ts, task) {
 async function waitHttp(url, ms) {
   const end = Date.now() + ms;
   while (Date.now() < end) {
-    const r = await sh(`curl -sf -o /dev/null -w "%{http_code}" ${url} 2>/dev/null || true`);
+    const r = await sh(`curl -sf -o /dev/null -w "%{http_code}" '${String(url).replace(/'/g, '')}' 2>/dev/null || true`);
     const c = (r.out || '').trim();
     if (c.startsWith('2') || c.startsWith('3')) return true;
     await new Promise(s => setTimeout(s, 1500));
@@ -775,7 +775,7 @@ async function checkServices(client, channel, announce = true, onlyAlert = false
   if (!list.length) { if (announce && !onlyAlert) await postAs(client, channel, undefined, sre, '아직 등록된 라이브 서비스가 없어. 뭐 하나 만들어서 배포되면 여기 대장에 올라가.'); return; }
   const lines = [];
   for (const s of list) {
-    const r = await sh(`curl -s -o /dev/null -w "%{http_code} %{time_total}s" --max-time 15 ${s.url} 2>/dev/null || echo "000"`);
+    const r = await sh(`curl -s -o /dev/null -w "%{http_code} %{time_total}s" --max-time 15 '${String(s.url).replace(/'/g, '')}' 2>/dev/null || echo "000"`);
     const out = (r.out || '').trim(); const up = /^2\d\d|^3\d\d/.test(out);
     const wasUp = s.lastStatus !== 'down';
     s.lastStatus = up ? 'up' : 'down'; s.lastCheck = Date.now(); s.wasUp = wasUp;

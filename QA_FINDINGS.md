@@ -68,3 +68,7 @@
 - 증상: 제작 후 git commit -m "도핑연구소: ${task}"에서 task의 백틱/$가 안 막혀서, task에 백틱·$(...)이 있으면 bash 명령치환 실행됨(보안 위험) + 일반 백틱도 커밋 깨짐.
 - 수정: 커밋 메시지에서 셸 위험문자(백틱 $ " \ ! ; | & <> ()) 제거 후 사용. clone의 repo/target은 extractRepo/resolveRepo가 단어·점·하이픈·슬래시만 허용해 안전(확인).
 - 검증: "게임 \`whoami\` \$(id) 만들어; rm -rf x" → "게임 whoami id 만들어 rm -rf x"로 무해화.
+
+### #13 curl URL 셸 인터폴레이션 방어 + 인젝션 스윕 결과 [수정함]
+- waitHttp/checkServices의 curl ${url}을 작은따옴표로 감싸 셸 분리(url은 railway/localhost 시스템생성이라 위험 낮지만 방어적). 따옴표 자체는 제거.
+- 점검완료(이상없음): railway svc명은 [^a-zA-Z0-9-] 제거로 안전. clone repo/target은 extractRepo/resolveRepo가 단어·점·하이픈만 허용. 코드zip/스크린샷 파일경로는 sanitize된 basename. ghPost는 JSON.stringify라 셸/인젝션 무관. captureShots url은 playwright goto(셸 아님). pickPersona kw에 app/web 같은 흔한 영단어 없음(UX/PM만, 빈도낮음).
