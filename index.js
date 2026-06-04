@@ -700,7 +700,7 @@ async function handle(event, client) {
   if (!event || !event.ts) return;
   if (event.subtype || event.bot_id) return;          // 사람 메시지만 (봇/시스템/수정 무시 → 무한루프 방지)
   if (seen.has(event.ts)) return;                      // message·app_mention 중복 방지
-  seen.add(event.ts); if (seen.size > 800) seen.clear();
+  seen.add(event.ts); if (seen.size > 800) { const a = [...seen]; a.slice(0, a.length - 400).forEach(x => seen.delete(x)); } // 최근 400개만 유지(전체 비우면 직전 메시지 재처리 위험)
   if (ALLOWED.length && !ALLOWED.includes(event.user)) return;
   const channel = event.channel;
   const raw = (event.text || '').replace(/<@[^>]+>/g, '').trim();
@@ -862,6 +862,11 @@ async function handle(event, client) {
     const intent = trivial ? { action: 'chat' } : await classifyIntent(raw, ctx);
     if (['work', 'report', 'debate'].includes(intent && intent.action) && !canCommand(event.user)) {
       await postAs(client, channel, thread_ts, LEAD, '그건 지정된 사람만 시킬 수 있어. ("권한 나만"으로 잠그거나 "권한 모두"로 풀 수 있어)');
+      return;
+    }
+    // 이 채널에서 무거운 작업이 이미 도는 중이면 새로 시작 안 하고(진행상태 덮어쓰기/리소스 충돌 방지) 안내만
+    if (['work', 'report', 'debate'].includes(intent && intent.action) && activeWork[channel]) {
+      await postAs(client, channel, thread_ts, LEAD, `지금 "${(activeWork[channel].task || '').slice(0, 40)}" 하는 중이라 그것부터 끝내고 할게. 급하면 "중단"이라고 해줘.`);
       return;
     }
     const resolveR = (r) => r === '__last__' ? lastRepo[channel] : resolveRepo(r);
