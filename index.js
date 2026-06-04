@@ -565,7 +565,7 @@ async function runReport(client, channel, thread_ts, reporter, repo, task) {
   if (!GITHUB_TOKEN) { await postAs(client, channel, thread_ts, reporter, 'GITHUB_TOKEN이 없어서 조사를 못 해.'); return; }
   await postAs(client, channel, thread_ts, reporter, `${repo} 한번 까볼게. 잠깐만.`);
   const id = ++workSeq; const dir = `/tmp/r${id}`;
-  const prog = startProgress(channel, thread_ts, `${repo.split('/').pop()} 까보고 정리하는 중`);
+  const prog = startProgress(channel, thread_ts, `${repo.split('/').pop()} 까보고 정리하는 중`, reporter);
   try {
     const cl = await sh(`rm -rf ${dir} && git clone --depth 1 https://x-access-token:${GITHUB_TOKEN}@github.com/${repo}.git ${dir} && chmod -R 777 ${dir}`);
     if (cl.code !== 0) { await postAs(client, channel, thread_ts, reporter, `${mention(channel)}${repo} 레포를 못 찾았어ㅠ (이름 확인 필요)\n${(cl.err || '').slice(0, 200)}`); return; }
@@ -757,8 +757,8 @@ async function selfHeal(client, channel, thread_ts, errText) {
   finally { selfHealing = false; }
 }
 // 진행 상황 라이브 표시 — 한 메시지를 계속 갱신하며 경과시간·단계를 보여줌 (긴 작업도 살아있다는 신호)
-function startProgress(channel, thread_ts, label = '진행') {
-  const wc = clientFor(LEAD) || botClient;
+function startProgress(channel, thread_ts, label = '진행', persona = LEAD) {
+  const wc = clientFor(persona) || botClient;
   const frames = ['🕐', '🕑', '🕒', '🕓', '🕔', '🕕', '🕖', '🕗', '🕘', '🕙', '🕚', '🕛'];
   let ts = null, phase = label, started = Date.now(), tick = 0, stopped = false;
   const render = (tail) => { const s = Math.floor((Date.now() - started) / 1000); const m = Math.floor(s / 60); return `${stopped ? '☑️' : frames[tick % 12]} ${phase} ${tail || `(벌써 ${m ? m + '분 ' : ''}${s % 60}초째 하고 있어, 좀만 기다려)`}`; };
@@ -868,7 +868,7 @@ async function handle(event, client) {
       (async () => {
         const id = ++workSeq; const dir = `/tmp/dp${id}`;
         await postAs(client, channel, thread_ts, win, `${target} 다시 띄울게. 클론하고 레일웨이에 올린다.`);
-        const prog = startProgress(channel, thread_ts, `${target.split('/').pop()} 다시 배포하는 중`);
+        const prog = startProgress(channel, thread_ts, `${target.split('/').pop()} 다시 배포하는 중`, win);
         try {
           const cl = await sh(`rm -rf ${dir} && git clone --depth 1 https://x-access-token:${GITHUB_TOKEN}@github.com/${target}.git ${dir} && chmod -R 777 ${dir}`);
           if (cl.code !== 0) { await postAs(client, channel, thread_ts, win, `${mention(channel)}클론 실패ㅠ\n` + (cl.err || '').slice(0, 200)); return; }
@@ -934,7 +934,7 @@ async function handle(event, client) {
       await postAs(client, channel, thread_ts, sec, `${target} 의존성 까볼게. 취약점이랑 오래된 패키지 본다.`);
       (async () => {
         const id = ++workSeq; const dir = `/tmp/dep${id}`;
-        const prog = startProgress(channel, thread_ts, `${target.split('/').pop()} 의존성 까보는 중`);
+        const prog = startProgress(channel, thread_ts, `${target.split('/').pop()} 의존성 까보는 중`, sec);
         try {
           const cl = await sh(`rm -rf ${dir} && git clone --depth 1 https://x-access-token:${GITHUB_TOKEN}@github.com/${target}.git ${dir} && chmod -R 777 ${dir}`);
           if (cl.code !== 0) { await postAs(client, channel, thread_ts, sec, `${mention(channel)}클론 실패ㅠ\n` + (cl.err || '').slice(0, 200)); return; }
