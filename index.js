@@ -811,7 +811,7 @@ async function handoffChecklist(client, channel, thread_ts, repo, task) {
   if (!process.env.ANALYTICS_SNIPPET) todo.push('접속 통계(애널리틱스) 키 (방문자·유입 보려면 필요. 키 주면 코드에 심을게)');
   if (!process.env.CONTACT_ENDPOINT) todo.push('문의폼 받는 곳 (이메일이나 폼서비스 연결 안 하면 문의가 어디로도 안 가)');
   if (/결제|유료|구독|판매|쇼핑|커머스|payment|subscribe|pricing/i.test(t)) todo.push('결제·수익화 계정 (유료 기능 있으면 결제 연동에 너 계정 필요)');
-  if (/앱|android|ios|안드로이드|아이폰|모바일 ?앱|store/i.test(t)) todo.push('앱스토어·플레이스토어 제출 (개발자 계정 + 심사, 이건 너만 가능)');
+  if (/android|ios|안드로이드|아이폰|아이패드|모바일|네이티브|react ?native|flutter|expo|apk|app ?store|play ?store|앱스토어|플레이스토어|스토어 ?(제출|출시|등록)/i.test(t) && !/웹\s?앱|web ?app|pwa/i.test(t)) todo.push('앱스토어·플레이스토어 제출 (개발자 계정 + 심사, 이건 너만 가능)'); // 바 "앱"만으론 안 붙임 — 이 봇은 웹(Railway) 배포라 "웹앱/투두 앱"엔 스토어 제출 불필요(틀린 안내 방지). 네이티브·모바일·스토어 신호일 때만
   todo.push('법무페이지에 실제 연락처·사업자 정보 채우기 (지금 TODO로 비워뒀어)');
   todo.push('마케팅 채널 계정 (X·블로그·메일로 실제 발행하려면 그 계정/키)');
   const fmt = (arr, mark) => arr.map(x => `${mark} ${x}`).join('\n');
