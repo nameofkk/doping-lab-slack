@@ -290,6 +290,7 @@ async function liveCheck(client, channel, thread_ts, dir, repo) {
   const qa = byName('우정잉') || LEAD;
   let url = null, srv = null, target = null;
   try { url = await railwayDeploy(client, channel, thread_ts, dir, repo); } catch (e) {}
+  registerService(repo, url, channel); // 서비스 대장에 등록 (운영/마케팅 루프 대상)
   target = url;
   try {
     if (!target) {
@@ -586,6 +587,36 @@ const LASTREPO_FILE = process.env.LASTREPO_FILE || '/data/lastrepo.json';
 function loadLastRepo() { try { if (fs.existsSync(LASTREPO_FILE)) Object.assign(lastRepo, JSON.parse(fs.readFileSync(LASTREPO_FILE, 'utf8')) || {}); } catch {} }
 function persistLastRepo() { try { fs.writeFileSync(LASTREPO_FILE, JSON.stringify(lastRepo)); } catch {} }
 
+// ── 서비스 레지스트리 (회사가 운영하는 서비스 대장) — 운영/데이터/마케팅 루프의 공통 대상 ──
+const SERVICES_FILE = process.env.SERVICES_FILE || '/data/services.json';
+let services = {}; // repo -> { repo, url, channel, created, lastStatus, lastCheck }
+function loadServices() { try { if (fs.existsSync(SERVICES_FILE)) services = JSON.parse(fs.readFileSync(SERVICES_FILE, 'utf8')) || {}; } catch { services = {}; } }
+function persistServices() { try { fs.writeFileSync(SERVICES_FILE, JSON.stringify(services)); } catch {} }
+function registerService(repo, url, channel) {
+  if (!repo) return;
+  const ex = services[repo] || {};
+  services[repo] = { repo, url: url || ex.url || null, channel: channel || ex.channel, created: ex.created || Date.now(), lastStatus: ex.lastStatus, lastCheck: ex.lastCheck };
+  persistServices();
+}
+function svcList(channel) { return Object.values(services).filter(s => !channel || s.channel === channel); }
+// 운영 헬스체크 — 각 라이브 서비스 curl로 상태 확인 → 우정잉(QA/SRE)이 보고, 다운이면 윈터가 알림
+async function checkServices(client, channel, announce = true) {
+  const sre = byName('우정잉') || LEAD;
+  const list = svcList(channel).filter(s => s.url);
+  if (!list.length) { if (announce) await postAs(client, channel, undefined, sre, '아직 등록된 라이브 서비스가 없어. 뭐 하나 만들어서 배포되면 여기 대장에 올라가.'); return; }
+  const lines = [];
+  for (const s of list) {
+    const r = await sh(`curl -s -o /dev/null -w "%{http_code} %{time_total}s" --max-time 15 ${s.url} 2>/dev/null || echo "000"`);
+    const out = (r.out || '').trim(); const up = /^2\d\d|^3\d\d/.test(out);
+    s.lastStatus = up ? 'up' : 'down'; s.lastCheck = Date.now();
+    lines.push(`${up ? '🟢' : '🔴'} ${s.repo} · ${s.url} (${out || 'no response'})`);
+  }
+  persistServices();
+  await postAs(client, channel, undefined, sre, '서비스 헬스체크 결과\n' + lines.join('\n'));
+  const down = list.filter(s => s.lastStatus === 'down');
+  if (down.length) await postAs(client, channel, undefined, byName('윈터') || LEAD, `⚠️ ${down.length}개 다운됐어. 확인 필요: ${down.map(s => s.repo).join(', ')}. 라이브가 진짜 죽은 건지 내가 로그 봐야겠어.`);
+}
+
 async function handle(event, client) {
   if (!event || !event.ts) return;
   if (event.subtype || event.bot_id) return;          // 사람 메시지만 (봇/시스템/수정 무시 → 무한루프 방지)
@@ -648,6 +679,19 @@ async function handle(event, client) {
     if (m && m[2].trim()) {
       activeWork[channel] = { task: m[2].trim(), started: Date.now() };
       runDebate(client, channel, event.thread_ts || event.ts, m[2].trim(), null).catch(() => {}).finally(() => { activeWork[channel] = null; });
+      return;
+    }
+    // 운영: 서비스 대장 + 헬스체크
+    if (/(서비스|서버|운영).*(목록|현황|리스트|대장|상태)/.test(raw)) {
+      const list = svcList(channel);
+      if (!list.length) { await postAs(client, channel, thread_ts, LEAD, '아직 우리가 운영하는 서비스가 없어. 하나 만들어서 배포되면 여기 올라가.'); return; }
+      const fmt = list.map(s => `· ${s.repo}${s.url ? ' → ' + s.url : ' (라이브 미배포)'}${s.lastStatus ? ' [' + (s.lastStatus === 'up' ? '🟢' : '🔴') + ']' : ''}`).join('\n');
+      await postAs(client, channel, thread_ts, LEAD, `우리가 운영 중인 서비스 (${list.length}개)\n${fmt}`);
+      return;
+    }
+    if (/(헬스\s?체크|운영\s?점검|상태\s?점검|서비스.*점검|모니터링)/.test(raw)) {
+      await postAs(client, channel, thread_ts, byName('우정잉') || LEAD, '지금 바로 다 돌려서 살아있는지 확인할게.');
+      checkServices(client, channel).catch(e => postAs(client, channel, thread_ts, LEAD, '점검 오류: ' + String(e).slice(0, 200)));
       return;
     }
     // 스케줄 관리 명령
@@ -754,13 +798,22 @@ app.event('app_mention', async ({ event, client }) => { await handle(event, clie
   loadSettings();
   loadTasks();
   loadLastRepo();
+  loadServices();
   setInterval(persistMemory, 15000);
+  let opsLastDay = null;
+  const OPS_HOUR = parseInt(process.env.OPS_HOUR || '10', 10); // 매일 이 시각(KST)에 운영 헬스체크 자동
   setInterval(() => {
     const n = kstNow();
     for (const s of schedules) {
       if (s.kind === 'daily' && s.hour === n.h && s.minute === n.m && s.lastRunDay !== n.day) {
         s.lastRunDay = n.day; persistSchedules(); jobFor(s)().catch(() => {});
       }
+    }
+    // 매일 OPS_HOUR에 서비스가 등록된 채널마다 자동 헬스체크 (운영 부서 자동화)
+    if (n.h === OPS_HOUR && n.m === 0 && opsLastDay !== n.day) {
+      opsLastDay = n.day;
+      const chans = [...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))];
+      for (const ch of chans) checkServices(botClient, ch, false).catch(() => {});
     }
   }, 60000);
   const real = TEAM.concat(LEAD).filter(p => process.env[p.tokenEnv]).map(p => p.name);
