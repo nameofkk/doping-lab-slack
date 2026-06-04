@@ -856,7 +856,7 @@ async function guardBusy(client, channel, thread_ts) {
 }
 // 작업 실행(activeWork 세팅 + runWork + 정리) 공통
 function launchWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName) {
-  feedback[channel] = []; // 새 작업 시작 → 묵은 피드백 정리
+  feedback[channel] = []; delete pausedWork[channel]; // 새 작업 시작 → 묵은 피드백·옛 중단작업 정리(스테일 "이어서" 방지)
   activeWork[channel] = { task, started: Date.now(), by: lastRequester[channel], repo, newProject, forcePR, projName }; // 재개(이어서)용 컨텍스트 포함
   runWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName)
     .catch(e => postAs(client, channel, thread_ts, LEAD, '작업 오류: ' + String(e).slice(0, 300)))

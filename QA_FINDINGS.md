@@ -72,3 +72,8 @@
 ### #13 curl URL 셸 인터폴레이션 방어 + 인젝션 스윕 결과 [수정함]
 - waitHttp/checkServices의 curl ${url}을 작은따옴표로 감싸 셸 분리(url은 railway/localhost 시스템생성이라 위험 낮지만 방어적). 따옴표 자체는 제거.
 - 점검완료(이상없음): railway svc명은 [^a-zA-Z0-9-] 제거로 안전. clone repo/target은 extractRepo/resolveRepo가 단어·점·하이픈만 허용. 코드zip/스크린샷 파일경로는 sanitize된 basename. ghPost는 JSON.stringify라 셸/인젝션 무관. captureShots url은 playwright goto(셸 아님). pickPersona kw에 app/web 같은 흔한 영단어 없음(UX/PM만, 빈도낮음).
+
+### #14 스테일 pausedWork → 엉뚱한 "이어서" [수정함]
+- 증상: 작업A를 중단(pausedWork=A) 후 작업B를 새로 하면, pausedWork에 A가 남아 나중에 "이어서" 하면 B가 아니라 옛날 A가 재개됨.
+- 수정: launchWork(새 작업 시작) 시 pausedWork[channel] 삭제 → 새 작업이 시작되면 옛 중단작업은 잊음.
+- 점검완료(이상없음): resolveR("__named__")는 named가 truthy일 때만 설정돼 null 위험 없음. 스케줄 work는 forcePR=true로 자율변경 안전. selfHeal 대상(doping-lab-slack)은 build/index.html 없어 verifyBuild→liveCheck 안 돎(배포·스크린샷 시도 안 함). mention은 launchWork에서 by 스냅샷.
