@@ -331,7 +331,7 @@ async function railwayDeploy(client, channel, thread_ts, dir, repo) {
 }
 // 빌드 통과 후: 라이브 배포 시도 + 실제 화면(첫 화면) 스크린샷을 QA가 직접 올려 검증
 async function liveCheck(client, channel, thread_ts, dir, repo) {
-  const qa = byName('우정잉') || LEAD;
+  const qa = byName('정소민') || LEAD; // 화면 스크린샷 비주얼 검증 = UX
   let url = null, srv = null, target = null;
   try { url = await railwayDeploy(client, channel, thread_ts, dir, repo); } catch (e) {}
   registerService(repo, url, channel); // 서비스 대장에 등록 (운영/마케팅 루프 대상)
@@ -358,27 +358,28 @@ async function liveCheck(client, channel, thread_ts, dir, repo) {
 
 // 품질 게이트 — 빌드 통과 후 테스트 실행 + 의존성 취약점 스캔 + 우정잉 코드/보안 리뷰
 async function qaGate(client, channel, thread_ts, dir) {
-  const qa = byName('우정잉') || LEAD;
-  // 1) 테스트 (test 스크립트가 실제로 있고 기본 placeholder가 아니면)
+  const eng = byName('윈터') || LEAD;  // 테스트 실행 = 엔지니어링
+  const sec = byName('우정잉') || LEAD; // 취약점·보안 리뷰 = 보안
+  // 1) 테스트 (test 스크립트가 실제로 있고 기본 placeholder가 아니면) — 윈터
   const ht = await sh(`grep -q '"test"' package.json && ! grep -q 'no test specified' package.json && echo yes || echo no`, dir);
   if (ht.out.includes('yes')) {
     const tr = await sh('npm test 2>&1', dir);
-    await postAs(client, channel, thread_ts, qa, tr.code === 0 ? '테스트도 돌려봤어, 다 통과했어.' : '테스트 돌렸더니 일부 깨졌어. 이거 짚고 가자:\n' + (tr.out || '').slice(-500));
+    await postAs(client, channel, thread_ts, eng, tr.code === 0 ? '테스트도 돌려봤어, 다 통과했어.' : '테스트 돌렸더니 일부 깨졌어. 이거 짚고 가자:\n' + (tr.out || '').slice(-500));
   }
-  // 2) 의존성 취약점 스캔
+  // 2) 의존성 취약점 스캔 — 우정잉
   const au = await sh('npm audit --omit=dev 2>&1 | tail -10', dir);
-  if (/0 vulnerabilities/.test(au.out)) await postAs(client, channel, thread_ts, qa, '의존성 취약점 스캔도 깨끗해.');
-  else if ((au.out || '').trim()) await postAs(client, channel, thread_ts, qa, '의존성에 취약점 좀 떴어. 심각한 건 잡자:\n' + au.out.slice(-400));
+  if (/0 vulnerabilities/.test(au.out)) await postAs(client, channel, thread_ts, sec, '의존성 취약점 스캔도 깨끗해.');
+  else if ((au.out || '').trim()) await postAs(client, channel, thread_ts, sec, '의존성에 취약점 좀 떴어. 심각한 건 잡자:\n' + au.out.slice(-400));
   // 3) 코드/보안 리뷰 (진짜 문제만)
   const rev = await runClaude(`이 저장소를 보안·버그 관점에서 빠르게 리뷰해라. 진짜 문제만 짚어 (하드코딩된 시크릿/키, 입력검증 누락, 명백한 버그, 인증·권한 허점, 위험한 패턴). 없으면 솔직히 "큰 문제 없음"이라고 해. 지어내지 마.${PLAIN}`, 'sonnet', dir, WORK_PERMISSION_MODE, 180000);
-  if (rev.text && rev.ok !== false && !rev.limited) await postAs(client, channel, thread_ts, qa, '코드 보안/버그 리뷰했어:\n' + rev.text.trim().slice(0, 900));
+  if (rev.text && rev.ok !== false && !rev.limited) await postAs(client, channel, thread_ts, sec, '코드 보안/버그 리뷰했어:\n' + rev.text.trim().slice(0, 900));
 }
 
 // 제작 후 실제 빌드 검증 — npm 설치+빌드를 진짜로 돌려서 통과/실패를 정직하게 보고. 깨지면 1회 수정 시도.
 async function verifyBuild(client, channel, thread_ts, dir, repo) {
   const has = await sh('test -f package.json && grep -q \'"build"\' package.json && echo yes || echo no', dir);
   if (!has.out.includes('yes')) return; // 빌드 스크립트 없으면 스킵 (정적 HTML 등)
-  const qa = byName('우정잉') || LEAD;
+  const qa = byName('윈터') || LEAD; // 빌드 검증 = 엔지니어링
   await postAs(client, channel, thread_ts, qa, '잠깐, 코드만 올리고 끝내면 안 되지. 실제로 빌드되는지 내가 돌려볼게.');
   await sh('npm install --no-audit --no-fund 2>&1 | tail -3', dir);
   let bd = await sh('npm run build 2>&1', dir);
@@ -691,7 +692,7 @@ function registerService(repo, url, channel) {
 function svcList(channel) { return Object.values(services).filter(s => !channel || s.channel === channel); }
 // 운영 헬스체크 — 각 라이브 서비스 curl로 상태 확인 → 우정잉(QA/SRE)이 보고, 다운이면 윈터가 알림
 async function checkServices(client, channel, announce = true, onlyAlert = false) {
-  const sre = byName('우정잉') || LEAD;
+  const sre = byName('윈터') || LEAD; // 운영·헬스체크 = 인프라
   const list = svcList(channel).filter(s => s.url);
   if (!list.length) { if (announce && !onlyAlert) await postAs(client, channel, undefined, sre, '아직 등록된 라이브 서비스가 없어. 뭐 하나 만들어서 배포되면 여기 대장에 올라가.'); return; }
   const lines = [];
@@ -904,7 +905,7 @@ async function handle(event, client) {
       return;
     }
     if (/(헬스\s?체크|운영\s?점검|상태\s?점검|서비스.*점검|모니터링)/.test(raw)) {
-      await postAs(client, channel, thread_ts, byName('우정잉') || LEAD, '지금 바로 다 돌려서 살아있는지 확인할게.');
+      await postAs(client, channel, thread_ts, byName('윈터') || LEAD, '지금 바로 다 돌려서 살아있는지 확인할게.');
       checkServices(client, channel).catch(e => postAs(client, channel, thread_ts, LEAD, '점검 오류: ' + String(e).slice(0, 200)));
       return;
     }
@@ -915,12 +916,12 @@ async function handle(event, client) {
     }
     // 의존성 업데이트 → 안전하게 올리고 빌드 확인 후 PR
     if (/(의존성|디펜던시|패키지|dependency).*(업데이트|갱신|올려|올리|update)/.test(raw)) {
-      const sec = byName('우정잉') || LEAD;
+      const eng = byName('윈터') || LEAD; // 의존성 업데이트 = 유지보수/엔지니어링
       const target = extractRepo(raw) || lastRepo[channel];
-      if (!target) { await postAs(client, channel, thread_ts, sec, '어느 레포 의존성 올릴지 알려줘.'); return; }
+      if (!target) { await postAs(client, channel, thread_ts, eng, '어느 레포 의존성 올릴지 알려줘.'); return; }
       if (await guardBusy(client, channel, thread_ts)) return;
       activeWork[channel] = { task: '의존성 업데이트 ' + target, started: Date.now() };
-      runWork(client, channel, event.thread_ts || event.ts, target, '의존성을 안전하게 최신으로 업데이트해라. 메이저 버전 업은 호환성 깨질 수 있으니 신중히(마이너·패치 위주). package.json 갱신하고 npm install + npm run build로 안 깨지는지 꼭 확인한 다음, 뭘 올렸는지 보고해라.', false, true).catch(e => postAs(client, channel, thread_ts, sec, '업데이트 오류: ' + String(e).slice(0, 200))).finally(() => { activeWork[channel] = null; });
+      runWork(client, channel, event.thread_ts || event.ts, target, '의존성을 안전하게 최신으로 업데이트해라. 메이저 버전 업은 호환성 깨질 수 있으니 신중히(마이너·패치 위주). package.json 갱신하고 npm install + npm run build로 안 깨지는지 꼭 확인한 다음, 뭘 올렸는지 보고해라.', false, true).catch(e => postAs(client, channel, thread_ts, eng, '업데이트 오류: ' + String(e).slice(0, 200))).finally(() => { activeWork[channel] = null; });
       return;
     }
     // 의존성 점검 — 취약점(npm audit) + 오래된 패키지(npm outdated) 리포트
