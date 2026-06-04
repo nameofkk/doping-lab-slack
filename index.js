@@ -933,7 +933,7 @@ async function handle(event, client) {
     }
     if (/규칙\s*(초기화|전체삭제|리셋)/.test(raw)) { rules[channel] = []; persistRules(); await postAs(client, channel, thread_ts, LEAD, '규칙 다 지웠어.'); return; }
     // "앞으로 ~ 해라 / 항상 / 규칙 / 기억해" → 영구 규칙으로 저장하고 그렇게 일함
-    if (/(앞으로|항상|규칙으로|규칙은|기억해|명심)/.test(raw)) {
+    if (/(앞으로|항상|규칙으로|규칙은|기억해|명심)/.test(raw) && !/[?？]|할까|할래|어때|어떻게|언제|어디|왜|뭐|뭘|될까|줄까|있을까|날까|건가|는지/.test(raw) && !/짜줘|짜봐|만들어|만들래|만들자|제작|개발해|그려줘/.test(raw)) { // 질문·작업요청에 '앞으로/항상' 들어간 거 규칙으로 오저장 방지
       addRule(channel, raw);
       const who = pickPersona(raw) || LEAD;
       const res = await runClaude(`${who.prompt}${STYLE}\n\n사용자가 앞으로 팀이 지킬 규칙을 줬어: "${raw}"\n알겠다고 짧게 답하고, 앞으로 그렇게 하겠다고 해라.`, who.model);
