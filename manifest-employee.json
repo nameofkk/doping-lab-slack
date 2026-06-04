@@ -1,0 +1,22 @@
+{
+  "display_information": {
+    "name": "도핑-직원",
+    "description": "도핑연구소 직원 에이전트 (채널에서 토론 게시용)"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "직원이름",
+      "always_online": true
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": ["chat:write"]
+    }
+  },
+  "settings": {
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}
