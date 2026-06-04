@@ -901,7 +901,7 @@ function launchWork(client, channel, thread_ts, repo, task, newProject, forcePR,
 // 작업(신규 제작이든 기존 수정이든) 시작 전, 정말 방향이 갈리는 중요한 결정이 있으면 사용자에게 먼저 물어봄 (없으면 그냥 진행)
 async function planQuestions(task, newProject) {
   try {
-    const r = await runClaude(`${newProject ? '새 프로젝트' : '기존 프로젝트 수정/작업'} 요청: ${JSON.stringify(task)}\n\n이걸 ${newProject ? '만들기' : '작업하기'} 전에 사용자한테 꼭 확인해야 할 중요한 결정이 있으면 1~3개만 질문으로 뽑아. 정말 방향이 크게 갈려서 잘못 정하면 다시 해야 하는 것만(예: 핵심 컨셉/타겟, 꼭 필요한 기능 범위, 톤·스타일, 플랫폼, 어떤 방식으로 구현할지 갈리는 선택). 요청에 이미 답이 있거나 사소하면 절대 묻지 마(빈 배열). 질문은 반드시 한국어로 자연스럽게 써라(영어 금지). JSON만 출력: {"questions":["한국어 질문","..."]}`, 'haiku');
+    const r = await runClaude(`${newProject ? '새 프로젝트' : '기존 프로젝트 수정/작업'} 요청: ${JSON.stringify(task)}\n\n이걸 ${newProject ? '만들기' : '작업하기'} 전에 사용자한테 꼭 확인해야 할 중요한 결정이 있으면 1~3개만 질문으로 뽑아. 정말 방향이 크게 갈려서 잘못 정하면 다시 해야 하는 것만(예: 핵심 컨셉/타겟, 꼭 필요한 기능 범위, 톤·스타일, 플랫폼, 어떤 방식으로 구현할지 갈리는 선택). 요청에 이미 답이 있거나 사소하면 절대 묻지 마(빈 배열).\n\n[중요·반드시 지켜] 오직 위 요청 텍스트만 보고 판단해라. 파일시스템·현재 디렉토리·주변 코드를 들여다보지 마라(거기 뭐가 있든 무관). 그리고 다음은 절대 묻지 마라: 어떤 프로젝트/레포인지, 파일·폴더 경로, 현재 코드가 뭔지, 어디에 있는지 — 그건 시스템이 이미 정했고 너가 물을 게 아니다. 질문은 반드시 한국어로 자연스럽게(영어 금지). JSON만 출력: {"questions":["한국어 질문","..."]}`, 'haiku');
     const m = (r.text || '').match(/\{[\s\S]*\}/);
     const o = m ? JSON.parse(m[0]) : {};
     return Array.isArray(o.questions) ? o.questions.filter(q => typeof q === 'string' && q.trim()).slice(0, 3) : [];
@@ -910,7 +910,8 @@ async function planQuestions(task, newProject) {
 async function startWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName) {
   // 이미 질문 던져놓고 답 기다리는 중이면 똑같은 질문 또 안 함 (같은 요청 재전송 시 무한 질문 방지)
   if (pendingProject[channel]) { await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}아까 물어본 거에 답해주면 바로 들어갈게. 알아서 정해도 되면 "알아서 해"라고 해도 돼.`); return; }
-  const qs = await planQuestions(task, newProject);
+  // 기존 레포 작업·이어가기·완성은 질문 없이 바로 진행 (정체성/경로 같은 쓸데없는 재질문 마찰 제거). 질문은 방향이 크게 갈리는 '신규 제작'에서만.
+  const qs = newProject ? await planQuestions(task, newProject) : [];
   if (qs.length) {
     pendingProject[channel] = { repo, task, newProject, forcePR, projName, at: Date.now() }; persistPending();
     await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오 좋다. ${newProject ? '만들기' : '작업'} 전에 이것만 먼저 정해주라:\n${qs.map((q, i) => `${i + 1}. ${q}`).join('\n')}\n\n답 주면 그대로 들어갈게. 알아서 정해도 되면 "알아서 해"라고 해도 돼.`);
