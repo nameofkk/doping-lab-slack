@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "figma": {
+      "command": "figma-developer-mcp",
+      "args": ["--stdio"],
+      "env": { "FIGMA_API_KEY": "${FIGMA_API_KEY}" }
+    }
+  }
+}

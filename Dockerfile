@@ -3,12 +3,14 @@
 FROM node:20-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl python3 python3-pip python3-venv && rm -rf /var/lib/apt/lists/*
-RUN npm install -g @anthropic-ai/claude-code
+RUN npm install -g @anthropic-ai/claude-code figma-developer-mcp
+# root와 uid1000이 같은 clone 디렉토리를 둘 다 신뢰 (dubious ownership 방지)
+RUN git config --system --add safe.directory '*'
 
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm install --omit=dev
-COPY index.js ./
+COPY index.js .mcp.json ./
 
 ENV WORKDIR=/app
 # 필요한 런타임 env (Railway 변수로 주입):

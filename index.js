@@ -84,6 +84,7 @@ async function runClaude(prompt, model, cwd = WORKDIR, perm = CLAUDE_PERMISSION_
   return new Promise(resolve => {
     const args = ['-p', prompt, '--output-format', 'json', '--permission-mode', perm];
     if (model) args.push('--model', model);
+    if (process.env.FIGMA_API_KEY) args.push('--mcp-config', '/app/.mcp.json');
     const opts = { cwd, env: { ...process.env, HOME: '/tmp' }, stdio: ['ignore', 'pipe', 'pipe'] };
     try { if (process.getuid && process.getuid() === 0) { opts.uid = 1000; opts.gid = 1000; } } catch (e) {}
     const child = spawn('claude', args, opts);
@@ -135,7 +136,7 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
 }
 
 // ── 실제 작업 모드: 레포 클론 → claude 코드 작업 → 브랜치 push → PR → 보고 ──
-let workSeq = 0; const workCancel = {}; const activeWork = {};
+let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {};
 function workStatusCtx(channel) {
   const w = activeWork[channel];
   if (!w) return '\n[작업 상태] 지금 백그라운드에서 진행 중인 코드작업 없음.';
@@ -175,6 +176,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   } else {
     await postAs(client, channel, thread_ts, LEAD, `🛠️ 작업 받았어요\n레포: ${repo}\n할 일: ${task}\n클론하고 코드 손본 다음 ${WORK_BASE}에 바로 반영할게요. 좀 걸려요.`);
   }
+  lastRepo[channel] = repo; // 채널이 방금 다룬 레포 기억 (후속 "이거 고쳐줘" 문맥용)
   const cl = await sh(`rm -rf ${dir} && git clone https://x-access-token:${GITHUB_TOKEN}@github.com/${repo}.git ${dir} && chmod -R 777 ${dir}`);
   if (cl.code !== 0) { await postAs(client, channel, thread_ts, LEAD, '클론 실패ㅠ\n' + (cl.err || '').slice(0, 600)); return; }
   await sh(`git config user.name "doping-lab[bot]" && git config user.email "bot@doping.lab"`, dir);
@@ -502,13 +504,19 @@ async function handle(event, client) {
       await postAs(client, channel, thread_ts, LEAD, '그건 지정된 사람만 시킬 수 있어. ("권한 나만"으로 잠그거나 "권한 모두"로 풀 수 있어)');
       return;
     }
+    const resolveR = (r) => r === '__last__' ? lastRepo[channel] : resolveRepo(r);
     if (['work', 'report', 'debate'].includes(intent && intent.action) && intent.repo === 'unknown') {
-      await postAs(client, channel, thread_ts, LEAD, '어느 프로젝트(레포)를 말하는 거야? sponono, wewantpeace, myungjak 중에 있어, 아니면 정확한 레포 이름 알려줘. 모르는 채로는 엉뚱한 데 손대거나 헛소리해서 안 할게.');
-      return;
+      // 방금 다룬 레포가 있고 후속/지시대명사성 메시지면 그 레포로 이어감 (추측이 아니라 직전 문맥)
+      const followup = /이거|이것|그거|그것|저거|위에|방금|아까|좀전|실패|에러|error|오류|안돼|안 ?되|고쳐|해결|다시|계속|이어/i.test(raw);
+      if (followup && lastRepo[channel]) { intent.repo = '__last__'; intent.newProject = false; }
+      else {
+        await postAs(client, channel, thread_ts, LEAD, '어느 프로젝트(레포)를 말하는 거야? sponono, wewantpeace, myungjak 중에 있어, 아니면 정확한 레포 이름 알려줘. 모르는 채로는 엉뚱한 데 손대거나 헛소리해서 안 할게.');
+        return;
+      }
     }
     if (intent && intent.action === 'work' && intent.task) {
       const newProject = !!intent.newProject;
-      const repo = newProject ? WORK_DEFAULT_REPO : resolveRepo(intent.repo);
+      const repo = newProject ? WORK_DEFAULT_REPO : resolveR(intent.repo);
       activeWork[channel] = { task: intent.task, started: Date.now() };
       runWork(client, channel, event.thread_ts || event.ts, repo, intent.task, newProject, !!settings.approval[channel]).catch(e => postAs(client, channel, thread_ts, LEAD, '작업 오류: ' + String(e).slice(0, 300))).finally(() => { activeWork[channel] = null; });
       return;
@@ -516,11 +524,11 @@ async function handle(event, client) {
     if (intent && intent.action === 'report' && intent.task) {
       const reporter = pickPersona(event.text || '') || LEAD;
       activeWork[channel] = { task: intent.task, started: Date.now() };
-      runReport(client, channel, event.thread_ts || event.ts, reporter, resolveRepo(intent.repo), intent.task).catch(e => postAs(client, channel, thread_ts, LEAD, '조사 오류: ' + String(e).slice(0, 300))).finally(() => { activeWork[channel] = null; });
+      runReport(client, channel, event.thread_ts || event.ts, reporter, resolveR(intent.repo), intent.task).catch(e => postAs(client, channel, thread_ts, LEAD, '조사 오류: ' + String(e).slice(0, 300))).finally(() => { activeWork[channel] = null; });
       return;
     }
     if (intent && intent.action === 'debate' && intent.task) {
-      const drepo = (intent.repo && intent.repo !== 'new') ? resolveRepo(intent.repo) : null;
+      const drepo = (intent.repo && intent.repo !== 'new') ? resolveR(intent.repo) : null;
       activeWork[channel] = { task: intent.task, started: Date.now() };
       runDebate(client, channel, event.thread_ts || event.ts, intent.task, drepo).catch(e => postAs(client, channel, thread_ts, LEAD, '토론 오류: ' + String(e).slice(0, 300))).finally(() => { activeWork[channel] = null; });
       return;
@@ -548,6 +556,8 @@ app.event('message', async ({ event, client }) => { await handle(event, client);
 app.event('app_mention', async ({ event, client }) => { await handle(event, client); });
 
 (async () => {
+  // root와 uid1000(claude)이 같은 clone 디렉토리를 둘 다 신뢰하도록 (dubious ownership 방지)
+  try { await sh(`git config --system --add safe.directory '*'`); } catch (e) {}
   await app.start();
   botClient = app.client;
   await resolveIds();
