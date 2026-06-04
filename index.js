@@ -498,7 +498,8 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const chk = await sh('git diff --cached --quiet; echo $?', dir);
   if (chk.out.trim().endsWith('0')) { await postAs(client, channel, thread_ts, LEAD, `변경/생성된 게 없었어.\n${repoUrl}\n\n` + (res.text || '').trim().slice(0, 1500)); return; }
   if (workCancel[channel]) { delete workCancel[channel]; await postAs(client, channel, thread_ts, LEAD, '작업 중단했어. main엔 아무것도 안 올렸어.'); return; }
-  await sh(`git commit -m "도핑연구소: ${task.slice(0, 60).replace(/"/g, '')}"`, dir);
+  const cmsg = task.slice(0, 60).replace(/[`$"\\!\r\n;|&<>()]/g, '').trim() || '작업'; // 셸 명령치환/인젝션 방지 (백틱·$·따옴표 등 제거)
+  await sh(`git commit -m "도핑연구소: ${cmsg}"`, dir);
   prog.phase('빌드 되나 돌려보고 라이브로 띄우는 중');
   let mainErr = '';
   if (!forcePR) {
