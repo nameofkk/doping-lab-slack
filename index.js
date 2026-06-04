@@ -867,6 +867,8 @@ async function planQuestions(task, newProject) {
   } catch { return []; }
 }
 async function startWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName) {
+  // 이미 질문 던져놓고 답 기다리는 중이면 똑같은 질문 또 안 함 (같은 요청 재전송 시 무한 질문 방지)
+  if (pendingProject[channel]) { await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}아까 물어본 거에 답해주면 바로 들어갈게. 알아서 정해도 되면 "알아서 해"라고 해도 돼.`); return; }
   const qs = await planQuestions(task, newProject);
   if (qs.length) {
     pendingProject[channel] = { repo, task, newProject, forcePR, projName, at: Date.now() }; persistPending();
@@ -910,7 +912,7 @@ async function handle(event, client) {
     // 스테일 activeWork 자동 해제 — 12분 넘게 잡혀있는데 안 끝났으면 끊긴 걸로 보고 풀어줌 (피드백 무한루프/벽돌화 방지)
     if (activeWork[channel] && activeWork[channel].started && Date.now() - activeWork[channel].started > 12 * 60 * 1000) { activeWork[channel] = null; feedback[channel] = []; }
     // 재개 — 중단했던 작업을 새로 만들지 말고 그대로 이어감
-    if (!activeWork[channel] && pausedWork[channel] && /^(이어서|이어가|이어|계속(해|하자|진행)?|마저|다시\s*진행|아까\s*거|이전\s*거)/.test(raw)) {
+    if (!activeWork[channel] && pausedWork[channel] && (/^(이어서|이어가|이어|계속(해|하자|진행)?|마저|다시\s*진행|아까\s*거|이전\s*거)/.test(raw) || /(이전에|전에|아까)\s*하던\s*거|하던\s*거\s*(그대로|다시|이어)/.test(raw))) {
       const pw = pausedWork[channel]; delete pausedWork[channel];
       await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, 아까 "${(pw.task || '').slice(0, 40)}" 그거 다시 이어갈게.`);
       launchWork(client, channel, thread_ts, pw.repo, pw.task, pw.newProject, pw.forcePR, pw.projName);
