@@ -53,6 +53,8 @@ const LEAD = { name: '한로로 (팀장)', kw: ['한로로','로로','팀장'], 
 
 // 모든 발언에 적용되는 말투/가독성 규칙
 const STYLE = '\n\n[말투 규칙] 실제 한국 여성이 친한 동료랑 메신저로 편하게 수다 떨듯 자연스러운 구어체로 써라. 딱딱한 문어체나 설명조, 번역투 금지. 대시 기호(—, –, ㅡ, -)는 절대 쓰지 마라. 끊고 싶으면 문장을 나누거나 쉼표나 줄바꿈으로 해라. AI 티 나는 말투(도와드릴 수 있어요, ~에 대해 말씀드리면, 불필요한 사과나 안내) 금지. 마크다운 볼드 별표(**)나 머리표(#)도 쓰지 마라. 핵심만 2~4문장으로 짧고 친근하게, 읽기 쉽게.';
+// 너희 자신에 대해 물으면 정직하게 답할 사실 (모델 등)
+const SELF = '\n\n[너에 대한 사실 — 물어보면 이것만 정직하게, 모르면 모른다고 해] 너는 도핑연구소 팀원이고 Claude Code(클코)를 구독 토큰으로 헤드리스 실행해서 돌아가. 너(페르소나)랑 팀장 한로로는 Claude Opus 모델로 동작해(최근에 sonnet에서 opus로 올렸어). 메시지 의도분류는 haiku, 실제 코드작업이랑 프로젝트 조사는 sonnet로 돌아. 이게 전부야.';
 // 작업/조사 보고용 — 마크다운 금지 + 사람 말투 (길이는 제한 안 함)
 const PLAIN = '\n\n[형식·말투 규칙] 마크다운 절대 금지: 별표(**), 샵(#), 표(|), 대시(—,–,ㅡ). 딱딱한 보고체("~다", "~상태다", "~된다", "~음") 쓰지 말고, 친한 동료한테 말하듯 편한 구어체로 써(예: ~야, ~거든, ~더라, ~인데). AI 말투(말씀드리면, ~할 수 있습니다) 금지. 내용은 충분히 쓰되 줄바꿈으로 읽기 쉽게.';
 // 디자인 작업 시 항상 적용 — 사용자가 늘 쓰던 디자인 기준(PRD 기반)
@@ -299,7 +301,7 @@ const seen = new Set();
 // 특정 단어 없이도 메시지가 "작업 요청"인지 AI가 판단
 async function classifyIntent(text, ctx) {
   try {
-    const res = await runClaude(`${ctx ? '[최근 대화]\n' + ctx + '\n\n' : ''}다음 메시지의 의도를 판단해서 JSON만 출력해라. 설명 금지.\n메시지: ${JSON.stringify(text)}\n\n형식: {"action": "work"|"report"|"debate"|"chat", "task": "할 일/주제/볼 것을 한 문장", "newProject": true|false, "repo": "sponono|wewantpeace|myungjak|new 중 해당"}\n기준: 코드를 만들/고치/추가/개선/구현하라면 action=work. 프로젝트의 현황·상태·운영·구조를 조사·보고하라면 action=report. "토론하자/논의하자/토론해줘"처럼 새로운 주제로 팀 토론을 새로 시작하라고 할 때만 action=debate(task=토론 주제). 단 "다른 의견은?", "더 말해봐", "넌 어때", "다른사람들은?" 같은 진행 중 대화의 추가 질문이나 안부·잡담·단순 질문은 action=chat. 새 홈페이지/사이트/포트폴리오/앱이면 newProject=true 이고 repo=new. 위원트피스=wewantpeace, 스포노노=sponono, 명작=myungjak. 사용자가 말한 프로젝트가 sponono/wewantpeace/myungjak 중 어느 것도 아니거나 어느 프로젝트인지 불명확하면 repo는 반드시 "unknown"으로 해. 절대 가까운 걸로 추측해서 고르지 마. 이 슬랙 봇(도핑연구소 봇/너희들 자체)을 고치라면 repo="bot".`, 'haiku');
+    const res = await runClaude(`${ctx ? '[최근 대화]\n' + ctx + '\n\n' : ''}다음 메시지의 의도를 판단해서 JSON만 출력해라. 설명 금지.\n메시지: ${JSON.stringify(text)}\n\n형식: {"action": "work"|"report"|"debate"|"chat", "task": "할 일/주제/볼 것을 한 문장", "newProject": true|false, "repo": "sponono|wewantpeace|myungjak|new 중 해당"}\n기준: 코드를 만들/고치/추가/개선/구현하라면 action=work. 프로젝트의 현황·상태·운영·구조를 조사·보고하라면 action=report. "토론하자/논의하자/토론해줘"처럼 새로운 주제로 팀 토론을 새로 시작하라고 할 때만 action=debate(task=토론 주제). 단 "다른 의견은?", "더 말해봐", "넌 어때", "다른사람들은?" 같은 진행 중 대화의 추가 질문이나 안부·잡담·단순 질문은 action=chat. 너희(이 봇/팀원들) 자신에 대한 질문(누가 뭐 담당하냐, 무슨 모델 쓰냐, 자기소개, 인사, "각자 ~해봐" 같은 멤버 호출)은 프로젝트 보고가 아니라 action=chat. 새 홈페이지/사이트/포트폴리오/앱이면 newProject=true 이고 repo=new. 위원트피스=wewantpeace, 스포노노=sponono, 명작=myungjak. 사용자가 말한 프로젝트가 sponono/wewantpeace/myungjak 중 어느 것도 아니거나 어느 프로젝트인지 불명확하면 repo는 반드시 "unknown"으로 해. 절대 가까운 걸로 추측해서 고르지 마. 이 슬랙 봇(도핑연구소 봇/너희들 자체)을 고치라면 repo="bot".`, 'haiku');
     const mm = (res.text || '').match(/\{[\s\S]*\}/);
     return mm ? JSON.parse(mm[0]) : { action: 'chat' };
   } catch { return { action: 'chat' }; }
@@ -523,10 +525,12 @@ async function handle(event, client) {
       // 방금 다룬 레포가 있고 후속/지시대명사성 메시지면 그 레포로 이어감 (추측이 아니라 직전 문맥)
       const followup = /이거|이것|그거|그것|저거|위에|방금|아까|좀전|실패|에러|error|오류|안돼|안 ?되|고쳐|해결|다시|계속|이어/i.test(raw);
       if (followup && lastRepo[channel]) { intent.repo = '__last__'; intent.newProject = false; }
-      else {
+      else if (intent.action === 'work') {
+        // 코드를 실제로 고치는 work만 대상이 꼭 필요 → 모르면 물어봄(추측 금지)
         await postAs(client, channel, thread_ts, LEAD, '어느 프로젝트(레포)를 말하는 거야? sponono, wewantpeace, myungjak 중에 있어, 아니면 정확한 레포 이름 알려줘. 모르는 채로는 엉뚱한 데 손대거나 헛소리해서 안 할게.');
         return;
       }
+      else { intent.action = 'chat'; } // report/debate인데 대상 불명 → 게이트 대신 그냥 대화로 답함(레포 안 건드림)
     }
     if (intent && intent.action === 'work' && intent.task) {
       const newProject = !!intent.newProject;
@@ -549,13 +553,13 @@ async function handle(event, client) {
     }
     const targeted = pickPersona(event.text || '');
     if (targeted) {
-      const res = await runClaude(`${targeted.prompt}${STYLE}${rulesCtx(channel)}${workStatusCtx(channel)}\n\n[최근 대화]\n${ctx}\n\n[방금 들은 말]\n${raw}\n\n위 맥락을 보고 너답게 대답해. 백그라운드 작업 진행상황은 [작업 상태]에 있는 사실만 말하고, 진행률이나 완료를 절대 지어내지 마.`, targeted.model);
+      const res = await runClaude(`${targeted.prompt}${STYLE}${SELF}${rulesCtx(channel)}${workStatusCtx(channel)}\n\n[최근 대화]\n${ctx}\n\n[방금 들은 말]\n${raw}\n\n위 맥락을 보고 너답게 대답해. 백그라운드 작업 진행상황은 [작업 상태]에 있는 사실만 말하고, 진행률이나 완료를 절대 지어내지 마.`, targeted.model);
       await postAs(client, channel, thread_ts, targeted, (res.text || '').trim().slice(0, 3000));
     } else {
       // 아무도 안 부른 일반 메시지 → 랜덤하게 1~3명이 답장 + 일부 이모지
       const responders = pickRandom(ALL, 1 + Math.floor(Math.random() * 3));
       for (const p of responders) {
-        const r2 = await runClaude(`${p.prompt}${STYLE}${rulesCtx(channel)}${workStatusCtx(channel)}\n\n[최근 대화]\n${ctx}\n\n[방금 들은 말]\n${raw}\n\n위 맥락 보고 너답게 짧게 한마디 해. 작업 진행상황은 [작업 상태] 사실만 말하고 지어내지 마.`, p.model);
+        const r2 = await runClaude(`${p.prompt}${STYLE}${SELF}${rulesCtx(channel)}${workStatusCtx(channel)}\n\n[최근 대화]\n${ctx}\n\n[방금 들은 말]\n${raw}\n\n위 맥락 보고 너답게 짧게 한마디 해. 작업 진행상황은 [작업 상태] 사실만 말하고 지어내지 마.`, p.model);
         await postAs(client, channel, thread_ts, p, (r2.text || '').trim().slice(0, 1500));
       }
       casualLayer(event, client, responders, { noComment: true }).catch(() => {});
