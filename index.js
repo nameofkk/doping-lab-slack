@@ -694,6 +694,7 @@ function parseDaily(text) {
   let h = parseInt(m[2]); const min = m[3] ? parseInt(m[3]) : 0;
   if (/(오후|저녁|밤)/.test(m[1] || '') && h < 12) h += 12;
   if (/(오전|아침)/.test(m[1] || '') && h === 12) h = 0;
+  if (/(밤|저녁)/.test(m[1] || '') && h === 12) h = 0; // "밤 12시" = 자정(0시). (오후 12시는 정오로 유지)
   if (h > 23 || min > 59) return null;
   return { hour: h, minute: min };
 }
