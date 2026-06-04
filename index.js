@@ -439,7 +439,8 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
       name = `${base}-${n}`;
     }
     await postAs(client, channel, thread_ts, LEAD, `🆕 새 프로젝트 만들게: ${name}\n요청: ${task}\n깃허브에 레포 만들고 처음부터 짜볼게. 좀 걸려.`);
-    const created = await ghPost('/user/repos', { name, private: true, auto_init: true, description: `도핑연구소: ${task.slice(0, 80)}` });
+    const desc = `도핑연구소: ${task}`.replace(/[\r\n\t\x00-\x1f\x7f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200); // 깃허브 description은 제어문자(줄바꿈 등) 금지
+    const created = await ghPost('/user/repos', { name, private: true, auto_init: true, description: desc });
     if (created && created.full_name) { repo = created.full_name; }
     else { await postAs(client, channel, thread_ts, LEAD, '레포 생성 실패ㅠ\n' + JSON.stringify(created || {}).slice(0, 250)); return; }
   } else {
@@ -490,7 +491,8 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   await sh(`git checkout -b ${branch}`, dir);
   const pushB = await sh(`git push origin ${branch}`, dir);
   if (pushB.code !== 0) { await postAs(client, channel, thread_ts, LEAD, `push 실패ㅠ\n${mainErr ? 'main: ' + mainErr + '\n' : ''}branch: ${(pushB.err || '').slice(0, 250)}`); return; }
-  const pr = await ghPost(`/repos/${repo}/pulls`, { title: `도핑연구소: ${task.slice(0, 60)}`, head: branch, base: WORK_BASE, body: (res.text || task).slice(0, 4000) });
+  const prTitle = `도핑연구소: ${task}`.replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 70);
+  const pr = await ghPost(`/repos/${repo}/pulls`, { title: prTitle, head: branch, base: WORK_BASE, body: (res.text || task).slice(0, 4000) });
   const url = pr && pr.html_url ? pr.html_url : `(브랜치: ${branch})`;
   const n2 = await distributeReport(client, channel, thread_ts, res.text);
   if (!n2) await postAs(client, channel, thread_ts, LEAD, (res.text || '').trim().slice(0, 1500));
