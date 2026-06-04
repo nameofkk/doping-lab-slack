@@ -52,11 +52,11 @@ const LEAD = { name: '한로로 (팀장)', kw: ['한로로','로로','팀장'], 
   prompt: '너는 도핑연구소 팀장이고 이름은 한로로다(최상위 모델). 진솔하고 본질을 짚는 스타일로 팀을 이끈다. 질문엔 직접 답하고, 기획 토론을 종합할 땐 목적·핵심기능·리스크 대응·다음 액션으로 정리한다.' };
 
 // 모든 발언에 적용되는 말투/가독성 규칙
-const STYLE = '\n\n[말투 규칙] 실제 한국 여성이 친한 동료랑 메신저로 편하게 수다 떨듯 자연스러운 구어체로 써라. 딱딱한 문어체나 설명조, 번역투 금지. 대시 기호(—, –, ㅡ, -)는 절대 쓰지 마라. 끊고 싶으면 문장을 나누거나 쉼표나 줄바꿈으로 해라. AI 티 나는 말투(도와드릴 수 있어요, ~에 대해 말씀드리면, 불필요한 사과나 안내) 금지. 마크다운 볼드 별표(**)나 머리표(#)도 쓰지 마라. 핵심만 2~4문장으로 짧고 친근하게, 읽기 쉽게. 중요: 네 속생각이나 "이렇게 답하자, 솔직하게 말하고 넘어가자, 사용자 화났네" 같은 메타 서술·지문은 절대 쓰지 말고, 실제로 상대한테 할 말만 바로 해라.';
+const STYLE = '\n\n[말투 규칙] 실제 한국 여성이 친한 동료랑 메신저로 편하게 수다 떨듯 자연스러운 구어체로 써라. 무조건 반말로 일관되게 써라 — 존댓말(~요, ~습니다, ~에요)을 절대 섞지 마라(한 메시지 안에서 반말/존댓말 왔다갔다 금지). 딱딱한 문어체나 설명조, 번역투 금지. 대시 기호(—, –, ㅡ, -)는 절대 쓰지 마라. 끊고 싶으면 문장을 나누거나 쉼표나 줄바꿈으로 해라. AI 티 나는 말투(도와드릴 수 있어요, ~에 대해 말씀드리면, 불필요한 사과나 안내) 금지. 마크다운 볼드 별표(**)나 머리표(#)도 쓰지 마라. 핵심만 2~4문장으로 짧고 친근하게, 읽기 쉽게. 중요: 네 속생각이나 "이렇게 답하자, 솔직하게 말하고 넘어가자, 사용자 화났네" 같은 메타 서술·지문은 절대 쓰지 말고, 실제로 상대한테 할 말만 바로 해라.';
 // 너희 자신에 대해 물으면 정직하게 답할 사실 (모델 등)
-const SELF = '\n\n[너에 대한 사실 — 물어보면 이것만 정직하게, 모르면 모른다고 해] 너는 도핑연구소 팀원이고 Claude Code(클코)를 구독 토큰으로 헤드리스 실행해서 돌아가. 너(페르소나)랑 팀장 한로로는 Claude Opus 모델로 동작해(최근에 sonnet에서 opus로 올렸어). 메시지 의도분류는 haiku, 실제 코드작업이랑 프로젝트 조사는 sonnet로 돌아. 이게 전부야.';
+const SELF = '\n\n[너에 대한 사실 — 물어보면 이것만 정직하게, 모르면 모른다고 해] 너는 도핑연구소 팀원이고 Claude Code(클코)를 구독 토큰으로 헤드리스 실행해서 돌아가. 팀장 한로로는 Claude Opus, 나머지 팀원들은 Claude Sonnet으로 동작해(사용량 한도 아끼려고 팀원은 sonnet, 팀장만 opus로 맞춰놨어). 메시지 의도분류는 haiku로 돌아. 이게 전부야.';
 // 작업/조사 보고용 — 마크다운 금지 + 사람 말투 (길이는 제한 안 함)
-const PLAIN = '\n\n[형식·말투 규칙 — 항상] 마크다운 절대 금지: 별표(**), 샵(#), 표(|), 대시(—,–,ㅡ). 딱딱한 보고체("~다", "~상태다", "~된다", "~음") 쓰지 말고, 친한 동료한테 말하듯 편한 구어체로 써(예: ~야, ~거든, ~더라, ~인데). AI 말투(말씀드리면, ~할 수 있습니다) 금지. 어려운 전문용어는 그냥 쓰지 말고 쉬운 말로 풀어서, 모르는 사람도 한 번에 이해되게 써. 내용은 충분히 쓰되 짧은 문장과 줄바꿈으로 읽기 쉽게.';
+const PLAIN = '\n\n[형식·말투 규칙 — 항상] 마크다운 절대 금지: 별표(**), 샵(#), 표(|), 대시(—,–,ㅡ). 무조건 반말로 일관되게(존댓말 ~요/~습니다 섞지 마). 딱딱한 보고체("~다", "~상태다", "~된다", "~음") 쓰지 말고, 친한 동료한테 말하듯 편한 구어체로 써(예: ~야, ~거든, ~더라, ~인데). AI 말투(말씀드리면, ~할 수 있습니다) 금지. 어려운 전문용어는 그냥 쓰지 말고 쉬운 말로 풀어서, 모르는 사람도 한 번에 이해되게 써. 내용은 충분히 쓰되 짧은 문장과 줄바꿈으로 읽기 쉽게.';
 // 디자인 작업 시 항상 적용 — 사용자가 늘 쓰던 디자인 기준(PRD 기반)
 const DESIGN_RULE = `
 
@@ -392,7 +392,7 @@ async function verifyBuild(client, channel, thread_ts, dir, repo) {
 }
 
 async function runWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName) {
-  if (!GITHUB_TOKEN) { await postAs(client, channel, thread_ts, LEAD, 'GITHUB_TOKEN이 아직 없어서 작업 모드는 못 돌려요. 토큰만 넣으면 바로 돼요.'); return; }
+  if (!GITHUB_TOKEN) { await postAs(client, channel, thread_ts, LEAD, 'GITHUB_TOKEN이 아직 없어서 작업 모드는 못 돌려. 토큰만 넣으면 바로 돼.'); return; }
   const id = ++workSeq;
   workCancel[channel] = false;
   const dir = `/tmp/w${id}`;
@@ -406,12 +406,12 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
       if (!ex || !ex.full_name) break;   // 비어있음 → 이 이름 사용
       name = `${base}-${n}`;
     }
-    await postAs(client, channel, thread_ts, LEAD, `🆕 새 프로젝트 만들게요: ${name}\n요청: ${task}\nGitHub에 레포 만들고 처음부터 짜볼게요. 좀 걸려요.`);
+    await postAs(client, channel, thread_ts, LEAD, `🆕 새 프로젝트 만들게: ${name}\n요청: ${task}\n깃허브에 레포 만들고 처음부터 짜볼게. 좀 걸려.`);
     const created = await ghPost('/user/repos', { name, private: true, auto_init: true, description: `도핑연구소: ${task.slice(0, 80)}` });
     if (created && created.full_name) { repo = created.full_name; }
     else { await postAs(client, channel, thread_ts, LEAD, '레포 생성 실패ㅠ\n' + JSON.stringify(created || {}).slice(0, 250)); return; }
   } else {
-    await postAs(client, channel, thread_ts, LEAD, `🛠️ 작업 받았어요\n레포: ${repo}\n할 일: ${task}\n클론하고 코드 손본 다음 ${forcePR ? 'PR로 올릴게요(승인모드)' : WORK_BASE + '에 바로 반영할게요'}. 좀 걸려요.`);
+    await postAs(client, channel, thread_ts, LEAD, `🛠️ 작업 받았어\n레포: ${repo}\n할 일: ${task}\n클론하고 코드 손본 다음 ${forcePR ? 'PR로 올릴게(승인모드)' : WORK_BASE + '에 바로 반영할게'}. 좀 걸려.`);
   }
   lastRepo[channel] = repo; persistLastRepo(); // 채널이 방금 다룬 레포 기억 (후속 "이거 고쳐줘" 문맥용, 재배포에도 유지)
   const prog = startProgress(channel, thread_ts, '일단 레포 받아오는 중');
@@ -435,7 +435,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   await sh('git add -A', dir);
   const repoUrl = `https://github.com/${repo}`;
   const chk = await sh('git diff --cached --quiet; echo $?', dir);
-  if (chk.out.trim().endsWith('0')) { await postAs(client, channel, thread_ts, LEAD, `변경/생성된 게 없었어요.\n${repoUrl}\n\n` + (res.text || '').trim().slice(0, 1500)); return; }
+  if (chk.out.trim().endsWith('0')) { await postAs(client, channel, thread_ts, LEAD, `변경/생성된 게 없었어.\n${repoUrl}\n\n` + (res.text || '').trim().slice(0, 1500)); return; }
   if (workCancel[channel]) { delete workCancel[channel]; await postAs(client, channel, thread_ts, LEAD, '작업 중단했어. main엔 아무것도 안 올렸어.'); return; }
   await sh(`git commit -m "도핑연구소: ${task.slice(0, 60).replace(/"/g, '')}"`, dir);
   prog.phase('빌드 되나 돌려보고 라이브로 띄우는 중');
@@ -560,11 +560,11 @@ function extractRepo(raw) {
   return null;
 }
 async function runReport(client, channel, thread_ts, reporter, repo, task) {
-  if (!GITHUB_TOKEN) { await postAs(client, channel, thread_ts, reporter, 'GITHUB_TOKEN이 없어서 조사를 못 해요.'); return; }
-  await postAs(client, channel, thread_ts, reporter, `${repo} 한번 까볼게요. 잠깐만요.`);
+  if (!GITHUB_TOKEN) { await postAs(client, channel, thread_ts, reporter, 'GITHUB_TOKEN이 없어서 조사를 못 해.'); return; }
+  await postAs(client, channel, thread_ts, reporter, `${repo} 한번 까볼게. 잠깐만.`);
   const id = ++workSeq; const dir = `/tmp/r${id}`;
   const cl = await sh(`rm -rf ${dir} && git clone --depth 1 https://x-access-token:${GITHUB_TOKEN}@github.com/${repo}.git ${dir} && chmod -R 777 ${dir}`);
-  if (cl.code !== 0) { await postAs(client, channel, thread_ts, reporter, `${repo} 레포를 못 찾았어요ㅠ (이름 확인 필요)\n${(cl.err || '').slice(0, 200)}`); return; }
+  if (cl.code !== 0) { await postAs(client, channel, thread_ts, reporter, `${repo} 레포를 못 찾았어ㅠ (이름 확인 필요)\n${(cl.err || '').slice(0, 200)}`); return; }
   const res = await runClaude(`이 저장소를 실제로 열어보고, 사용자의 요청 "${task}"에 직접 답해라. 단순 현황 나열이 아니라, 레포에서 확인한 사실을 근거로 실제 답·제안·전략을 내라. 코드는 읽기만 해. 레포에 없는 시장·경쟁사·트렌드·벤치마크는 웹서치(WebSearch)로 찾아서 근거로 써도 돼. 모르는 건 추측이라 표시.\n\n역할별로 각자 그 요청에 대한 자기 분야의 답/제안을 줘. 각 줄 "역할: 답/제안" 형식(관련된 역할만, PM/리서처/UX/아키텍트/보안/마케터). 질문 분야의 담당이 메인으로 구체적인 안을 내고(예: 마케팅 질문이면 마케터가 채널·메시지·실행안까지), 나머지는 거들어. 한 역할당 2~4줄.${PLAIN}`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000);
   if (res.limited) { await postAs(client, channel, thread_ts, reporter, '⏳ 조사 중에 클로드 사용량 한도에 걸렸어. 리셋되면 다시 봐줄게.'); return; }
   const n = await distributeReport(client, channel, thread_ts, res.text);
@@ -791,10 +791,10 @@ async function handle(event, client) {
     // 규칙 관리
     if (/규칙\s*(목록|보여)/.test(raw)) {
       const r = rules[channel] || [];
-      await postAs(client, channel, thread_ts, LEAD, r.length ? '우리 팀 규칙:\n' + r.map((x, i) => `${i + 1}. ${x}`).join('\n') : '아직 정한 규칙이 없어요.');
+      await postAs(client, channel, thread_ts, LEAD, r.length ? '우리 팀 규칙:\n' + r.map((x, i) => `${i + 1}. ${x}`).join('\n') : '아직 정한 규칙이 없어.');
       return;
     }
-    if (/규칙\s*(초기화|전체삭제|리셋)/.test(raw)) { rules[channel] = []; persistRules(); await postAs(client, channel, thread_ts, LEAD, '규칙 다 지웠어요.'); return; }
+    if (/규칙\s*(초기화|전체삭제|리셋)/.test(raw)) { rules[channel] = []; persistRules(); await postAs(client, channel, thread_ts, LEAD, '규칙 다 지웠어.'); return; }
     // "앞으로 ~ 해라 / 항상 / 규칙 / 기억해" → 영구 규칙으로 저장하고 그렇게 일함
     if (/(앞으로|항상|규칙으로|규칙은|기억해|명심)/.test(raw)) {
       addRule(channel, raw);
@@ -936,14 +936,14 @@ async function handle(event, client) {
     // 스케줄 관리 명령
     if (/스케줄.*(목록|보여|리스트)/.test(raw)) {
       const list = schedules.filter(s => s.channel === channel);
-      await postAs(client, channel, thread_ts, LEAD, list.length ? '등록된 스케줄:\n' + list.map(s => `#${s.id} · ${s.kind === 'daily' ? `매일 ${s.hour}시${s.minute ? ' ' + s.minute + '분' : ''}` : humanMs(s.ms)} · ${s.label}`).join('\n') : '등록된 스케줄이 없어요.');
+      await postAs(client, channel, thread_ts, LEAD, list.length ? '등록된 스케줄:\n' + list.map(s => `#${s.id} · ${s.kind === 'daily' ? `매일 ${s.hour}시${s.minute ? ' ' + s.minute + '분' : ''}` : humanMs(s.ms)} · ${s.label}`).join('\n') : '등록된 스케줄이 없어.');
       return;
     }
     let cm;
     if ((cm = raw.match(/스케줄.*취소\s*(전체|모두|all|\d+)/))) {
       const which = cm[1];
-      if (/전체|모두|all/.test(which)) { schedules.forEach(s => clearInterval(s.timer)); schedules.length = 0; await postAs(client, channel, thread_ts, LEAD, '스케줄 전체 취소했어요.'); }
-      else { const idx = schedules.findIndex(s => s.id === parseInt(which)); if (idx >= 0) { clearInterval(schedules[idx].timer); schedules.splice(idx, 1); await postAs(client, channel, thread_ts, LEAD, `스케줄 #${which} 취소했어요.`); } else await postAs(client, channel, thread_ts, LEAD, `#${which} 스케줄을 못 찾았어요.`); }
+      if (/전체|모두|all/.test(which)) { schedules.forEach(s => clearInterval(s.timer)); schedules.length = 0; await postAs(client, channel, thread_ts, LEAD, '스케줄 전체 취소했어.'); }
+      else { const idx = schedules.findIndex(s => s.id === parseInt(which)); if (idx >= 0) { clearInterval(schedules[idx].timer); schedules.splice(idx, 1); await postAs(client, channel, thread_ts, LEAD, `스케줄 #${which} 취소했어.`); } else await postAs(client, channel, thread_ts, LEAD, `#${which} 스케줄을 못 찾았어.`); }
       persistSchedules();
       return;
     }
@@ -960,7 +960,7 @@ async function handle(event, client) {
       startSchedule(s, !daily);
       persistSchedules();
       const when = daily ? `매일 ${daily.hour}시${daily.minute ? ' ' + daily.minute + '분' : ''} (KST)` : humanMs(ims);
-      await postAs(client, channel, thread_ts, LEAD, `⏰ 스케줄 등록했어요 (#${id})\n주기: ${when}\n내용: ${s.label}\n${daily ? '예약 시각에' : '지금 한 번 돌려보고 이후'} 자동 실행할게요. 재시작해도 유지돼요. (취소: "스케줄 취소 ${id}")`);
+      await postAs(client, channel, thread_ts, LEAD, `⏰ 스케줄 등록했어 (#${id})\n주기: ${when}\n내용: ${s.label}\n${daily ? '예약 시각에' : '지금 한 번 돌려보고 이후'} 자동 실행할게. 재시작해도 유지돼. (취소: "스케줄 취소 ${id}")`);
       return;
     }
     // 특정 단어 없어도 AI가 의도 판단 → 작업이면 알아서 수행
