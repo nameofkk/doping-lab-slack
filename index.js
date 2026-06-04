@@ -194,20 +194,22 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
 // ── 실제 작업 모드: 레포 클론 → claude 코드 작업 → 브랜치 push → PR → 보고 ──
 let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {};
 // 답변/완료 시 요청자를 @멘션 (자리 비웠어도 핑 가게). 채널의 마지막 요청자 기준
-function mention(channel) { const u = lastRequester[channel]; return u ? `<@${u}> ` : ''; }
+function mention(channel) { const u = (activeWork[channel] && activeWork[channel].by) || lastRequester[channel]; return u ? `<@${u}> ` : ''; }
 function workStatusCtx(channel) {
   const w = activeWork[channel];
   if (!w) return '\n[작업 상태] 지금 백그라운드에서 진행 중인 코드작업 없음.';
   const min = Math.round((Date.now() - w.started) / 60000);
   return `\n[작업 상태] "${w.task}" 작업이 백그라운드에서 ${min}분째 진행 중. 끝나면 봇이 자동으로 결과를 올림. 진행률이나 완료여부를 절대 지어내지 말 것.`;
 }
-function sh(cmd, cwd) {
+function sh(cmd, cwd, timeoutMs = 480000) {
   return new Promise(resolve => {
     const c = spawn('bash', ['-lc', cmd], { cwd: cwd || '/tmp', env: process.env });
-    let out = '', err = '';
+    let out = '', err = '', done = false;
+    const fin = (r) => { if (done) return; done = true; clearTimeout(t); resolve(r); };
+    const t = setTimeout(() => { try { c.kill('SIGKILL'); } catch (e) {} fin({ code: 124, out, err: (err + '\n(명령이 시간초과로 강제 종료됨)').slice(-800) }); }, timeoutMs); // 멈춘 명령이 채널을 영구히 막지 않게
     c.stdout.on('data', d => out += d); c.stderr.on('data', d => err += d);
-    c.on('close', code => resolve({ code, out, err }));
-    c.on('error', e => resolve({ code: 1, out: '', err: String(e) }));
+    c.on('close', code => fin({ code, out, err }));
+    c.on('error', e => fin({ code: 1, out: '', err: String(e) }));
   });
 }
 function ghPost(path, payload) {
@@ -285,7 +287,7 @@ async function waitHttp(url, ms) {
 // Playwright로 첫 화면 스크린샷 (스크롤 안 함 → 진입 애니메이션 미작동 버그가 그대로 드러남)
 async function captureShots(url, prefix = 'shot') {
   const { chromium } = require('playwright');
-  const b = await chromium.launch({ args: ['--no-sandbox', '--disable-dev-shm-usage'] });
+  const b = await chromium.launch({ args: ['--no-sandbox', '--disable-dev-shm-usage'], timeout: 30000 });
   const out = [];
   try {
     for (const [w, h, label, file] of [[1440, 900, '데스크탑 첫 화면 (로드 직후, 스크롤 전)', `/tmp/${prefix}_d.png`], [375, 812, '모바일 첫 화면', `/tmp/${prefix}_m.png`]]) {
@@ -433,7 +435,9 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   if (newProject) await postAs(client, channel, thread_ts, LEAD, '좋아 PRD 확정됐고, 이제 이 PRD 그대로 실제 코드 짤게. 좀 걸려.');
   prog.phase('지금 코드 짜는 중이야');
   const assetHeavy = /게임|game|sprite|스프라이트|캐릭터|에셋|asset|픽셀|pixel|애니메이션|아케이드|arcade|2d|3d|canvas|phaser/i.test(task);
-  const res = await runClaude(`${intro}${rulesCtx(channel)}${PLAIN}${DESIGN_RULE}${newProject ? LAUNCH_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}\n\n요청: ${task}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000);
+  // UI/화면 관련이거나 신규 프로젝트일 때만 디자인 규칙 적용 (백엔드·봇 자가수정 등엔 노이즈라 빼)
+  const uiish = newProject || /ui|화면|디자인|프론트|컴포넌트|페이지|버튼|css|스타일|레이아웃|frontend|react|html|랜딩|사이트|홈페이지|게임/i.test(task);
+  const res = await runClaude(`${intro}${rulesCtx(channel)}${PLAIN}${uiish ? DESIGN_RULE : ''}${newProject ? LAUNCH_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}\n\n요청: ${task}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000);
   if (res.limited) { await postAs(client, channel, thread_ts, LEAD, '⏳ 제작 중에 클로드 사용량 한도에 걸렸어. 지금까지 만든 건 안 올렸어, 한도 리셋되면 이어서 만들게.'); return; }
   await sh('git add -A', dir);
   const repoUrl = `https://github.com/${repo}`;
@@ -677,6 +681,10 @@ function addTask(channel, text, who) { const t = { id: ++taskSeq, text, who, don
 const LASTREPO_FILE = process.env.LASTREPO_FILE || '/data/lastrepo.json';
 function loadLastRepo() { try { if (fs.existsSync(LASTREPO_FILE)) Object.assign(lastRepo, JSON.parse(fs.readFileSync(LASTREPO_FILE, 'utf8')) || {}); } catch {} }
 function persistLastRepo() { try { fs.writeFileSync(LASTREPO_FILE, JSON.stringify(lastRepo)); } catch {} }
+// 물어보고 대기 중인 작업 (봇 재시작에도 유지 → 답을 엉뚱하게 처리하지 않게)
+const PENDING_FILE = process.env.PENDING_FILE || '/data/pending.json';
+function loadPending() { try { if (fs.existsSync(PENDING_FILE)) Object.assign(pendingProject, JSON.parse(fs.readFileSync(PENDING_FILE, 'utf8')) || {}); } catch {} }
+function persistPending() { try { fs.writeFileSync(PENDING_FILE, JSON.stringify(pendingProject)); } catch {} }
 
 // ── 서비스 레지스트리 (회사가 운영하는 서비스 대장) — 운영/데이터/마케팅 루프의 공통 대상 ──
 const SERVICES_FILE = process.env.SERVICES_FILE || '/data/services.json';
@@ -778,7 +786,7 @@ async function guardBusy(client, channel, thread_ts) {
 }
 // 작업 실행(activeWork 세팅 + runWork + 정리) 공통
 function launchWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName) {
-  activeWork[channel] = { task, started: Date.now() };
+  activeWork[channel] = { task, started: Date.now(), by: lastRequester[channel] };
   runWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName)
     .catch(e => postAs(client, channel, thread_ts, LEAD, '작업 오류: ' + String(e).slice(0, 300)))
     .finally(() => { activeWork[channel] = null; });
@@ -795,7 +803,7 @@ async function planQuestions(task, newProject) {
 async function startWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName) {
   const qs = await planQuestions(task, newProject);
   if (qs.length) {
-    pendingProject[channel] = { repo, task, newProject, forcePR, projName, at: Date.now() };
+    pendingProject[channel] = { repo, task, newProject, forcePR, projName, at: Date.now() }; persistPending();
     await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오 좋다. ${newProject ? '만들기' : '작업'} 전에 이것만 먼저 정해주라:\n${qs.map((q, i) => `${i + 1}. ${q}`).join('\n')}\n\n답 주면 그대로 들어갈게. 알아서 정해도 되면 "알아서 해"라고 해도 돼.`);
     return;
   }
@@ -815,9 +823,9 @@ async function handle(event, client) {
   const thread_ts = event.thread_ts;
   // 새 프로젝트 시작 전 물어본 질문에 대한 답 → 그 답대로 기획 시작
   if (pendingProject[channel]) {
-    if (/^(취소|그만|안\s?해|관둬|됐어|아니[ ,]?다|중단|멈춰|스톱|stop)/i.test(raw)) { delete pendingProject[channel]; await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, 그건 접을게.`); return; }
+    if (/^(취소|그만|안\s?해|관둬|됐어|아니[ ,]?다|중단|멈춰|스톱|stop)/i.test(raw)) { delete pendingProject[channel]; persistPending(); await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, 그건 접을게.`); return; }
     if (!activeWork[channel]) {
-      const pp = pendingProject[channel]; delete pendingProject[channel];
+      const pp = pendingProject[channel]; delete pendingProject[channel]; persistPending();
       await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이 그렇게 갈게, 바로 들어간다.`);
       launchWork(client, channel, thread_ts, pp.repo, `${pp.task}\n\n[사용자가 정해준 방향]\n${raw}`, pp.newProject, pp.forcePR, pp.projName);
       return;
@@ -971,8 +979,7 @@ async function handle(event, client) {
       if (!mrepo) { await postAs(client, channel, thread_ts, byName('영듀') || LEAD, '어느 서비스 마케팅 할지 모르겠어. 먼저 만든 거 있어야 그거 마케팅하지. 레포 이름 알려주거나 뭐 하나 만들고 말해줘.'); return; }
       await postAs(client, channel, thread_ts, byName('영듀') || LEAD, `${mrepo} 마케팅 자료 만들게. 포지셔닝부터 런칭 카피까지 정리해서 레포에 넣을게.`);
       if (await guardBusy(client, channel, thread_ts)) return;
-      activeWork[channel] = { task: '마케팅 자료', started: Date.now() };
-      runWork(client, channel, event.thread_ts || event.ts, mrepo, '이 서비스 마케팅 자료를 만들어라. 포지셔닝, 타겟과 사용맥락, 핵심 한 줄 메시지, 채널별 전략(SEO·콘텐츠·SNS·커뮤니티), 런칭 카피 몇 개, 4주치 콘텐츠 캘린더, 핵심 SEO 키워드까지 MARKETING.md로 저장해. 그리고 사이트의 title/description/OG 메타태그도 더 매력적으로 다듬어라. 마케팅 담당이 메인으로.', false, !!settings.approval[channel]).catch(e => postAs(client, channel, thread_ts, LEAD, '마케팅 작업 오류: ' + String(e).slice(0, 300))).finally(() => { activeWork[channel] = null; });
+      startWork(client, channel, event.thread_ts || event.ts, mrepo, '이 서비스 마케팅 자료를 만들어라. 포지셔닝, 타겟과 사용맥락, 핵심 한 줄 메시지, 채널별 전략(SEO·콘텐츠·SNS·커뮤니티), 런칭 카피 몇 개, 4주치 콘텐츠 캘린더, 핵심 SEO 키워드까지 MARKETING.md로 저장해. 그리고 사이트의 title/description/OG 메타태그도 더 매력적으로 다듬어라. 마케팅 담당이 메인으로.', false, !!settings.approval[channel]);
       return;
     }
     // 데이터/지표 리포트 (애널리틱스 연결 상태 정직하게)
@@ -1098,10 +1105,16 @@ app.event('app_mention', async ({ event, client }) => { await handle(event, clie
   loadTasks();
   loadLastRepo();
   loadServices();
+  loadPending();
   setInterval(persistMemory, 15000);
   let opsLastDay = null;
   const OPS_HOUR = parseInt(process.env.OPS_HOUR || '10', 10); // 매일 이 시각(KST)에 운영 헬스체크 자동
   setInterval(() => {
+    // 워치독: 작업이 25분 넘게 안 끝나면(어딘가 멈춤) 채널을 풀어줌 → 영구 블록 방지
+    for (const ch of Object.keys(activeWork)) {
+      const w = activeWork[ch];
+      if (w && w.started && Date.now() - w.started > 25 * 60 * 1000) { activeWork[ch] = null; postAs(botClient, ch, undefined, LEAD, '아까 그 작업이 너무 오래 걸려서 일단 풀어둘게. 결과 안 떴으면 다시 시켜줘.').catch(() => {}); }
+    }
     const n = kstNow();
     for (const s of schedules) {
       if (s.kind === 'daily' && s.hour === n.h && s.minute === n.m && s.lastRunDay !== n.day) {
