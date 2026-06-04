@@ -33,22 +33,22 @@ const ROUNDS = parseInt(DEBATE_ROUNDS, 10) || 2;
 
 // ── 직원(페르소나). tokenEnv 에 토큰이 있으면 진짜 별도 멤버로 게시 ──
 const TEAM = [
-  { name: '김채원 (PM)', kw: ['김채원','채원','PM'], emoji: ':bust_in_silhouette:', model: 'opus', tokenEnv: 'SLACK_TOKEN_PM',
+  { name: '김채원 (PM)', kw: ['김채원','채원','PM'], emoji: ':bust_in_silhouette:', model: process.env.AGENT_MODEL || 'sonnet', tokenEnv: 'SLACK_TOKEN_PM',
     prompt: '너는 도핑연구소 PM이고 이름은 김채원이다. 밝고 야무지게 팀을 이끄는 리더야. 핵심을 똑부러지게 짚고 우선순위를 정해. 사용자 가치랑 시장성, 전용목적 위주로 본다.' },
-  { name: '아이유 (리서처)', kw: ['아이유', '이유', '리서처', '리서치'], emoji: ':mag:', model: 'opus', tokenEnv: 'SLACK_TOKEN_RESEARCH',
+  { name: '아이유 (리서처)', kw: ['아이유', '이유', '리서처', '리서치'], emoji: ':mag:', model: process.env.AGENT_MODEL || 'sonnet', tokenEnv: 'SLACK_TOKEN_RESEARCH',
     prompt: '너는 도핑연구소 사용자 리서처이고 이름은 아이유다. 차분하고 사려깊게 사람 마음과 진짜 니즈를 섬세하게 읽는다. 페인포인트·사용성 리스크를 따뜻하지만 정확하게 짚는다.' },
-  { name: '정소민 (UX)', kw: ['정소민','소민','UX','디자이너','디자인'], emoji: ':art:', model: 'opus', tokenEnv: 'SLACK_TOKEN_UX',
+  { name: '정소민 (UX)', kw: ['정소민','소민','UX','디자이너','디자인'], emoji: ':art:', model: process.env.AGENT_MODEL || 'sonnet', tokenEnv: 'SLACK_TOKEN_UX',
     prompt: '너는 도핑연구소 UX·비주얼 디자이너이고 이름은 정소민이다. 친근하고 공감 가는 말투로 사용자 흐름·마찰·엣지케이스(빈상태/에러/로딩)를 챙긴다. 디자인은 항상 impeccable.style 기준(AI slop 금지: 이모지 아이콘·gradient hero·nested cards 금지, 대비 4.5:1+, 한국어 UI, 빈상태 캐릭터)과 그 프로젝트 design-system(MASTER.md)을 따른다.' },
-  { name: '윈터 (아키텍트)', kw: ['윈터', '아키텍트', '아키'], emoji: ':building_construction:', model: 'opus', tokenEnv: 'SLACK_TOKEN_ARCHITECT',
+  { name: '윈터 (아키텍트)', kw: ['윈터', '아키텍트', '아키'], emoji: ':building_construction:', model: process.env.AGENT_MODEL || 'sonnet', tokenEnv: 'SLACK_TOKEN_ARCHITECT',
     prompt: '너는 도핑연구소 아키텍트이고 이름은 윈터다. 시크하고 군더더기 없이 구조·실현가능성·기술/배포 리스크를 깔끔하게 정리한다.' },
-  { name: '우정잉 (보안)', kw: ['우정잉', '정잉', '보안'], emoji: ':lock:', model: 'opus', tokenEnv: 'SLACK_TOKEN_SECURITY',
+  { name: '우정잉 (보안)', kw: ['우정잉', '정잉', '보안'], emoji: ':lock:', model: process.env.AGENT_MODEL || 'sonnet', tokenEnv: 'SLACK_TOKEN_SECURITY',
     prompt: '너는 도핑연구소 보안 엔지니어이고 이름은 우정잉이다. 꼼꼼하고 의심 많게 인증·권한·시크릿·개인정보·규제 리스크를 파고들고 완화책을 댄다.' },
-  { name: '영듀 (마케터)', kw: ['영듀', '마케터', '마케팅'], emoji: ':mega:', model: 'opus', tokenEnv: 'SLACK_TOKEN_MARKETING',
+  { name: '영듀 (마케터)', kw: ['영듀', '마케터', '마케팅'], emoji: ':mega:', model: process.env.AGENT_MODEL || 'sonnet', tokenEnv: 'SLACK_TOKEN_MARKETING',
     prompt: '너는 도핑연구소 마케터이고 이름은 영듀다. 텐션 높고 유쾌하게 바이럴·차별점·타깃·GTM을 재밌게 풀어낸다.' },
-  { name: '안다연 (반론자)', kw: ['안다연','다연'], emoji: ':smiling_imp:', model: 'opus', tokenEnv: 'SLACK_TOKEN_DEVIL',
+  { name: '안다연 (반론자)', kw: ['안다연','다연'], emoji: ':smiling_imp:', model: process.env.AGENT_MODEL || 'sonnet', tokenEnv: 'SLACK_TOKEN_DEVIL',
     prompt: '너는 도핑연구소의 악마의 변호인이고 이름은 안다연이다. 기획의 약점을 날카롭게 파고들어 반대 의견과 리스크를 짚고, 각 약점에 보완책도 함께 제시한다.' },
 ];
-const LEAD = { name: '한로로 (팀장)', kw: ['한로로','로로','팀장'], emoji: ':test_tube:', model: 'opus', tokenEnv: 'SLACK_TOKEN_LEAD',
+const LEAD = { name: '한로로 (팀장)', kw: ['한로로','로로','팀장'], emoji: ':test_tube:', model: process.env.LEAD_MODEL || 'opus', tokenEnv: 'SLACK_TOKEN_LEAD',
   prompt: '너는 도핑연구소 팀장이고 이름은 한로로다(최상위 모델). 진솔하고 본질을 짚는 스타일로 팀을 이끈다. 질문엔 직접 답하고, 기획 토론을 종합할 땐 목적·핵심기능·리스크 대응·다음 액션으로 정리한다.' };
 
 // 모든 발언에 적용되는 말투/가독성 규칙
@@ -108,10 +108,18 @@ async function runClaude(prompt, model, cwd = WORKDIR, perm = CLAUDE_PERMISSION_
     child.stdout.on('data', d => (out += d));
     child.stderr.on('data', d => (err += d));
     child.on('error', e => finish({ ok: false, text: String(e) }));
+    const isLimit = (s) => /session limit|usage limit|rate limit|api_error_status.{0,6}429|429/i.test(s || '');
     child.on('close', code => {
-      if (code !== 0) return finish({ ok: false, text: (err || out || 'error').slice(0, 1500) });
-      try { const j = JSON.parse(out); finish({ ok: !j.is_error, text: j.result || out }); }
-      catch { finish({ ok: true, text: out.slice(0, 1500) }); }
+      let j = null; try { j = JSON.parse(out); } catch {}
+      if (j) {
+        const res = typeof j.result === 'string' ? j.result : '';
+        if (j.is_error || j.api_error_status === 429 || isLimit(res)) {
+          return finish({ ok: false, limited: isLimit(res) || j.api_error_status === 429, text: (isLimit(res) || j.api_error_status === 429) ? '⏳ 지금 클로드 사용량 한도에 걸렸어. 한도 리셋되면 다시 할게.' : (res || '오류가 났어').slice(0, 500) });
+        }
+        return finish({ ok: true, text: res || out.slice(0, 1500) });
+      }
+      if (code !== 0 || isLimit(out) || isLimit(err)) return finish({ ok: false, limited: isLimit(out) || isLimit(err), text: (isLimit(out) || isLimit(err)) ? '⏳ 지금 클로드 사용량 한도에 걸렸어. 한도 리셋되면 다시 할게.' : (err || out || 'error').slice(0, 800) });
+      finish({ ok: true, text: out.slice(0, 1500) });
     });
   });
 }
@@ -188,27 +196,43 @@ const byName = (frag) => TEAM.find(p => p.name.includes(frag));
 // 기획에 의견 내는 빌더들 (PM·리서처·UX·아키텍트·보안·마케터). 반론자 안다연은 이들 뒤에 따로 반박 턴.
 function planTeam() { return ['김채원', '아이유', '정소민', '윈터', '우정잉', '영듀'].map(byName).filter(Boolean); }
 
-// 제작 전 라이브 기획 핑퐁 — 각 직원이 구어체로 자기 파트 의견을 실제로 주고받음 (사용자가 보면서)
+// 제작 전 라이브 기획 핑퐁 — 팀이 구어체로 PRD를 만들고, 팀장이 완성도 98% 될 때까지 반복해서 끌어올림.
+// 반환: 완성된 PRD 문서(문자열). 한도/중단이면 null (호출측이 제작 중단).
 async function runPRD(client, channel, thread_ts, task) {
-  await postAs(client, channel, thread_ts, LEAD, `오 좋다. "${task}" 이거 바로 코드부터 짜지 말고 기획부터 같이 잡자. 다들 자기 파트 어떻게 갈지 한마디씩 줘봐.`);
-  let convo = `[만들 것]\n${task}\n`;
-  const specs = [];
-  for (const p of planTeam()) {
-    if (workCancel[channel]) break;
-    const r = await runClaude(`${p.prompt}${STYLE}${rulesCtx(channel)}\n\n[지금 팀이 기획 중인 것]\n${convo}\n\n네 담당 관점에서 이걸 어떻게 만들지 핵심 포인트 2~3개를 친한 동료한테 말하듯 편하게 말해. 앞사람 의견 있으면 받아서 이어가. 구체적으로(화면·플로우·스택·카피·보안 등 네 영역). 마크다운(별표 샵) 금지.`, p.model, WORKDIR, CLAUDE_PERMISSION_MODE, 120000);
-    const msg = (r.text || '').trim().slice(0, 900);
-    if (msg && r.ok !== false) { await postAs(client, channel, thread_ts, p, msg); convo += `\n${p.name}: ${msg}`; specs.push(`${p.name}: ${msg}`); }
-  }
-  // 반론자 안다연 — 위 기획 다 보고 약점/리스크를 콕 집어 반박 (쏠림 방지). 보완책도 같이.
+  const TARGET = parseInt(process.env.PRD_TARGET || '98', 10);
+  const MAX = parseInt(process.env.PRD_MAX_ROUNDS || '3', 10);
+  await postAs(client, channel, thread_ts, LEAD, `오 좋다. "${task}" 이거 바로 코드 안 짜고 기획부터 제대로 잡자. PRD 만들어서 완성도 ${TARGET}% 될 때까지 핑퐁 돌릴게.`);
+  let convo = `[만들 것]\n${task}\n`, prd = '', score = 0, limited = false;
   const devil = byName('안다연');
-  if (devil && !workCancel[channel]) {
-    const r = await runClaude(`${devil.prompt}${STYLE}${rulesCtx(channel)}\n\n[팀이 방금 짠 기획]\n${convo}\n\n넌 반론자야. 위 기획에서 빠졌거나, 위험하거나, 과하거나, 사용자가 안 쓸 것 같은 부분을 콕 집어서 솔직하게 반박해. 그냥 까기만 하지 말고 지적마다 어떻게 보완할지 한 줄씩 같이. 친한 동료한테 말하듯 편하게, 마크다운 금지.`, devil.model, WORKDIR, CLAUDE_PERMISSION_MODE, 120000);
-    const dm = (r.text || '').trim().slice(0, 900);
-    if (dm && r.ok !== false) { await postAs(client, channel, thread_ts, devil, dm); convo += `\n안다연(반론): ${dm}`; specs.push(`안다연(반론): ${dm}`); }
+  for (let round = 1; round <= MAX; round++) {
+    if (workCancel[channel]) return null;
+    await postAs(client, channel, thread_ts, LEAD, round === 1 ? '먼저 각자 자기 파트부터 던져봐.' : `${round}라운드. 지금 PRD에서 부족한 부분만 보강하자.`);
+    for (const p of planTeam()) {
+      if (workCancel[channel]) return null;
+      const guide = round === 1 ? '네 담당 관점에서 이걸 어떻게 만들지 핵심 2~3개 구체적으로.' : '지금 PRD에서 네 영역에 빠졌거나 약한 부분만 콕 집어 보강해. 반복 말고 새로 더할 것만.';
+      const r = await runClaude(`${p.prompt}${STYLE}${rulesCtx(channel)}\n\n[지금까지 기획/PRD]\n${convo}\n\n${guide} 친한 동료처럼 편하게, 마크다운 금지.`, p.model, WORKDIR, CLAUDE_PERMISSION_MODE, 120000);
+      if (r.limited) { limited = true; break; }
+      const msg = (r.text || '').trim().slice(0, 900);
+      if (msg && r.ok !== false) { await postAs(client, channel, thread_ts, p, msg); convo += `\n${p.name}: ${msg}`; }
+    }
+    if (limited) break;
+    if (devil && !workCancel[channel]) {
+      const r = await runClaude(`${devil.prompt}${STYLE}${rulesCtx(channel)}\n\n[지금 PRD/논의]\n${convo}\n\n넌 반론자야. 빠졌거나 위험하거나 과하거나 사용자가 안 쓸 부분 콕 집어 반박하고, 지적마다 보완책 한 줄씩. 편하게, 마크다운 금지.`, devil.model, WORKDIR, CLAUDE_PERMISSION_MODE, 120000);
+      if (r.limited) { limited = true; break; }
+      const dm = (r.text || '').trim().slice(0, 900);
+      if (dm && r.ok !== false) { await postAs(client, channel, thread_ts, devil, dm); convo += `\n안다연(반론): ${dm}`; }
+    }
+    // 팀장: PRD 문서 작성 + 완성도 평가
+    const synth = await runClaude(`${LEAD.prompt}${PLAIN}\n\n[지금까지 팀 논의]\n${convo}\n\n위 논의를 바탕으로 이 프로젝트 PRD를 아래 항목으로 작성해라. 구어체로 쓰되 내용은 구체적으로:\n목표 /\n타겟·사용맥락 /\n핵심기능(우선순위) /\n화면·플로우 /\n기술스택 /\n차별화 훅 /\n성공지표 /\n리스크·대응\n\n맨 마지막 줄에 반드시 "완성도: NN%" 형식으로 이 PRD 완성도를 숫자로 매겨라. ${TARGET}% 미만이면 뭐가 부족한지 한두 줄. 마크다운 별표·샵 금지.`, LEAD.model, WORKDIR, CLAUDE_PERMISSION_MODE, 180000);
+    if (synth.limited) { limited = true; break; }
+    if (synth.text && synth.ok !== false) { prd = synth.text.trim(); convo += `\n[팀장 PRD v${round}]\n${prd}`; await postAs(client, channel, thread_ts, LEAD, prd.slice(0, 2800)); }
+    const mm = prd.match(/완성도[:\s]*([0-9]{1,3})\s*%/); score = mm ? parseInt(mm[1], 10) : score;
+    if (score >= TARGET) { await postAs(client, channel, thread_ts, LEAD, `좋아 PRD 완성도 ${score}% 나왔어. 이 PRD 그대로 제작 들어갈게.`); break; }
+    if (round < MAX) await postAs(client, channel, thread_ts, LEAD, `아직 ${score || '미정'}%라 한 라운드 더 보강하자.`);
+    else await postAs(client, channel, thread_ts, LEAD, `라운드 한계까지 끌어올려서 ${score || ''}% 됐어. 이 PRD로 제작 들어갈게.`);
   }
-  const synth = await runClaude(`${LEAD.prompt}${STYLE}\n\n[방금 팀 논의 + 안다연 반론]\n${convo}\n\n위 논의를 종합하되 안다연이 짚은 반론도 반영해서 "그럼 이렇게 가자" 하고 이 프로젝트 진행 방향을 친근한 구어체로 4~6줄로 정리해. 마크다운 금지.`, LEAD.model, WORKDIR, CLAUDE_PERMISSION_MODE, 120000);
-  if (synth.text && synth.ok !== false) await postAs(client, channel, thread_ts, LEAD, synth.text.trim().slice(0, 1200));
-  return specs.join('\n') + (synth.text ? `\n[팀장 종합 방향]\n${synth.text.trim()}` : '');
+  if (limited) { await postAs(client, channel, thread_ts, LEAD, '⏳ 클로드 사용량 한도에 걸려서 기획을 더 못 돌리겠어. 한도 리셋되면 이어서 하자. 지금은 여기서 멈출게.'); return null; }
+  return prd || convo;
 }
 
 // 로컬 서버가 뜰 때까지 curl 폴링
@@ -333,8 +357,9 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   // 신규 프로젝트는 제작 전에 팀이 라이브로 기획 핑퐁(구어체) → 그 PRD로 제작
   const prd = newProject ? await runPRD(client, channel, thread_ts, task) : '';
   if (workCancel[channel]) { delete workCancel[channel]; await postAs(client, channel, thread_ts, LEAD, '기획 단계에서 중단했어. 아무것도 안 올렸어.'); return; }
-  if (newProject) await postAs(client, channel, thread_ts, LEAD, '좋아 기획 정리됐고, 이제 이대로 실제로 코드 짤게. 좀 걸려.');
-  const res = await runClaude(`${intro}${rulesCtx(channel)}${PLAIN}${DESIGN_RULE}${prd ? '\n\n[팀이 방금 합의한 기획 — 이대로 구현해라]\n' + prd : ''}\n\n요청: ${task}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000);
+  if (newProject && prd === null) return; // 한도/중단 → runPRD가 이미 안내함, 제작 안 들어감
+  if (newProject) await postAs(client, channel, thread_ts, LEAD, '좋아 PRD 확정됐고, 이제 이 PRD 그대로 실제 코드 짤게. 좀 걸려.');
+  const res = await runClaude(`${intro}${rulesCtx(channel)}${PLAIN}${DESIGN_RULE}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}\n\n요청: ${task}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000);
   await sh('git add -A', dir);
   const repoUrl = `https://github.com/${repo}`;
   const chk = await sh('git diff --cached --quiet; echo $?', dir);
@@ -438,7 +463,7 @@ const seen = new Set();
 // 특정 단어 없이도 메시지가 "작업 요청"인지 AI가 판단
 async function classifyIntent(text, ctx) {
   try {
-    const res = await runClaude(`${ctx ? '[최근 대화]\n' + ctx + '\n\n' : ''}다음 메시지의 의도를 판단해서 JSON만 출력해라. 설명 금지.\n메시지: ${JSON.stringify(text)}\n\n형식: {"action": "work"|"report"|"debate"|"chat", "task": "할 일/주제/볼 것을 한 문장", "newProject": true|false, "repo": "sponono|wewantpeace|myungjak|new 중 해당"}\n기준: 코드를 만들/고치/추가/개선/구현하라면 action=work. 프로젝트의 현황·상태·운영·구조를 조사·보고하라면 action=report. "토론하자/논의하자/토론해줘"처럼 새로운 주제로 팀 토론을 새로 시작하라고 할 때만 action=debate(task=토론 주제). 단 "다른 의견은?", "더 말해봐", "넌 어때", "다른사람들은?" 같은 진행 중 대화의 추가 질문이나 안부·잡담·단순 질문은 action=chat. 너희(이 봇/팀원들) 자신에 대한 질문(누가 뭐 담당하냐, 무슨 모델 쓰냐, 자기소개, 인사, "각자 ~해봐" 같은 멤버 호출)은 프로젝트 보고가 아니라 action=chat. 새 홈페이지/사이트/포트폴리오/앱이면 newProject=true 이고 repo=new. 위원트피스=wewantpeace, 스포노노=sponono, 명작=myungjak. 사용자가 말한 프로젝트가 sponono/wewantpeace/myungjak 중 어느 것도 아니거나 어느 프로젝트인지 불명확하면 repo는 반드시 "unknown"으로 해. 절대 가까운 걸로 추측해서 고르지 마. 이 슬랙 봇(도핑연구소 봇/너희들 자체)을 고치라면 repo="bot".`, 'haiku');
+    const res = await runClaude(`${ctx ? '[최근 대화]\n' + ctx + '\n\n' : ''}다음 메시지의 의도를 판단해서 JSON만 출력해라. 설명 금지.\n메시지: ${JSON.stringify(text)}\n\n형식: {"action": "work"|"report"|"debate"|"chat", "task": "할 일/주제/볼 것을 한 문장", "newProject": true|false, "repo": "sponono|wewantpeace|myungjak|new 중 해당"}\n기준: 코드를 만들/고치/추가/개선/구현하라면 action=work. 프로젝트의 현황·상태·운영·구조를 조사·보고하라면 action=report. "토론하자/논의하자/토론해줘"처럼 새로운 주제로 팀 토론을 새로 시작하라고 할 때만 action=debate(task=토론 주제). 단 "다른 의견은?", "더 말해봐", "넌 어때", "다른사람들은?" 같은 진행 중 대화의 추가 질문이나 안부·잡담·단순 질문은 action=chat. 너희(이 봇/팀원들) 자신에 대한 질문(누가 뭐 담당하냐, 무슨 모델 쓰냐, 자기소개, 인사, "각자 ~해봐" 같은 멤버 호출)은 프로젝트 보고가 아니라 action=chat. 새로 뭔가(홈페이지/사이트/포트폴리오/앱/게임/툴/서비스 등) 만들거나 개발하라면 거의 다 newProject=true 이고 repo=new. "X 만들고 싶어", "X 게임 만들어줘", "새로 ~ 하나" 같은 건 무조건 newProject=true, repo=new (기존 레포에 작업하는 게 절대 아님). 위원트피스=wewantpeace, 스포노노=sponono, 명작=myungjak. 사용자가 말한 프로젝트가 sponono/wewantpeace/myungjak 중 어느 것도 아니거나 어느 프로젝트인지 불명확하면 repo는 반드시 "unknown"으로 해. 절대 가까운 걸로 추측해서 고르지 마. 이 슬랙 봇(도핑연구소 봇/너희들 자체)을 고치라면 repo="bot".`, 'haiku');
     const mm = (res.text || '').match(/\{[\s\S]*\}/);
     return mm ? JSON.parse(mm[0]) : { action: 'chat' };
   } catch { return { action: 'chat' }; }
@@ -608,7 +633,7 @@ async function handle(event, client) {
     if ((tm = raw.match(/^태스크\s*완료\s*(\d+)/))) { const t = (tasks[channel] || []).find(x => x.id === parseInt(tm[1])); if (t) { t.done = true; persistTasks(); await postAs(client, channel, thread_ts, LEAD, `#${tm[1]} 완료 처리했어.`); } else await postAs(client, channel, thread_ts, LEAD, '그 태스크 못 찾겠어.'); return; }
     if ((tm = raw.match(/^태스크\s*삭제\s*(\d+)/))) { tasks[channel] = (tasks[channel] || []).filter(x => x.id !== parseInt(tm[1])); persistTasks(); await postAs(client, channel, thread_ts, LEAD, `#${tm[1]} 삭제했어.`); return; }
     // 배포 (아직 미연동)
-    if (/배포\s*(해|하자|해줘|좀|시작|go)/i.test(raw)) { await postAs(client, channel, thread_ts, LEAD, '배포 연동은 아직이야. Railway 배포 토큰을 연결하면 "배포해줘"로 실제 배포까지 되게 해줄게. 지금은 작업/조사/토론/스케줄/태스크까지 돼.'); return; }
+    if (/배포\s*(해|하자|해줘|좀|시작|go)/i.test(raw)) { await postAs(client, channel, thread_ts, LEAD, '이제 신규 빌드는 통과하면 자동으로 라이브(Railway)까지 올라가. 특정 레포를 다시 띄우고 싶으면 "(레포이름) 다시 배포해줘"처럼 말해줘.'); return; }
     const wm = raw.match(/^(작업|구현|개발|제작)\s*[:：]\s*([\s\S]*)$/);
     if (wm && wm[2].trim()) {
       let rest = wm[2].trim(); let repo = WORK_DEFAULT_REPO;
@@ -663,6 +688,8 @@ async function handle(event, client) {
       return;
     }
     const resolveR = (r) => r === '__last__' ? lastRepo[channel] : resolveRepo(r);
+    // 새로 만들/개발하라는 신호가 있으면 lastRepo로 끌고가지 말고 무조건 새 프로젝트로 (직전 레포 오염 방지)
+    if (intent && intent.action === 'work' && /\b만들|만들어|만들고|제작|개발|새로 ?만|하나 ?만들|새 게임|새 앱|새 사이트|새 서비스|오마주|클론(?!해)/.test(raw)) { intent.newProject = true; intent.repo = 'new'; }
     if (['work', 'report', 'debate'].includes(intent && intent.action) && intent.repo === 'unknown') {
       // 이 채널이 방금 다룬 레포가 있으면 그걸로 이어감 (추측이 아니라 직전 문맥 — "이거 보여줘/고쳐줘" 같은 후속)
       if (lastRepo[channel]) { intent.repo = '__last__'; intent.newProject = false; }
@@ -702,6 +729,7 @@ async function handle(event, client) {
       for (const p of responders) {
         const r2 = await runClaude(`${p.prompt}${STYLE}${SELF}${rulesCtx(channel)}${workStatusCtx(channel)}\n\n[최근 대화]\n${ctx}\n\n[방금 들은 말]\n${raw}\n\n위 맥락 보고 너답게 짧게 한마디 해. 작업 진행상황은 [작업 상태] 사실만 말하고 지어내지 마.`, p.model);
         await postAs(client, channel, thread_ts, p, (r2.text || '').trim().slice(0, 1500));
+        if (r2.limited) break; // 사용량 한도면 1명만 알리고 도배 방지
       }
       casualLayer(event, client, responders, { noComment: true }).catch(() => {});
     }
