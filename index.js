@@ -338,14 +338,18 @@ async function verifyBuild(client, channel, thread_ts, dir, repo) {
   else await postAs(client, channel, thread_ts, qa, '한 번 고쳐봤는데 아직 빌드가 안 돼. 이건 사람이 한 번 봐야 할 거 같아.\n' + (bd.out || '').slice(-400) + '\n' + (fix.text || '').slice(0, 300));
 }
 
-async function runWork(client, channel, thread_ts, repo, task, newProject, forcePR) {
+async function runWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName) {
   if (!GITHUB_TOKEN) { await postAs(client, channel, thread_ts, LEAD, 'GITHUB_TOKEN이 아직 없어서 작업 모드는 못 돌려요. 토큰만 넣으면 바로 돼요.'); return; }
   const id = ++workSeq;
   workCancel[channel] = false;
   const dir = `/tmp/w${id}`;
   if (newProject) {
+    const clean = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 28);
+    const fromName = clean(projName);                 // 분류기가 준 영문 이름 (예: ramen-shop-game)
+    const fromTask = clean(task);                     // 한글이면 빈 문자열
+    const uniq = Date.now().toString(36).slice(-5);   // 재시작에도 안 겹치는 고유 꼬리표
     const name = /포트폴리오|portfolio/i.test(task) ? 'doping-portfolio'
-      : ((task.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 28)) || `doping-app-${id}`);
+      : (fromName || fromTask || `doping-app-${uniq}`) + ((fromName || fromTask) ? `-${uniq}` : '');
     await postAs(client, channel, thread_ts, LEAD, `🆕 새 프로젝트 만들게요: ${name}\n요청: ${task}\nGitHub에 레포 만들고 처음부터 짜볼게요. 좀 걸려요.`);
     const created = await ghPost('/user/repos', { name, private: true, auto_init: true, description: '도핑연구소 자동 생성' });
     if (created && created.full_name) { repo = created.full_name; }
@@ -476,7 +480,7 @@ const seen = new Set();
 // 특정 단어 없이도 메시지가 "작업 요청"인지 AI가 판단
 async function classifyIntent(text, ctx) {
   try {
-    const res = await runClaude(`${ctx ? '[최근 대화]\n' + ctx + '\n\n' : ''}다음 메시지의 의도를 판단해서 JSON만 출력해라. 설명 금지.\n메시지: ${JSON.stringify(text)}\n\n형식: {"action": "work"|"report"|"debate"|"chat", "task": "할 일/주제/볼 것을 한 문장", "newProject": true|false, "repo": "sponono|wewantpeace|myungjak|new 중 해당"}\n기준: 코드를 만들/고치/추가/개선/구현하라면 action=work. 프로젝트의 현황·상태·운영·구조를 조사·보고하라면 action=report. "토론하자/논의하자/토론해줘"처럼 새로운 주제로 팀 토론을 새로 시작하라고 할 때만 action=debate(task=토론 주제). 단 "다른 의견은?", "더 말해봐", "넌 어때", "다른사람들은?" 같은 진행 중 대화의 추가 질문이나 안부·잡담·단순 질문은 action=chat. 너희(이 봇/팀원들) 자신에 대한 질문(누가 뭐 담당하냐, 무슨 모델 쓰냐, 자기소개, 인사, "각자 ~해봐" 같은 멤버 호출)은 프로젝트 보고가 아니라 action=chat. 새로 뭔가(홈페이지/사이트/포트폴리오/앱/게임/툴/서비스 등) 만들거나 개발하라면 거의 다 newProject=true 이고 repo=new. "X 만들고 싶어", "X 게임 만들어줘", "새로 ~ 하나" 같은 건 무조건 newProject=true, repo=new (기존 레포에 작업하는 게 절대 아님). 위원트피스=wewantpeace, 스포노노=sponono, 명작=myungjak. 사용자가 말한 프로젝트가 sponono/wewantpeace/myungjak 중 어느 것도 아니거나 어느 프로젝트인지 불명확하면 repo는 반드시 "unknown"으로 해. 절대 가까운 걸로 추측해서 고르지 마. 이 슬랙 봇(도핑연구소 봇/너희들 자체)을 고치라면 repo="bot".`, 'haiku');
+    const res = await runClaude(`${ctx ? '[최근 대화]\n' + ctx + '\n\n' : ''}다음 메시지의 의도를 판단해서 JSON만 출력해라. 설명 금지.\n메시지: ${JSON.stringify(text)}\n\n형식: {"action": "work"|"report"|"debate"|"chat", "task": "할 일/주제/볼 것을 한 문장", "newProject": true|false, "repo": "sponono|wewantpeace|myungjak|new 중 해당", "name": "newProject일 때만, 이 프로젝트를 잘 나타내는 영문 짧은 레포이름(소문자와 하이픈만, 예: ramen-shop-game, todo-app). 아니면 빈문자열"}\n기준: 코드를 만들/고치/추가/개선/구현하라면 action=work. 프로젝트의 현황·상태·운영·구조를 조사·보고하라면 action=report. "토론하자/논의하자/토론해줘"처럼 새로운 주제로 팀 토론을 새로 시작하라고 할 때만 action=debate(task=토론 주제). 단 "다른 의견은?", "더 말해봐", "넌 어때", "다른사람들은?" 같은 진행 중 대화의 추가 질문이나 안부·잡담·단순 질문은 action=chat. 너희(이 봇/팀원들) 자신에 대한 질문(누가 뭐 담당하냐, 무슨 모델 쓰냐, 자기소개, 인사, "각자 ~해봐" 같은 멤버 호출)은 프로젝트 보고가 아니라 action=chat. 새로 뭔가(홈페이지/사이트/포트폴리오/앱/게임/툴/서비스 등) 만들거나 개발하라면 거의 다 newProject=true 이고 repo=new. "X 만들고 싶어", "X 게임 만들어줘", "새로 ~ 하나" 같은 건 무조건 newProject=true, repo=new (기존 레포에 작업하는 게 절대 아님). 위원트피스=wewantpeace, 스포노노=sponono, 명작=myungjak. 사용자가 말한 프로젝트가 sponono/wewantpeace/myungjak 중 어느 것도 아니거나 어느 프로젝트인지 불명확하면 repo는 반드시 "unknown"으로 해. 절대 가까운 걸로 추측해서 고르지 마. 이 슬랙 봇(도핑연구소 봇/너희들 자체)을 고치라면 repo="bot".`, 'haiku');
     const mm = (res.text || '').match(/\{[\s\S]*\}/);
     return mm ? JSON.parse(mm[0]) : { action: 'chat' };
   } catch { return { action: 'chat' }; }
@@ -800,7 +804,7 @@ async function handle(event, client) {
       const newProject = !!intent.newProject;
       const repo = newProject ? WORK_DEFAULT_REPO : resolveR(intent.repo);
       activeWork[channel] = { task: intent.task, started: Date.now() };
-      runWork(client, channel, event.thread_ts || event.ts, repo, intent.task, newProject, !!settings.approval[channel]).catch(e => postAs(client, channel, thread_ts, LEAD, '작업 오류: ' + String(e).slice(0, 300))).finally(() => { activeWork[channel] = null; });
+      runWork(client, channel, event.thread_ts || event.ts, repo, intent.task, newProject, !!settings.approval[channel], intent.name).catch(e => postAs(client, channel, thread_ts, LEAD, '작업 오류: ' + String(e).slice(0, 300))).finally(() => { activeWork[channel] = null; });
       return;
     }
     if (intent && intent.action === 'report' && intent.task) {
