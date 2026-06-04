@@ -3,13 +3,15 @@
 FROM node:20-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl python3 python3-pip python3-venv && rm -rf /var/lib/apt/lists/*
-RUN npm install -g @anthropic-ai/claude-code figma-developer-mcp
+RUN npm install -g @anthropic-ai/claude-code figma-developer-mcp @railway/cli
 # root와 uid1000이 같은 clone 디렉토리를 둘 다 신뢰 (dubious ownership 방지)
 RUN git config --system --add safe.directory '*'
 
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm install --omit=dev
+# QA가 실제 화면을 보고 검증하도록 Playwright + Chromium (시스템 의존성 포함)
+RUN npx playwright install --with-deps chromium
 COPY index.js .mcp.json ./
 
 ENV WORKDIR=/app

@@ -9,6 +9,7 @@
   "dependencies": {
     "@slack/bolt": "^3.22.0",
     "@slack/web-api": "^6.12.1",
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "playwright": "^1.48.0"
   }
 }

@@ -15,7 +15,7 @@ const path = require('path');
 const {
   SLACK_BOT_TOKEN, SLACK_APP_TOKEN,
   WORKDIR = '/app',
-  CLAUDE_PERMISSION_MODE = 'default',
+  CLAUDE_PERMISSION_MODE = 'bypassPermissions',
   ALLOWED_SLACK_USER_IDS = '',
   DEBATE_ROUNDS = '2',
   GITHUB_TOKEN = '',
@@ -52,7 +52,7 @@ const LEAD = { name: '한로로 (팀장)', kw: ['한로로','로로','팀장'], 
   prompt: '너는 도핑연구소 팀장이고 이름은 한로로다(최상위 모델). 진솔하고 본질을 짚는 스타일로 팀을 이끈다. 질문엔 직접 답하고, 기획 토론을 종합할 땐 목적·핵심기능·리스크 대응·다음 액션으로 정리한다.' };
 
 // 모든 발언에 적용되는 말투/가독성 규칙
-const STYLE = '\n\n[말투 규칙] 실제 한국 여성이 친한 동료랑 메신저로 편하게 수다 떨듯 자연스러운 구어체로 써라. 딱딱한 문어체나 설명조, 번역투 금지. 대시 기호(—, –, ㅡ, -)는 절대 쓰지 마라. 끊고 싶으면 문장을 나누거나 쉼표나 줄바꿈으로 해라. AI 티 나는 말투(도와드릴 수 있어요, ~에 대해 말씀드리면, 불필요한 사과나 안내) 금지. 마크다운 볼드 별표(**)나 머리표(#)도 쓰지 마라. 핵심만 2~4문장으로 짧고 친근하게, 읽기 쉽게.';
+const STYLE = '\n\n[말투 규칙] 실제 한국 여성이 친한 동료랑 메신저로 편하게 수다 떨듯 자연스러운 구어체로 써라. 딱딱한 문어체나 설명조, 번역투 금지. 대시 기호(—, –, ㅡ, -)는 절대 쓰지 마라. 끊고 싶으면 문장을 나누거나 쉼표나 줄바꿈으로 해라. AI 티 나는 말투(도와드릴 수 있어요, ~에 대해 말씀드리면, 불필요한 사과나 안내) 금지. 마크다운 볼드 별표(**)나 머리표(#)도 쓰지 마라. 핵심만 2~4문장으로 짧고 친근하게, 읽기 쉽게. 중요: 네 속생각이나 "이렇게 답하자, 솔직하게 말하고 넘어가자, 사용자 화났네" 같은 메타 서술·지문은 절대 쓰지 말고, 실제로 상대한테 할 말만 바로 해라.';
 // 너희 자신에 대해 물으면 정직하게 답할 사실 (모델 등)
 const SELF = '\n\n[너에 대한 사실 — 물어보면 이것만 정직하게, 모르면 모른다고 해] 너는 도핑연구소 팀원이고 Claude Code(클코)를 구독 토큰으로 헤드리스 실행해서 돌아가. 너(페르소나)랑 팀장 한로로는 Claude Opus 모델로 동작해(최근에 sonnet에서 opus로 올렸어). 메시지 의도분류는 haiku, 실제 코드작업이랑 프로젝트 조사는 sonnet로 돌아. 이게 전부야.';
 // 작업/조사 보고용 — 마크다운 금지 + 사람 말투 (길이는 제한 안 함)
@@ -211,6 +211,77 @@ async function runPRD(client, channel, thread_ts, task) {
   return specs.join('\n') + (synth.text ? `\n[팀장 종합 방향]\n${synth.text.trim()}` : '');
 }
 
+// 로컬 서버가 뜰 때까지 curl 폴링
+async function waitHttp(url, ms) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    const r = await sh(`curl -sf -o /dev/null -w "%{http_code}" ${url} 2>/dev/null || true`);
+    const c = (r.out || '').trim();
+    if (c.startsWith('2') || c.startsWith('3')) return true;
+    await new Promise(s => setTimeout(s, 1500));
+  }
+  return false;
+}
+// Playwright로 첫 화면 스크린샷 (스크롤 안 함 → 진입 애니메이션 미작동 버그가 그대로 드러남)
+async function captureShots(url) {
+  const { chromium } = require('playwright');
+  const b = await chromium.launch({ args: ['--no-sandbox', '--disable-dev-shm-usage'] });
+  const out = [];
+  try {
+    for (const [w, h, label, file] of [[1440, 900, '데스크탑 첫 화면 (로드 직후, 스크롤 전)', '/tmp/shot_d.png'], [375, 812, '모바일 첫 화면', '/tmp/shot_m.png']]) {
+      const p = await b.newPage({ viewport: { width: w, height: h } });
+      await p.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
+      await p.waitForTimeout(1800);
+      await p.screenshot({ path: file });
+      out.push({ path: file, label }); await p.close();
+    }
+  } finally { try { await b.close(); } catch (_) {} }
+  return out;
+}
+// 스크린샷을 슬랙에 업로드 (botClient — 채널 멤버라 files:write 가능성 높음)
+async function uploadShot(channel, thread_ts, file, comment) {
+  try { await botClient.files.uploadV2({ channel_id: channel, thread_ts, file: fs.readFileSync(file), filename: file.split('/').pop(), initial_comment: comment }); return true; }
+  catch (e) { return false; }
+}
+// 라이브 배포 (Railway). RAILWAY_TOKEN 있을 때만. 윈터(아키텍트)가 담당.
+async function railwayDeploy(client, channel, thread_ts, dir, repo) {
+  const arch = byName('윈터') || LEAD;
+  if (!process.env.RAILWAY_TOKEN) { await postAs(client, channel, thread_ts, arch, '라이브 URL로 띄우려면 RAILWAY_TOKEN(레일웨이 프로젝트 토큰) 하나만 넣어줘. 넣으면 새로 만들 때마다 자동으로 띄워서 주소 줄게.'); return null; }
+  const svc = (repo.split('/').pop() || 'app').replace(/[^a-zA-Z0-9-]/g, '').slice(0, 28) || 'app';
+  await postAs(client, channel, thread_ts, arch, '라이브로 띄울게. 레일웨이에 올리는 중이라 몇 분 걸려.');
+  await sh(`railway add --service ${svc} 2>&1`, dir); // 이미 있으면 무시
+  const up = await sh(`railway up --service ${svc} --ci 2>&1`, dir);
+  if (up.code !== 0) { await postAs(client, channel, thread_ts, arch, '레일웨이 배포가 막혔어:\n' + ((up.out || up.err) || '').slice(-500)); return null; }
+  const dom = await sh(`railway domain --service ${svc} 2>&1`, dir);
+  const m = (dom.out || '').match(/https?:\/\/[^\s'"]+/);
+  const url = m ? m[0] : null;
+  if (url) await postAs(client, channel, thread_ts, arch, `라이브 올라갔어: ${url}`);
+  else await postAs(client, channel, thread_ts, arch, '배포는 올렸는데 도메인 자동발급이 안 떴어. 레일웨이 대시보드에서 도메인 한 번 눌러줘.');
+  return url;
+}
+// 빌드 통과 후: 라이브 배포 시도 + 실제 화면(첫 화면) 스크린샷을 QA가 직접 올려 검증
+async function liveCheck(client, channel, thread_ts, dir, repo) {
+  const qa = byName('우정잉') || LEAD;
+  let url = null, srv = null, target = null;
+  try { url = await railwayDeploy(client, channel, thread_ts, dir, repo); } catch (e) {}
+  target = url;
+  try {
+    if (!target) {
+      const port = 4399;
+      srv = spawn('bash', ['-lc', `cd ${dir} && PORT=${port} npm start`], { env: { ...process.env, HOME: '/tmp' }, stdio: 'ignore' });
+      if (await waitHttp(`http://localhost:${port}`, 25000)) target = `http://localhost:${port}`;
+    }
+    if (!target) { await postAs(client, channel, thread_ts, qa, '실제 화면을 띄워서는 못 봤어(서버 기동 실패). 코드랑 빌드는 통과한 상태야.'); return; }
+    await postAs(client, channel, thread_ts, qa, '실제 화면 띄워서 스크린샷 찍는 중...');
+    const shots = await captureShots(target);
+    let any = false;
+    for (const s of shots) any = (await uploadShot(channel, thread_ts, s.path, s.label)) || any;
+    if (any) await postAs(client, channel, thread_ts, qa, '첫 화면(로드 직후, 스크롤 전) 스크린샷 올렸어. 히어로 밑이 비어 보이면 스크롤 진입 애니메이션이 화면 밖에서 안 켜지는 문제니까 그건 잡아야 돼.');
+    else await postAs(client, channel, thread_ts, qa, '스크린샷 업로드가 막혔어(files:write 권한 필요할 수도). 화면 자체는 떴어: ' + target);
+  } catch (e) { await postAs(client, channel, thread_ts, qa, '화면 검증 중 문제: ' + String(e).slice(0, 200)); }
+  finally { if (srv) try { srv.kill('SIGKILL'); } catch (_) {} }
+}
+
 // 제작 후 실제 빌드 검증 — npm 설치+빌드를 진짜로 돌려서 통과/실패를 정직하게 보고. 깨지면 1회 수정 시도.
 async function verifyBuild(client, channel, thread_ts, dir, repo) {
   const has = await sh('test -f package.json && grep -q \'"build"\' package.json && echo yes || echo no', dir);
@@ -219,7 +290,7 @@ async function verifyBuild(client, channel, thread_ts, dir, repo) {
   await postAs(client, channel, thread_ts, qa, '잠깐, 코드만 올리고 끝내면 안 되지. 실제로 빌드되는지 내가 돌려볼게.');
   await sh('npm install --no-audit --no-fund 2>&1 | tail -3', dir);
   let bd = await sh('npm run build 2>&1', dir);
-  if (bd.code === 0) { await postAs(client, channel, thread_ts, qa, '빌드 통과 확인했어. 실제로 컴파일까지 돼. 다만 이건 빌드만 된 거고 실서비스로 띄운 건 아니야, 보려면 배포 따로 해야 돼.'); return; }
+  if (bd.code === 0) { await postAs(client, channel, thread_ts, qa, '빌드 통과 확인했어. 실제로 컴파일까지 돼.'); await liveCheck(client, channel, thread_ts, dir, repo); return; }
   // 실패 → 1회 자동 수정
   await postAs(client, channel, thread_ts, qa, '빌드가 깨졌네. 에러 보고 한 번 고쳐볼게.\n' + (bd.out || '').slice(-500));
   const fix = await runClaude(`이 저장소 빌드가 다음 에러로 실패했어. 원인 찾아서 실제로 고쳐. 추측 말고 에러 그대로 보고 고쳐라.\n\n[에러]\n${(bd.out || '').slice(-2500)}`, 'sonnet', dir, WORK_PERMISSION_MODE, 300000);
@@ -275,7 +346,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
       const n = await distributeReport(client, channel, thread_ts, res.text);
       if (!n) await postAs(client, channel, thread_ts, LEAD, (res.text || '').trim().slice(0, 1500));
       await verifyBuild(client, channel, thread_ts, dir, repo);
-      await postAs(client, channel, thread_ts, LEAD, `다 끝냈어! ${repoUrl} (${WORK_BASE}에 반영). 빌드는 위에서 실제로 돌려서 확인했고, 실제 화면으로 띄워서 보려면 배포는 따로 해야 돼. 띄워줄까?`);
+      await postAs(client, channel, thread_ts, LEAD, `다 끝냈어! ${repoUrl} (${WORK_BASE}에 반영). 빌드 확인이랑 라이브/스크린샷은 위에 우정잉이 올린 거 봐줘.`);
       return;
     }
     mainErr = (pushMain.err || '').slice(0, 250);
