@@ -349,13 +349,22 @@ async function railwayDeploy(client, channel, thread_ts, dir, repo) {
 async function liveCheck(client, channel, thread_ts, dir, repo) {
   const qa = byName('정소민') || LEAD; // 화면 스크린샷 비주얼 검증 = UX
   let url = null, srv = null, target = null;
-  try { url = await railwayDeploy(client, channel, thread_ts, dir, repo); } catch (e) {}
+  const deployable = (await sh(`test -f package.json && echo yes || echo no`, dir)).out.includes('yes'); // 정적 HTML은 package.json 없음 → 레일웨이 배포 스킵
+  if (deployable) { try { url = await railwayDeploy(client, channel, thread_ts, dir, repo); } catch (e) {} }
   registerService(repo, url, channel); // 서비스 대장에 등록 (운영/마케팅 루프 대상)
   target = url;
   try {
     if (!target) {
       const port = 4300 + (parseInt((dir.match(/(\d+)/) || [])[1] || '1', 10) % 600); // 동시 빌드 포트 충돌 방지
-      srv = spawn('bash', ['-lc', `cd ${dir} && PORT=${port} npm start`], { env: { ...process.env, HOME: '/tmp' }, stdio: 'ignore' });
+      const hasStart = deployable && (await sh(`grep -q '"start"' package.json && echo yes || echo no`, dir)).out.includes('yes');
+      let cmd, serveDir = dir;
+      if (hasStart) cmd = `cd ${dir} && PORT=${port} npm start`; // Next 등
+      else { // 정적 HTML → index.html 있는 폴더를 python으로 서빙
+        const idx = (await sh(`find ${dir} -maxdepth 3 -name index.html -not -path '*/node_modules/*' | head -1`, dir)).out.trim();
+        serveDir = idx ? idx.replace(/\/index\.html$/, '') : dir;
+        cmd = `cd ${serveDir} && python3 -m http.server ${port}`;
+      }
+      srv = spawn('bash', ['-lc', cmd], { env: { ...process.env, HOME: '/tmp' }, stdio: 'ignore' });
       if (await waitHttp(`http://localhost:${port}`, 25000)) target = `http://localhost:${port}`;
     }
     if (!target) { await postAs(client, channel, thread_ts, qa, '실제 화면을 띄워서는 못 봤어(서버 기동 실패). 코드랑 빌드는 통과한 상태야.'); return; }
@@ -394,7 +403,11 @@ async function qaGate(client, channel, thread_ts, dir) {
 // 제작 후 실제 빌드 검증 — npm 설치+빌드를 진짜로 돌려서 통과/실패를 정직하게 보고. 깨지면 1회 수정 시도.
 async function verifyBuild(client, channel, thread_ts, dir, repo) {
   const has = await sh('test -f package.json && grep -q \'"build"\' package.json && echo yes || echo no', dir);
-  if (!has.out.includes('yes')) return; // 빌드 스크립트 없으면 스킵 (정적 HTML 등)
+  if (!has.out.includes('yes')) { // 빌드 스크립트 없음(정적 HTML 등) → 빌드는 스킵하되 라이브/스크린샷은 띄워
+    const idx = (await sh(`find ${dir} -maxdepth 3 -name index.html -not -path '*/node_modules/*' | head -1`, dir)).out.trim();
+    if (idx) await liveCheck(client, channel, thread_ts, dir, repo); // index.html 있으면 정적 서빙해서 화면 찍음
+    return;
+  }
   const qa = byName('윈터') || LEAD; // 빌드 검증 = 엔지니어링
   await postAs(client, channel, thread_ts, qa, '잠깐, 코드만 올리고 끝내면 안 되지. 실제로 빌드되는지 내가 돌려볼게.');
   await sh('npm install --no-audit --no-fund 2>&1 | tail -3', dir);
