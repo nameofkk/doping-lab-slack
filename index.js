@@ -512,8 +512,8 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const fbBuild = drainFeedback(channel); // 제작 직전 들어온 사용자 수정요청도 반영
   const res = await runClaude(`${intro}${rulesCtx(channel)}${PLAIN}${uiish ? DESIGN_RULE : ''}${newProject ? LAUNCH_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}${fbBuild ? '\n\n[사용자가 추가로 준 지시 — 반드시 반영]\n' + fbBuild : ''}\n\n요청: ${task}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000);
   if (res.limited) { await postAs(client, channel, thread_ts, LEAD, '⏳ 제작 중에 클로드 사용량 한도에 걸렸어. 지금까지 만든 건 안 올렸어, 한도 리셋되면 이어서 만들게.'); return; }
-  // 연속완성 패스 — 신규 풀빌드는 한 번에 안 끝나고 스캐폴딩만 남는 경우가 많음. 실제 사용자 화면/핵심 루프가 빌 동안 추가로 채움(빈 껍데기 + 거짓완료 방지). 하트비트로 안 끊김.
-  if (newProject && !res.limited) {
+  // 연속완성 패스 — 신규 풀빌드/화면작업은 한 번에 안 끝나고 스캐폴딩만 남는 경우가 많음. 실제 사용자 화면/핵심 루프가 빌 동안 추가로 채움(빈 껍데기 + 거짓완료 방지). 하트비트로 안 끊김.
+  if ((newProject || uiish) && !res.limited) {
     for (let pass = 1; pass <= 3 && !workCancel[channel]; pass++) {
       bumpWork(channel);
       const gaps = await checkAppGaps(dir);
@@ -531,7 +531,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const cmsg = task.slice(0, 60).replace(/[`$"\\!\r\n;|&<>()]/g, '').trim() || '작업'; // 셸 명령치환/인젝션 방지 (백틱·$·따옴표 등 제거)
   await sh(`git commit -m "도핑연구소: ${cmsg}"`, dir);
   prog.phase('빌드 되나 돌려보고 라이브로 띄우는 중');
-  const finalGaps = newProject ? await checkAppGaps(dir) : []; // 최종 빈구멍 — "다 끝냈어 상용수준" 거짓완료 방지
+  const finalGaps = (newProject || uiish) ? await checkAppGaps(dir) : []; // 최종 빈구멍 — "다 끝냈어 상용수준" 거짓완료 방지
   const incomplete = finalGaps.length > 0;
   const doneHead = incomplete ? `⚠️ 초안은 올렸는데 아직 미완성이야 — ${finalGaps.join(', ')}. 이대로는 상용 아니고, 더 채워야 진짜 동작해. ("이어서"라고 하면 계속 채울게)` : '다 끝냈어!';
   let mainErr = '';
@@ -644,7 +644,7 @@ async function classifyIntent(text, ctx) {
 function resolveRepo(hint) {
   if (!hint) return WORK_DEFAULT_REPO;
   if (hint.includes('/')) return hint;
-  const m = { sponono: 'nameofkk/sponono', 스포노노: 'nameofkk/sponono', wewantpeace: 'nameofkk/wewantpeace', 위원트피스: 'nameofkk/wewantpeace', myungjak: 'nameofkk/myungjak', 명작: 'nameofkk/myungjak', bot: 'nameofkk/doping-lab-slack', 봇: 'nameofkk/doping-lab-slack', 도핑봇: 'nameofkk/doping-lab-slack' };
+  const m = { sponono: 'nameofkk/sponono', 스포노노: 'nameofkk/sponono', wewantpeace: 'nameofkk/wewantpeace', 위원트피스: 'nameofkk/wewantpeace', myungjak: 'nameofkk/myungjak', 명작: 'nameofkk/myungjak', 몽유병친구들: 'nameofkk/sleepwalking-friends-4', 몽유병: 'nameofkk/sleepwalking-friends-4', sleepwalking: 'nameofkk/sleepwalking-friends-4', bot: 'nameofkk/doping-lab-slack', 봇: 'nameofkk/doping-lab-slack', 도핑봇: 'nameofkk/doping-lab-slack' };
   return m[hint] || m[hint.toLowerCase()] || `nameofkk/${hint}`;
 }
 // 메시지에서 명시된 레포 이름을 뽑아냄 (분류기가 모르는 doping-portfolio 같은 것도 인식)
@@ -652,7 +652,7 @@ function extractRepo(raw) {
   // owner/repo — 단, client/server·24/7·and/or·TCP/IP 같은 일반 표현 오탐 방지(소유자 명시되거나 레포명에 하이픈/숫자 있는 진짜 레포꼴만)
   let m = raw.match(/\b([A-Za-z][\w.-]{1,38}\/[A-Za-z0-9][\w.-]{1,38})\b/);
   if (m && (/^nameofkk\//i.test(m[1]) || /[-\d]/.test(m[1].split('/')[1]))) return m[1];
-  for (const k of ['sponono', '스포노노', 'wewantpeace', '위원트피스', 'myungjak', '명작']) if (raw.includes(k)) return resolveRepo(k); // 알려진 프로젝트 별칭
+  for (const k of ['sponono', '스포노노', 'wewantpeace', '위원트피스', 'myungjak', '명작', '몽유병친구들', '몽유병', 'sleepwalking']) if (raw.includes(k)) return resolveRepo(k); // 알려진 프로젝트 별칭
   const svc = svcList().find(s => raw.includes(s.repo.split('/').pop())); if (svc) return svc.repo; // 등록된 서비스
   m = raw.match(/\b(doping-[a-z0-9-]+|[a-z0-9][a-z0-9-]{2,}-(?:game|app|web|site|portfolio|tool|bot))\b/i); // doping-* 또는 -game/-app 등으로 끝나는 토큰
   if (m) return `${GH_OWNER}/${m[1].toLowerCase()}`;
@@ -961,6 +961,13 @@ async function handle(event, client) {
       const pw = pausedWork[channel]; delete pausedWork[channel];
       await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, 아까 "${(pw.task || '').slice(0, 40)}" 그거 다시 이어갈게.`);
       launchWork(client, channel, thread_ts, pw.repo, pw.task, pw.newProject, pw.forcePR, pw.projName);
+      return;
+    }
+    // "이어서"인데 보관된 중단작업은 없지만 직전 레포가 있으면 → 그 레포 미완성분(특히 사용자 화면) 마저 완성 ("다 끝냈어" 후에도 이어가게)
+    if (!activeWork[channel] && !pausedWork[channel] && lastRepo[channel] && lastRepo[channel] !== SELF_HEAL_REPO && canCommand(event.user) && (/^(이어서|이어가|계속(해|하자|진행)?|마저|마저\s*해|이어서\s*(해|만들|완성|채워)|미완성.*완성|마무리(해|지어)?)\s*/.test(raw) || /^다시(\s*(해|해줘|진행|시작))?\s*$/.test(raw))) {
+      const tgt = lastRepo[channel];
+      await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, 직전에 만들던 ${tgt.split('/').pop()}에서 아직 미완성인 부분(특히 사용자 화면) 마저 완성할게.`);
+      launchWork(client, channel, thread_ts, tgt, '이전에 만들던 이 프로젝트에서 아직 미완성인 부분, 특히 사용자한테 보이는 화면(라우트 page)과 핵심 사용자 플로우를 실제로 동작하게 끝까지 완성해라. 데모·플레이스홀더·로렘입숨 금지, 실제 화면과 로직으로. npm run build 통과 유지.', false, !!settings.approval[channel]);
       return;
     }
     // 작업 진행 중 "수정/지시"만 진행 중 작업에 반영(피드백). 명확한 수정 신호일 때만 — 원문 재전송·새 시작명령(제작/만들/시작/진행)은 제외, 중복 방지
