@@ -440,9 +440,10 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
     }
     await postAs(client, channel, thread_ts, LEAD, `🆕 새 프로젝트 만들게: ${name}\n요청: ${task}\n깃허브에 레포 만들고 처음부터 짜볼게. 좀 걸려.`);
     const desc = `도핑연구소: ${task}`.replace(/[\r\n\t\x00-\x1f\x7f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200); // 깃허브 description은 제어문자(줄바꿈 등) 금지
-    const created = await ghPost('/user/repos', { name, private: true, auto_init: true, description: desc });
+    let created = await ghPost('/user/repos', { name, private: true, auto_init: true, description: desc });
+    if (!created || !created.full_name) created = await ghPost('/user/repos', { name, private: true, auto_init: true, description: '도핑연구소 자동 생성' }); // 1회 자동 재시도 (description 문제면 안전값으로)
     if (created && created.full_name) { repo = created.full_name; }
-    else { await postAs(client, channel, thread_ts, LEAD, '레포 생성 실패ㅠ\n' + JSON.stringify(created || {}).slice(0, 250)); return; }
+    else { await postAs(client, channel, thread_ts, LEAD, '레포 생성이 두 번 다 실패했어ㅠ 같은 이름이 이미 있거나 깃허브 쪽 문제일 수 있어.\n' + JSON.stringify(created || {}).slice(0, 200)); return; }
   } else {
     await postAs(client, channel, thread_ts, LEAD, `🛠️ 작업 받았어\n레포: ${repo}\n할 일: ${task}\n클론하고 코드 손본 다음 ${forcePR ? 'PR로 올릴게(승인모드)' : WORK_BASE + '에 바로 반영할게'}. 좀 걸려.`);
   }
@@ -834,7 +835,7 @@ function launchWork(client, channel, thread_ts, repo, task, newProject, forcePR,
 // 작업(신규 제작이든 기존 수정이든) 시작 전, 정말 방향이 갈리는 중요한 결정이 있으면 사용자에게 먼저 물어봄 (없으면 그냥 진행)
 async function planQuestions(task, newProject) {
   try {
-    const r = await runClaude(`${newProject ? '새 프로젝트' : '기존 프로젝트 수정/작업'} 요청: ${JSON.stringify(task)}\n\n이걸 ${newProject ? '만들기' : '작업하기'} 전에 사용자한테 꼭 확인해야 할 중요한 결정이 있으면 1~3개만 질문으로 뽑아. 정말 방향이 크게 갈려서 잘못 정하면 다시 해야 하는 것만(예: 핵심 컨셉/타겟, 꼭 필요한 기능 범위, 톤·스타일, 플랫폼, 어떤 방식으로 구현할지 갈리는 선택). 사소하거나 네가 알아서 정해도 되는 건 절대 묻지 마 — 요청에 이미 명확하면 빈 배열. JSON만 출력: {"questions":["...","..."]}`, 'haiku');
+    const r = await runClaude(`${newProject ? '새 프로젝트' : '기존 프로젝트 수정/작업'} 요청: ${JSON.stringify(task)}\n\n이걸 ${newProject ? '만들기' : '작업하기'} 전에 사용자한테 꼭 확인해야 할 중요한 결정이 있으면 1~3개만 질문으로 뽑아. 정말 방향이 크게 갈려서 잘못 정하면 다시 해야 하는 것만(예: 핵심 컨셉/타겟, 꼭 필요한 기능 범위, 톤·스타일, 플랫폼, 어떤 방식으로 구현할지 갈리는 선택). 요청에 이미 답이 있거나 사소하면 절대 묻지 마(빈 배열). 질문은 반드시 한국어로 자연스럽게 써라(영어 금지). JSON만 출력: {"questions":["한국어 질문","..."]}`, 'haiku');
     const m = (r.text || '').match(/\{[\s\S]*\}/);
     const o = m ? JSON.parse(m[0]) : {};
     return Array.isArray(o.questions) ? o.questions.filter(q => typeof q === 'string' && q.trim()).slice(0, 3) : [];
