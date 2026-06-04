@@ -136,7 +136,7 @@ async function runClaude(prompt, model, cwd = WORKDIR, perm = CLAUDE_PERMISSION_
     const child = spawn('claude', args, opts);
     let out = '', err = '', done = false;
     const finish = (r) => { if (done) return; done = true; clearTimeout(killer); claudeRelease(); resolve(r); };
-    const killer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) {} finish({ ok: false, text: '(응답 시간초과)' }); }, timeoutMs);
+    const killer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) {} finish({ ok: false, timedout: true, text: '어 지금 딴 거 하느라 바빠서, 좀 있다 답할게.' }); }, timeoutMs);
     child.stdout.on('data', d => (out += d));
     child.stderr.on('data', d => (err += d));
     child.on('error', e => finish({ ok: false, text: String(e) }));
@@ -311,7 +311,8 @@ async function railwayDeploy(client, channel, thread_ts, dir, repo) {
   await sh(`printf 'node_modules\\n.next\\n.git\\ndist\\nbuild\\n.turbo\\n' > .railwayignore`, dir);
   // 계정토큰이면 빌드 전용 프로젝트(BUILDS_PROJECT_ID)에 링크 (컨테이너 자동주입 RAILWAY_PROJECT_ID와 분리). </dev/null로 대화형 멈춤 방지
   if (process.env.BUILDS_PROJECT_ID) await sh(`env -u RAILWAY_TOKEN railway link --project ${process.env.BUILDS_PROJECT_ID} --environment ${process.env.BUILDS_ENV || 'production'} </dev/null 2>&1`, dir);
-  // railway up --service 가 서비스를 자동 생성하므로 별도 add 안 함 (add는 대화형이라 멈춤)
+  // 서비스 먼저 생성 (없으면 up이 "Service not found" 냄). </dev/null로 대화형 프롬프트 멈춤 방지. 이미 있으면 무시됨
+  await sh(`env -u RAILWAY_TOKEN railway add --service ${svc} </dev/null 2>&1`, dir);
   const up = await sh(`env -u RAILWAY_TOKEN railway up --service ${svc} --ci </dev/null 2>&1`, dir);
   if (up.code !== 0) {
     const emsg = (up.out || up.err) || '';
@@ -346,8 +347,9 @@ async function liveCheck(client, channel, thread_ts, dir, repo) {
     const shots = await captureShots(target, prefix);
     let any = false;
     for (const s of shots) any = (await uploadShot(channel, thread_ts, s.path, s.label)) || any;
-    if (any) await postAs(client, channel, thread_ts, qa, '첫 화면(로드 직후, 스크롤 전) 스크린샷 올렸어. 히어로 밑이 비어 보이면 스크롤 진입 애니메이션이 화면 밖에서 안 켜지는 문제니까 그건 잡아야 돼.');
-    else await postAs(client, channel, thread_ts, qa, '스크린샷 업로드가 막혔어(files:write 권한 필요할 수도). 화면 자체는 떴어: ' + target);
+    const liveNote = url ? `\n실제로 열어서 테스트하려면 여기로: ${url}` : '\n근데 라이브 배포가 막혀서 너가 열어볼 공개 주소는 아직 없어(내 내부에서만 띄워서 확인한 거야). 배포 고쳐서 다시 올리면 공개 주소 줄게.';
+    if (any) await postAs(client, channel, thread_ts, qa, '첫 화면(로드 직후, 스크롤 전) 스크린샷 올렸어. 히어로 밑이 비어 보이면 스크롤 진입 애니메이션이 화면 밖에서 안 켜지는 문제니까 그건 잡아야 돼.' + liveNote);
+    else await postAs(client, channel, thread_ts, qa, '스크린샷 업로드는 막혔는데(files:write 권한 필요), 내가 직접 띄워서 화면은 확인했어.' + liveNote);
   } catch (e) { await postAs(client, channel, thread_ts, qa, '화면 검증 중 문제: ' + String(e).slice(0, 200)); }
   finally { if (srv) try { srv.kill('SIGKILL'); } catch (_) {} }
 }
@@ -409,9 +411,11 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
     if (created && created.full_name) { repo = created.full_name; }
     else { await postAs(client, channel, thread_ts, LEAD, '레포 생성 실패ㅠ\n' + JSON.stringify(created || {}).slice(0, 250)); return; }
   } else {
-    await postAs(client, channel, thread_ts, LEAD, `🛠️ 작업 받았어요\n레포: ${repo}\n할 일: ${task}\n클론하고 코드 손본 다음 ${WORK_BASE}에 바로 반영할게요. 좀 걸려요.`);
+    await postAs(client, channel, thread_ts, LEAD, `🛠️ 작업 받았어요\n레포: ${repo}\n할 일: ${task}\n클론하고 코드 손본 다음 ${forcePR ? 'PR로 올릴게요(승인모드)' : WORK_BASE + '에 바로 반영할게요'}. 좀 걸려요.`);
   }
   lastRepo[channel] = repo; persistLastRepo(); // 채널이 방금 다룬 레포 기억 (후속 "이거 고쳐줘" 문맥용, 재배포에도 유지)
+  const prog = startProgress(channel, thread_ts, '일단 레포 받아오는 중');
+  try {
   const cl = await sh(`rm -rf ${dir} && git clone https://x-access-token:${GITHUB_TOKEN}@github.com/${repo}.git ${dir} && chmod -R 777 ${dir}`);
   if (cl.code !== 0) { await postAs(client, channel, thread_ts, LEAD, '클론 실패ㅠ\n' + (cl.err || '').slice(0, 600)); return; }
   await sh(`git config user.name "doping-lab[bot]" && git config user.email "bot@doping.lab"`, dir);
@@ -419,10 +423,12 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
     ? '이 빈 저장소에 다음 요청대로 프로젝트를 처음부터 만들어라. 적절한 기술스택을 직접 고르고, README도 작성해라. 중요: 데모가 아니라 바로 상용으로 오픈해도 되는 수준으로 완성해라 — 실제 콘텐츠(로렘입숨·더미텍스트 금지), 에러·로딩·빈 상태 처리, 반응형 완비, 깨진 링크·콘솔 에러 없음, 환경변수 정리, npm run build 통과. 핵심 로직엔 테스트 코드도 짜서 npm test로 돌려 통과시키고, CHANGELOG.md에 이번에 만든 걸 적어라. 대충 만들고 끝내지 마.'
     : '이 저장소에서 다음 작업을 실제로 수행해라. 파일을 직접 수정하고, 필요하면 의존성 설치하고 테스트까지 돌려서 동작을 확인해라. 상용 수준으로, 어설프게 끝내지 마라.';
   // 신규 프로젝트는 제작 전에 팀이 라이브로 기획 핑퐁(구어체) → 그 PRD로 제작
+  if (newProject) prog.phase('다 같이 기획 짜는 중');
   const prd = newProject ? await runPRD(client, channel, thread_ts, task) : '';
   if (workCancel[channel]) { delete workCancel[channel]; await postAs(client, channel, thread_ts, LEAD, '기획 단계에서 중단했어. 아무것도 안 올렸어.'); return; }
   if (newProject && prd === null) return; // 한도/중단 → runPRD가 이미 안내함, 제작 안 들어감
   if (newProject) await postAs(client, channel, thread_ts, LEAD, '좋아 PRD 확정됐고, 이제 이 PRD 그대로 실제 코드 짤게. 좀 걸려.');
+  prog.phase('지금 코드 짜는 중이야');
   const assetHeavy = /게임|game|sprite|스프라이트|캐릭터|에셋|asset|픽셀|pixel|애니메이션|아케이드|arcade|2d|3d|canvas|phaser/i.test(task);
   const res = await runClaude(`${intro}${rulesCtx(channel)}${PLAIN}${DESIGN_RULE}${newProject ? LAUNCH_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}\n\n요청: ${task}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000);
   if (res.limited) { await postAs(client, channel, thread_ts, LEAD, '⏳ 제작 중에 클로드 사용량 한도에 걸렸어. 지금까지 만든 건 안 올렸어, 한도 리셋되면 이어서 만들게.'); return; }
@@ -432,6 +438,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   if (chk.out.trim().endsWith('0')) { await postAs(client, channel, thread_ts, LEAD, `변경/생성된 게 없었어요.\n${repoUrl}\n\n` + (res.text || '').trim().slice(0, 1500)); return; }
   if (workCancel[channel]) { delete workCancel[channel]; await postAs(client, channel, thread_ts, LEAD, '작업 중단했어. main엔 아무것도 안 올렸어.'); return; }
   await sh(`git commit -m "도핑연구소: ${task.slice(0, 60).replace(/"/g, '')}"`, dir);
+  prog.phase('빌드 되나 돌려보고 라이브로 띄우는 중');
   let mainErr = '';
   if (!forcePR) {
     const pushMain = await sh(`git push origin HEAD:${WORK_BASE}`, dir);
@@ -456,6 +463,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   await verifyBuild(client, channel, thread_ts, dir, repo);
   await postAs(client, channel, thread_ts, LEAD, `다 끝냈어! ${forcePR ? '승인모드라 PR로 올렸어 (머지하면 반영).' : 'PR로 올렸어.'}\nPR: ${url}`);
   if (newProject) await handoffChecklist(client, channel, thread_ts, repo, task);
+  } finally { await prog.done(); }
 }
 
 const ALL = TEAM.concat(LEAD);
@@ -730,6 +738,7 @@ const SELF_HEAL_REPO = 'nameofkk/doping-lab-slack';
 async function selfHeal(client, channel, thread_ts, errText) {
   if (process.env.SELF_HEAL === 'off' || !GITHUB_TOKEN) return;
   if (selfHealing) return;
+  if (activeWork[channel]) return; // 다른 작업 도는 중엔 끼어들지 않음 (동시 실행으로 슬롯 경쟁/타임아웃 방지). 에러가 또 나면 그때 고침
   const now = Date.now(); const sig = String(errText || '').slice(0, 80);
   if (now - selfHealAt < 30 * 60 * 1000 && sig === lastHealSig) return; // 같은 에러 30분 내 반복 자가수정 금지
   if (now - selfHealAt < 5 * 60 * 1000) return;                          // 어떤 에러든 최소 5분 간격
@@ -740,6 +749,19 @@ async function selfHeal(client, channel, thread_ts, errText) {
     await runWork(client, channel, thread_ts, SELF_HEAL_REPO, `이 슬랙 봇(너 자신)이 방금 다음 에러를 냈다. index.js에서 원인을 찾아 실제로 고쳐라. 추측하지 말고 코드를 직접 읽어서 정확한 원인을 짚고 최소한으로 안전하게 수정해라. node --check 통과하는지 확인하고, 뭘 왜 고쳤는지 보고해라.\n\n[에러]\n${sig ? String(errText).slice(0, 900) : '(내용 미상)'}`, false, true);
   } catch (e) { try { await postAs(client, channel, thread_ts, sec, '자가수정 시도 중에 또 막혔어: ' + String(e).slice(0, 150)); } catch (_) {} }
   finally { selfHealing = false; }
+}
+// 진행 상황 라이브 표시 — 한 메시지를 계속 갱신하며 경과시간·단계를 보여줌 (긴 작업도 살아있다는 신호)
+function startProgress(channel, thread_ts, label = '진행') {
+  const wc = clientFor(LEAD) || botClient;
+  const frames = ['🕐', '🕑', '🕒', '🕓', '🕔', '🕕', '🕖', '🕗', '🕘', '🕙', '🕚', '🕛'];
+  let ts = null, phase = label, started = Date.now(), tick = 0, stopped = false;
+  const render = (tail) => { const s = Math.floor((Date.now() - started) / 1000); const m = Math.floor(s / 60); return `${stopped ? '☑️' : frames[tick % 12]} ${phase} ${tail || `(벌써 ${m ? m + '분 ' : ''}${s % 60}초째 하고 있어, 좀만 기다려)`}`; };
+  (async () => { try { const r = await wc.chat.postMessage({ channel, thread_ts, text: render() }); ts = r.ts; } catch (e) {} })();
+  const timer = setInterval(async () => { tick++; if (stopped || !ts) return; try { await wc.chat.update({ channel, ts, text: render() }); } catch (e) {} }, 12000);
+  return {
+    phase: (p) => { phase = p; },
+    done: async () => { if (stopped) return; stopped = true; clearInterval(timer); if (ts) { try { await wc.chat.update({ channel, ts, text: render('이 단계는 끝!') }); } catch (e) {} } }
+  };
 }
 // 이 채널에서 무거운 작업이 도는 중이면 새로 시작 막고 안내 (진행상태 덮어쓰기/리소스 충돌 방지)
 async function guardBusy(client, channel, thread_ts) {
@@ -1000,7 +1022,7 @@ async function handle(event, client) {
       for (const p of responders) {
         const r2 = await runClaude(`${p.prompt}${STYLE}${SELF}${rulesCtx(channel)}${workStatusCtx(channel)}\n\n[최근 대화]\n${ctx}\n\n[방금 들은 말]\n${raw}\n\n위 맥락 보고 너답게 짧게 한마디 해. 작업 진행상황은 [작업 상태] 사실만 말하고 지어내지 마.`, p.model);
         await postAs(client, channel, thread_ts, p, (r2.text || '').trim().slice(0, 1500));
-        if (r2.limited) break; // 사용량 한도면 1명만 알리고 도배 방지
+        if (r2.ok === false) break; // 한도/타임아웃이면 1명만 말하고 도배 방지
       }
       casualLayer(event, client, responders, { noComment: true }).catch(() => {});
     }
