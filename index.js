@@ -313,7 +313,12 @@ async function railwayDeploy(client, channel, thread_ts, dir, repo) {
   if (process.env.BUILDS_PROJECT_ID) await sh(`env -u RAILWAY_TOKEN railway link --project ${process.env.BUILDS_PROJECT_ID} --environment ${process.env.BUILDS_ENV || 'production'} </dev/null 2>&1`, dir);
   // railway up --service 가 서비스를 자동 생성하므로 별도 add 안 함 (add는 대화형이라 멈춤)
   const up = await sh(`env -u RAILWAY_TOKEN railway up --service ${svc} --ci </dev/null 2>&1`, dir);
-  if (up.code !== 0) { await postAs(client, channel, thread_ts, arch, '레일웨이 배포가 막혔어:\n' + ((up.out || up.err) || '').slice(-500)); return null; }
+  if (up.code !== 0) {
+    const emsg = (up.out || up.err) || '';
+    await postAs(client, channel, thread_ts, arch, '레일웨이 배포가 막혔어:\n' + emsg.slice(-500));
+    if (/invalid|token|unauthorized|permission|not ?found|undefined|TypeError|env|변수/i.test(emsg)) selfHeal(client, channel, thread_ts, '[railway 배포 실패] ' + emsg.slice(-600)).catch(() => {}); // 설정/코드성 에러면 자가수정
+    return null;
+  }
   const dom = await sh(`env -u RAILWAY_TOKEN railway domain --service ${svc} </dev/null 2>&1`, dir);
   const m = (dom.out || '').match(/https?:\/\/[^\s'"]+/);
   const url = m ? m[0] : null;
@@ -719,6 +724,23 @@ async function handoffChecklist(client, channel, thread_ts, repo, task) {
   await postAs(client, channel, thread_ts, LEAD, `자 정리할게. 우리가 할 수 있는 건 다 했고, 너만 할 수 있는 것만 추렸어.\n\n[우리가 끝낸 거]\n${fmt(done, '✅')}\n\n[너가 해줘야 진짜 상용 오픈 가능 — 체크리스트]\n${fmt(todo, '☐')}\n\n이 중에 내가 대신 할 수 있는 건(도메인 연결, 마케팅 자료, 통계 코드 심기 등) 말만 해주면 또 해줄게. 계정·결제·스토어 제출처럼 너만 되는 건 끝나면 알려줘, 그담 단계 이어갈게.`);
 }
 
+// 자가수정 — 봇이 내부 에러를 내면 자기 코드(doping-lab-slack)에서 원인 찾아 고치고 PR. (안전: PR만, 자기 재배포 안 함, 쿨다운/중복 방지)
+let selfHealing = false, selfHealAt = 0, lastHealSig = '';
+const SELF_HEAL_REPO = 'nameofkk/doping-lab-slack';
+async function selfHeal(client, channel, thread_ts, errText) {
+  if (process.env.SELF_HEAL === 'off' || !GITHUB_TOKEN) return;
+  if (selfHealing) return;
+  const now = Date.now(); const sig = String(errText || '').slice(0, 80);
+  if (now - selfHealAt < 30 * 60 * 1000 && sig === lastHealSig) return; // 같은 에러 30분 내 반복 자가수정 금지
+  if (now - selfHealAt < 5 * 60 * 1000) return;                          // 어떤 에러든 최소 5분 간격
+  selfHealing = true; selfHealAt = now; lastHealSig = sig;
+  const sec = byName('우정잉') || LEAD;
+  try {
+    await postAs(client, channel, thread_ts, sec, '방금 내부 에러 났네. 내 봇 코드에서 원인 찾아서 고쳐볼게. 고치면 PR로 올릴 테니까 확인하고 머지해줘 (라이브 반영은 재배포 필요).');
+    await runWork(client, channel, thread_ts, SELF_HEAL_REPO, `이 슬랙 봇(너 자신)이 방금 다음 에러를 냈다. index.js에서 원인을 찾아 실제로 고쳐라. 추측하지 말고 코드를 직접 읽어서 정확한 원인을 짚고 최소한으로 안전하게 수정해라. node --check 통과하는지 확인하고, 뭘 왜 고쳤는지 보고해라.\n\n[에러]\n${sig ? String(errText).slice(0, 900) : '(내용 미상)'}`, false, true);
+  } catch (e) { try { await postAs(client, channel, thread_ts, sec, '자가수정 시도 중에 또 막혔어: ' + String(e).slice(0, 150)); } catch (_) {} }
+  finally { selfHealing = false; }
+}
 // 이 채널에서 무거운 작업이 도는 중이면 새로 시작 막고 안내 (진행상태 덮어쓰기/리소스 충돌 방지)
 async function guardBusy(client, channel, thread_ts) {
   if (!activeWork[channel]) return false;
@@ -985,6 +1007,7 @@ async function handle(event, client) {
 
   } catch (e) {
     await postAs(client, channel, thread_ts, LEAD, '⚠️ 오류: ' + String(e).slice(0, 400));
+    selfHeal(client, channel, thread_ts, String(e && e.stack || e)).catch(() => {}); // 내부 예외 → 자가수정 시도
   }
 }
 
