@@ -533,7 +533,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
 
 const ALL = TEAM.concat(LEAD);
 // 역할별 보고를 각 담당 직원 이름으로 분배
-const ROLE_MAP = { PM: '김채원 (PM)', 기획: '김채원 (PM)', 리서처: '아이유 (리서처)', 리서치: '아이유 (리서처)', UX: '정소민 (UX)', 디자인: '정소민 (UX)', 화면: '정소민 (UX)', 비주얼: '정소민 (UX)', 아키텍트: '윈터 (아키텍트)', 구조: '윈터 (아키텍트)', 백엔드: '윈터 (아키텍트)', 빌드: '윈터 (아키텍트)', 테스트: '윈터 (아키텍트)', 배포: '윈터 (아키텍트)', 운영: '윈터 (아키텍트)', 데브옵스: '윈터 (아키텍트)', 인프라: '윈터 (아키텍트)', 보안: '우정잉 (보안)', 취약점: '우정잉 (보안)', 마케터: '영듀 (마케터)', 마케팅: '영듀 (마케터)', 그로스: '영듀 (마케터)', 팀장: '한로로 (팀장)' };
+const ROLE_MAP = { PM: '김채원 (PM)', 기획: '김채원 (PM)', 리서처: '아이유 (리서처)', 리서치: '아이유 (리서처)', UX: '정소민 (UX)', 디자인: '정소민 (UX)', 화면: '정소민 (UX)', 비주얼: '정소민 (UX)', 아키텍트: '윈터 (아키텍트)', 구조: '윈터 (아키텍트)', 백엔드: '윈터 (아키텍트)', 빌드: '윈터 (아키텍트)', 테스트: '윈터 (아키텍트)', 배포: '윈터 (아키텍트)', 운영: '윈터 (아키텍트)', 데브옵스: '윈터 (아키텍트)', 인프라: '윈터 (아키텍트)', 보안: '우정잉 (보안)', 취약점: '우정잉 (보안)', 마케터: '영듀 (마케터)', 마케팅: '영듀 (마케터)', 그로스: '영듀 (마케터)', 팀장: '한로로 (팀장)', 한로로: '한로로 (팀장)', 로로: '한로로 (팀장)', 김채원: '김채원 (PM)', 채원: '김채원 (PM)', 아이유: '아이유 (리서처)', 정소민: '정소민 (UX)', 소민: '정소민 (UX)', 윈터: '윈터 (아키텍트)', 우정잉: '우정잉 (보안)', 정잉: '우정잉 (보안)', 영듀: '영듀 (마케터)', 안다연: '안다연 (반론자)', 다연: '안다연 (반론자)', 반론자: '안다연 (반론자)' }; // 역할키 + 직원 이름키 둘 다 — Claude가 이름으로 보고("윈터: …")해도 분배 안 끊기게
 // 메인 앱이 활동하는 채널에 직원 봇 7명을 자동 초대 (채널당 1회)
 const joinedChannels = new Set();
 async function ensureMembers(channel) {
@@ -900,6 +900,7 @@ async function handle(event, client) {
   if (event.user) lastRequester[channel] = event.user; // 완료 시 이 사람을 @멘션
   const thread_ts = event.thread_ts;
   // 새 프로젝트 시작 전 물어본 질문에 대한 답 → 그 답대로 기획 시작
+  if (pendingProject[channel] && pendingProject[channel].at && Date.now() - pendingProject[channel].at > 30 * 60 * 1000) { delete pendingProject[channel]; persistPending(); } // 30분 지난 미답변 질문은 만료 — 한참 뒤 무관한 메시지를 '답'으로 오인하는 거 방지
   if (pendingProject[channel]) {
     if (isStopMsg(raw) || /^(안\s?해|관둬|됐어|아니[ ,]?다)$/.test(raw.trim())) { delete pendingProject[channel]; persistPending(); await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, 그건 접을게.`); return; }
     if (!activeWork[channel]) {
