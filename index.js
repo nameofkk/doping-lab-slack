@@ -344,21 +344,19 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   workCancel[channel] = false;
   const dir = `/tmp/w${id}`;
   if (newProject) {
-    const clean = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 28);
-    const fromName = clean(projName);                 // 분류기가 준 영문 이름 (예: ramen-shop-game)
-    const fromTask = clean(task);                     // 한글이면 빈 문자열
-    const uniq = Date.now().toString(36).slice(-5);   // 재시작에도 안 겹치는 고유 꼬리표
-    const name = /포트폴리오|portfolio/i.test(task) ? 'doping-portfolio'
-      : (fromName || fromTask || `doping-app-${uniq}`) + ((fromName || fromTask) ? `-${uniq}` : '');
-    await postAs(client, channel, thread_ts, LEAD, `🆕 새 프로젝트 만들게요: ${name}\n요청: ${task}\nGitHub에 레포 만들고 처음부터 짜볼게요. 좀 걸려요.`);
-    const created = await ghPost('/user/repos', { name, private: true, auto_init: true, description: '도핑연구소 자동 생성' });
-    if (created && created.full_name) { repo = created.full_name; }
-    else {
-      // 같은 이름 레포가 이미 있으면 새로 만들지 말고 그걸 이어서 씀
-      const existing = await ghGet(`/repos/${GH_OWNER}/${name}`);
-      if (existing && existing.full_name) { repo = existing.full_name; await postAs(client, channel, thread_ts, LEAD, `${name} 레포가 이미 있어서 그걸 이어서 채울게.`); }
-      else { await postAs(client, channel, thread_ts, LEAD, '레포 생성 실패ㅠ\n' + JSON.stringify(created || {}).slice(0, 250)); return; }
+    const clean = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32);
+    const base = /포트폴리오|portfolio/i.test(task) ? 'doping-portfolio' : (clean(projName) || clean(task) || 'doping-app');
+    // 깔끔한 이름으로, 진짜 겹칠 때만 -2, -3 ...
+    let name = base;
+    for (let n = 2; n <= 50; n++) {
+      const ex = await ghGet(`/repos/${GH_OWNER}/${name}`);
+      if (!ex || !ex.full_name) break;   // 비어있음 → 이 이름 사용
+      name = `${base}-${n}`;
     }
+    await postAs(client, channel, thread_ts, LEAD, `🆕 새 프로젝트 만들게요: ${name}\n요청: ${task}\nGitHub에 레포 만들고 처음부터 짜볼게요. 좀 걸려요.`);
+    const created = await ghPost('/user/repos', { name, private: true, auto_init: true, description: `도핑연구소: ${task.slice(0, 80)}` });
+    if (created && created.full_name) { repo = created.full_name; }
+    else { await postAs(client, channel, thread_ts, LEAD, '레포 생성 실패ㅠ\n' + JSON.stringify(created || {}).slice(0, 250)); return; }
   } else {
     await postAs(client, channel, thread_ts, LEAD, `🛠️ 작업 받았어요\n레포: ${repo}\n할 일: ${task}\n클론하고 코드 손본 다음 ${WORK_BASE}에 바로 반영할게요. 좀 걸려요.`);
   }
