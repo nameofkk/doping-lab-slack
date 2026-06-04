@@ -475,7 +475,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const prog = startProgress(channel, thread_ts, '일단 레포 받아오는 중');
   try {
   const cl = await sh(`rm -rf ${dir} && git clone https://x-access-token:${GITHUB_TOKEN}@github.com/${repo}.git ${dir} && chmod -R 777 ${dir}`);
-  if (cl.code !== 0) { await postAs(client, channel, thread_ts, LEAD, '클론 실패ㅠ\n' + (cl.err || '').slice(0, 600)); return; }
+  if (cl.code !== 0) { await postAs(client, channel, thread_ts, LEAD, `클론 실패ㅠ — '${repo}' 레포 이름이 맞는지 확인해줘 (없는 이름이면 못 받아와). "서비스 목록"으로 확인되고, sponono/wewantpeace/myungjak 중 하나거나 정확한 owner/repo면 돼.\n` + (cl.err || '').slice(0, 300)); return; }
   await sh(`git config user.name "doping-lab[bot]" && git config user.email "bot@doping.lab"`, dir);
   const intro = newProject
     ? '이 빈 저장소에 다음 요청대로 프로젝트를 처음부터 만들어라. 적절한 기술스택을 직접 고르고, README도 작성해라. 중요: 데모가 아니라 바로 상용으로 오픈해도 되는 수준으로 완성해라 — 실제 콘텐츠(로렘입숨·더미텍스트 금지), 에러·로딩·빈 상태 처리, 반응형 완비, 깨진 링크·콘솔 에러 없음, 환경변수 정리, npm run build 통과. 핵심 로직엔 테스트 코드도 짜서 npm test로 돌려 통과시키고, CHANGELOG.md에 이번에 만든 걸 적어라. 대충 만들고 끝내지 마.'

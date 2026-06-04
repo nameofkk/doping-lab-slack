@@ -53,3 +53,10 @@
 - 브랜치: PR 경로 브랜치명이 doping/{workSeq}인데 재시작하면 workSeq=0부터라 같은 이름 재사용 → 리모트에 이미 있으면 push 실패 → 시각 꼬리표 붙여 유니크화.
 - runReport: 팀장 최종 종합 직전에 workCancel 체크 추가(중단 시 종합 안 함). 안다연 반론은 이미 체크 있었음.
 - 점검완료(이상없음): qaGate/verifyBuild는 빌드 통과 후 짧게 도는 단계라 중단 누락 영향 작음(다음 작업 시 workCancel 리셋). startProgress chat.update 실패는 try/catch로 무시되고 done()이 finally에서 정리. selfHeal은 5분/30분 쿨다운 + activeWork 가드로 재진입 안전.
+
+### #11 클론 실패 안내 친절화 [수정함] + 마무리 스윕 결과
+- clone 실패 시 레포 이름 확인 안내 추가(없는 별칭에 nameofkk/ 붙여 실패한 경우 사용자가 원인 파악 쉽게).
+- 점검완료(이상없음): PR 생성 실패→"(브랜치: ...)" 폴백 있음. classifyIntent JSON파싱 실패→{action:chat} 폴백 있음. startSchedule는 부팅 시 loadSchedules 1회만 호출돼 timer 중복 없음. 빈 메시지→if(!raw)return, 이모지/초장문→classifier/feedback로 안전. guardBusy는 pending 중엔 activeWork 없어서 안 뜨고 pending-dedup가 안내. jobFor가 죽은 채널/레포 가리켜도 postAs try/catch로 조용히 실패(크래시 없음).
+
+## QA 한 바퀴 완료
+실버그 11건 수정(stop-word/재개/extractRepo/피드백벽돌화/질문반복/스케줄오등록/PRD점수/pickPersona/redeploy모노레포/addRule/runDebate중단/PR브랜치충돌/클론안내). 나머지 점검 영역은 모두 폴백 정상(이상없음). 더 이상 명백한 신규 버그 안 보임 → 저빈도 감시 모드로 전환. 전부 커밋만, 배포는 사용자 복귀 후 한꺼번에.
