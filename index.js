@@ -54,7 +54,7 @@ const LEAD = { name: '한로로 (팀장)', kw: ['한로로','로로','팀장'], 
 // 모든 발언에 적용되는 말투/가독성 규칙
 const STYLE = '\n\n[말투 규칙] 실제 한국 여성이 친한 동료랑 메신저로 편하게 수다 떨듯 자연스러운 구어체로 써라. 무조건 반말로 일관되게 써라 — 존댓말(~요, ~습니다, ~에요)을 절대 섞지 마라(한 메시지 안에서 반말/존댓말 왔다갔다 금지). 딱딱한 문어체나 설명조, 번역투 금지. 대시 기호(—, –, ㅡ, -)는 절대 쓰지 마라. 끊고 싶으면 문장을 나누거나 쉼표나 줄바꿈으로 해라. AI 티 나는 말투(도와드릴 수 있어요, ~에 대해 말씀드리면, 불필요한 사과나 안내) 금지. 마크다운 볼드 별표(**)나 머리표(#)도 쓰지 마라. 핵심만 2~4문장으로 짧고 친근하게, 읽기 쉽게. 중요: 네 속생각이나 "이렇게 답하자, 솔직하게 말하고 넘어가자, 사용자 화났네" 같은 메타 서술·지문은 절대 쓰지 말고, 실제로 상대한테 할 말만 바로 해라.';
 // 너희 자신에 대해 물으면 정직하게 답할 사실 (모델 등)
-const SELF = '\n\n[너에 대한 사실 — 물어보면 이것만 정직하게, 모르면 모른다고 해] 너는 도핑연구소 팀원이고 Claude Code(클코)를 구독 토큰으로 헤드리스 실행해서 돌아가. 팀장 한로로는 Claude Opus, 나머지 팀원들은 Claude Sonnet으로 동작해(사용량 한도 아끼려고 팀원은 sonnet, 팀장만 opus로 맞춰놨어). 메시지 의도분류는 haiku로 돌아. 이게 전부야.';
+const SELF = '\n\n[너에 대한 사실 — 물어보면 이것만 정직하게, 모르면 모른다고 해] 너는 도핑연구소 팀원이고 Claude Code(클코)를 구독 토큰으로 헤드리스 실행해서 돌아가. 팀장 한로로는 Claude Opus, 나머지 팀원들은 Claude Sonnet으로 동작해(사용량 한도 아끼려고 팀원은 sonnet, 팀장만 opus로 맞춰놨어). 메시지 의도분류는 haiku로 돌아. 이게 전부야. 중요: 한도가 왜 걸렸는지, 모델별 쿼터가 어떻게 나뉘는지, 인프라가 어떻게 도는지 같은 내부 동작은 네가 정확히 알 수 없는 거야. 그럴듯하게 추측해서 사실처럼 설명하지 마. 모르면 "그건 나도 정확힌 몰라"라고 솔직히 말해.';
 // 작업/조사 보고용 — 마크다운 금지 + 사람 말투 (길이는 제한 안 함)
 const PLAIN = '\n\n[형식·말투 규칙 — 항상] 마크다운 절대 금지: 별표(**), 샵(#), 표(|), 대시(—,–,ㅡ). 무조건 반말로 일관되게(존댓말 ~요/~습니다 섞지 마). 딱딱한 보고체("~다", "~상태다", "~된다", "~음") 쓰지 말고, 친한 동료한테 말하듯 편한 구어체로 써(예: ~야, ~거든, ~더라, ~인데). AI 말투(말씀드리면, ~할 수 있습니다) 금지. 어려운 전문용어는 그냥 쓰지 말고 쉬운 말로 풀어서, 모르는 사람도 한 번에 이해되게 써. 내용은 충분히 쓰되 짧은 문장과 줄바꿈으로 읽기 쉽게.';
 // 디자인 작업 시 항상 적용 — 사용자가 늘 쓰던 디자인 기준(PRD 기반)
@@ -125,7 +125,16 @@ function bumpUsage(j, limited) {
 }
 function claudeAcquire() { return new Promise(res => { if (claudeRunning < MAX_CLAUDE) { claudeRunning++; res(); } else claudeQueue.push(res); }); }
 function claudeRelease() { claudeRunning = Math.max(0, claudeRunning - 1); if (claudeQueue.length) { claudeRunning++; claudeQueue.shift()(); } }
+// 일시적 rate limit(429)면 잠깐 쉬고 재시도 → 진짜 세션 한도일 때만 포기 (88%에서 조기중단 방지)
 async function runClaude(prompt, model, cwd = WORKDIR, perm = CLAUDE_PERMISSION_MODE, timeoutMs = 150000) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const r = await runClaudeOnce(prompt, model, cwd, perm, timeoutMs);
+    if (!r.limited) return r;
+    if (attempt < 2) await new Promise(s => setTimeout(s, 8000 * (attempt + 1))); // 8s, 16s 백오프
+  }
+  return { ok: false, limited: true, text: '⏳ 클로드 사용량 한도가 계속 걸려. 좀 있다 다시 시도해줘.' };
+}
+async function runClaudeOnce(prompt, model, cwd = WORKDIR, perm = CLAUDE_PERMISSION_MODE, timeoutMs = 150000) {
   await claudeAcquire();
   return new Promise(resolve => {
     const args = ['-p', prompt, '--output-format', 'json', '--permission-mode', perm];
@@ -272,7 +281,11 @@ async function runPRD(client, channel, thread_ts, task) {
     if (round < MAX) await postAs(client, channel, thread_ts, LEAD, `아직 ${score || '미정'}%라 한 라운드 더 보강하자.`);
     else await postAs(client, channel, thread_ts, LEAD, `라운드 한계까지 끌어올려서 ${score || ''}% 됐어. 이 PRD로 제작 들어갈게.`);
   }
-  if (limited) { await postAs(client, channel, thread_ts, LEAD, '⏳ 클로드 사용량 한도에 걸려서 기획을 더 못 돌리겠어. 한도 리셋되면 이어서 하자. 지금은 여기서 멈출게.'); return null; }
+  if (limited) {
+    // 한도 걸려도 지금까지 잡은 PRD가 쓸 만하면(이미 1라운드 이상 + 내용 있음) 버리지 말고 그걸로 제작 들어감
+    if (prd && prd.length > 300) { await postAs(client, channel, thread_ts, LEAD, `⏳ 한도 때문에 기획을 ${TARGET}%까지는 못 끌어올렸는데(현재 ${score || '80'}% 정도), 지금까지 잡은 PRD가 충분히 탄탄하니까 이걸로 바로 제작 들어갈게. 부족하면 나중에 보강하자.`); return prd; }
+    await postAs(client, channel, thread_ts, LEAD, '⏳ 한도에 걸려서 기획을 시작도 제대로 못 했어. 한도 풀리면 다시 시켜줘.'); return null;
+  }
   return prd || convo;
 }
 
