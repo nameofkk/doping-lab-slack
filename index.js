@@ -188,11 +188,13 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
     }
   }
   const synth = await runClaude(`${LEAD.prompt}${STYLE}${rulesCtx(channel)}\n\n[토론 전체]\n${transcript}\n\n이 토론을 종합해. 의견 갈린 지점 짚고, 가장 설득력 있는 쪽으로 최적 결론을 내려. 단순 요약 말고 결정과 다음 액션까지.${HONEST}`, LEAD.model);
-  await postAs(client, channel, thread_ts, LEAD, '📋 결론\n' + (synth.text || '').trim().slice(0, 2800));
+  await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}📋 결론\n` + (synth.text || '').trim().slice(0, 2800));
 }
 
 // ── 실제 작업 모드: 레포 클론 → claude 코드 작업 → 브랜치 push → PR → 보고 ──
-let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {};
+let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {};
+// 답변/완료 시 요청자를 @멘션 (자리 비웠어도 핑 가게). 채널의 마지막 요청자 기준
+function mention(channel) { const u = lastRequester[channel]; return u ? `<@${u}> ` : ''; }
 function workStatusCtx(channel) {
   const w = activeWork[channel];
   if (!w) return '\n[작업 상태] 지금 백그라운드에서 진행 중인 코드작업 없음.';
@@ -446,7 +448,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
       const n = await distributeReport(client, channel, thread_ts, res.text);
       if (!n) await postAs(client, channel, thread_ts, LEAD, (res.text || '').trim().slice(0, 1500));
       await verifyBuild(client, channel, thread_ts, dir, repo);
-      await postAs(client, channel, thread_ts, LEAD, `다 끝냈어! ${repoUrl} (${WORK_BASE}에 반영). 빌드 확인이랑 라이브/스크린샷은 위에 우정잉이 올린 거 봐줘.`);
+      await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}다 끝냈어! ${repoUrl} (${WORK_BASE}에 반영). 빌드 확인이랑 라이브/스크린샷은 위에 우정잉이 올린 거 봐줘.`);
       if (newProject) await handoffChecklist(client, channel, thread_ts, repo, task);
       return;
     }
@@ -461,7 +463,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const n2 = await distributeReport(client, channel, thread_ts, res.text);
   if (!n2) await postAs(client, channel, thread_ts, LEAD, (res.text || '').trim().slice(0, 1500));
   await verifyBuild(client, channel, thread_ts, dir, repo);
-  await postAs(client, channel, thread_ts, LEAD, `다 끝냈어! ${forcePR ? '승인모드라 PR로 올렸어 (머지하면 반영).' : 'PR로 올렸어.'}\nPR: ${url}`);
+  await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}다 끝냈어! ${forcePR ? '승인모드라 PR로 올렸어 (머지하면 반영).' : 'PR로 올렸어.'}\nPR: ${url}`);
   if (newProject) await handoffChecklist(client, channel, thread_ts, repo, task);
   } finally { await prog.done(); }
 }
@@ -563,12 +565,16 @@ async function runReport(client, channel, thread_ts, reporter, repo, task) {
   if (!GITHUB_TOKEN) { await postAs(client, channel, thread_ts, reporter, 'GITHUB_TOKEN이 없어서 조사를 못 해.'); return; }
   await postAs(client, channel, thread_ts, reporter, `${repo} 한번 까볼게. 잠깐만.`);
   const id = ++workSeq; const dir = `/tmp/r${id}`;
-  const cl = await sh(`rm -rf ${dir} && git clone --depth 1 https://x-access-token:${GITHUB_TOKEN}@github.com/${repo}.git ${dir} && chmod -R 777 ${dir}`);
-  if (cl.code !== 0) { await postAs(client, channel, thread_ts, reporter, `${repo} 레포를 못 찾았어ㅠ (이름 확인 필요)\n${(cl.err || '').slice(0, 200)}`); return; }
-  const res = await runClaude(`이 저장소를 실제로 열어보고, 사용자의 요청 "${task}"에 직접 답해라. 단순 현황 나열이 아니라, 레포에서 확인한 사실을 근거로 실제 답·제안·전략을 내라. 코드는 읽기만 해. 레포에 없는 시장·경쟁사·트렌드·벤치마크는 웹서치(WebSearch)로 찾아서 근거로 써도 돼. 모르는 건 추측이라 표시.\n\n역할별로 각자 그 요청에 대한 자기 분야의 답/제안을 줘. 각 줄 "역할: 답/제안" 형식(관련된 역할만, PM/리서처/UX/아키텍트/보안/마케터). 질문 분야의 담당이 메인으로 구체적인 안을 내고(예: 마케팅 질문이면 마케터가 채널·메시지·실행안까지), 나머지는 거들어. 한 역할당 2~4줄.${PLAIN}`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000);
-  if (res.limited) { await postAs(client, channel, thread_ts, reporter, '⏳ 조사 중에 클로드 사용량 한도에 걸렸어. 리셋되면 다시 봐줄게.'); return; }
-  const n = await distributeReport(client, channel, thread_ts, res.text);
-  if (!n) await postAs(client, channel, thread_ts, reporter, (res.text || '(내용 없음)').trim().slice(0, 3000));
+  const prog = startProgress(channel, thread_ts, `${repo.split('/').pop()} 까보고 정리하는 중`);
+  try {
+    const cl = await sh(`rm -rf ${dir} && git clone --depth 1 https://x-access-token:${GITHUB_TOKEN}@github.com/${repo}.git ${dir} && chmod -R 777 ${dir}`);
+    if (cl.code !== 0) { await postAs(client, channel, thread_ts, reporter, `${mention(channel)}${repo} 레포를 못 찾았어ㅠ (이름 확인 필요)\n${(cl.err || '').slice(0, 200)}`); return; }
+    const res = await runClaude(`이 저장소를 실제로 열어보고, 사용자의 요청 "${task}"에 직접 답해라. 단순 현황 나열이 아니라, 레포에서 확인한 사실을 근거로 실제 답·제안·전략을 내라. 코드는 읽기만 해. 레포에 없는 시장·경쟁사·트렌드·벤치마크는 웹서치(WebSearch)로 찾아서 근거로 써도 돼. 모르는 건 추측이라 표시.\n\n역할별로 각자 그 요청에 대한 자기 분야의 답/제안을 줘. 각 줄 "역할: 답/제안" 형식(관련된 역할만, PM/리서처/UX/아키텍트/보안/마케터). 질문 분야의 담당이 메인으로 구체적인 안을 내고(예: 마케팅 질문이면 마케터가 채널·메시지·실행안까지), 나머지는 거들어. 한 역할당 2~4줄.${PLAIN}`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000);
+    if (res.limited) { await postAs(client, channel, thread_ts, reporter, `${mention(channel)}⏳ 조사 중에 클로드 사용량 한도에 걸렸어. 리셋되면 다시 봐줄게.`); return; }
+    const n = await distributeReport(client, channel, thread_ts, res.text);
+    if (!n) await postAs(client, channel, thread_ts, reporter, (res.text || '(내용 없음)').trim().slice(0, 3000));
+    await postAs(client, channel, thread_ts, reporter, `${mention(channel)}다 정리했어, 위에 봐줘!`);
+  } finally { await prog.done(); }
 }
 
 // ── 주기 스케줄 (영구 저장) ──
@@ -779,6 +785,7 @@ async function handle(event, client) {
   const raw = (event.text || '').replace(/<@[^>]+>/g, '').trim();
   if (!raw) return;
   recordMsg(channel, '사용자', raw);
+  if (event.user) lastRequester[channel] = event.user; // 완료 시 이 사람을 @멘션
   ensureMembers(channel).catch(() => {});
   const thread_ts = event.thread_ts;
   try {
@@ -826,9 +833,13 @@ async function handle(event, client) {
       (async () => {
         const id = ++workSeq; const dir = `/tmp/dp${id}`;
         await postAs(client, channel, thread_ts, win, `${target} 다시 띄울게. 클론하고 레일웨이에 올린다.`);
-        const cl = await sh(`rm -rf ${dir} && git clone --depth 1 https://x-access-token:${GITHUB_TOKEN}@github.com/${target}.git ${dir} && chmod -R 777 ${dir}`);
-        if (cl.code !== 0) { await postAs(client, channel, thread_ts, win, '클론 실패ㅠ\n' + (cl.err || '').slice(0, 200)); return; }
-        await railwayDeploy(client, channel, thread_ts, dir, target);
+        const prog = startProgress(channel, thread_ts, `${target.split('/').pop()} 다시 배포하는 중`);
+        try {
+          const cl = await sh(`rm -rf ${dir} && git clone --depth 1 https://x-access-token:${GITHUB_TOKEN}@github.com/${target}.git ${dir} && chmod -R 777 ${dir}`);
+          if (cl.code !== 0) { await postAs(client, channel, thread_ts, win, `${mention(channel)}클론 실패ㅠ\n` + (cl.err || '').slice(0, 200)); return; }
+          const u = await railwayDeploy(client, channel, thread_ts, dir, target);
+          if (u) await postAs(client, channel, thread_ts, win, `${mention(channel)}다시 띄웠어! ${u}`);
+        } finally { await prog.done(); }
       })().catch(e => postAs(client, channel, thread_ts, win, '배포 오류: ' + String(e).slice(0, 200))).finally(() => { activeWork[channel] = null; });
       return;
     }
@@ -889,15 +900,18 @@ async function handle(event, client) {
       await postAs(client, channel, thread_ts, sec, `${target} 의존성 까볼게. 취약점이랑 오래된 패키지 본다.`);
       (async () => {
         const id = ++workSeq; const dir = `/tmp/dep${id}`;
-        const cl = await sh(`rm -rf ${dir} && git clone --depth 1 https://x-access-token:${GITHUB_TOKEN}@github.com/${target}.git ${dir} && chmod -R 777 ${dir}`);
-        if (cl.code !== 0) { await postAs(client, channel, thread_ts, sec, '클론 실패ㅠ\n' + (cl.err || '').slice(0, 200)); return; }
-        const hasPkg = await sh('test -f package.json && echo yes || echo no', dir);
-        if (!hasPkg.out.includes('yes')) { await postAs(client, channel, thread_ts, sec, 'package.json이 없어서 npm 의존성 점검은 해당 없어.'); return; }
-        await sh('npm install --no-audit --no-fund 2>&1 | tail -2', dir);
-        const au = await sh('npm audit 2>&1 | tail -15', dir);
-        const od = await sh('npm outdated 2>&1 | head -20', dir);
-        const clean = /0 vulnerabilities/.test(au.out);
-        await postAs(client, channel, thread_ts, sec, `${target} 의존성 점검 결과\n\n[취약점]\n${clean ? '깨끗해, 0개야.' : (au.out || '').slice(-700)}\n\n[오래된 패키지]\n${((od.out || '').trim()) || '다 최신이야.'}`.slice(0, 2800));
+        const prog = startProgress(channel, thread_ts, `${target.split('/').pop()} 의존성 까보는 중`);
+        try {
+          const cl = await sh(`rm -rf ${dir} && git clone --depth 1 https://x-access-token:${GITHUB_TOKEN}@github.com/${target}.git ${dir} && chmod -R 777 ${dir}`);
+          if (cl.code !== 0) { await postAs(client, channel, thread_ts, sec, `${mention(channel)}클론 실패ㅠ\n` + (cl.err || '').slice(0, 200)); return; }
+          const hasPkg = await sh('test -f package.json && echo yes || echo no', dir);
+          if (!hasPkg.out.includes('yes')) { await postAs(client, channel, thread_ts, sec, `${mention(channel)}package.json이 없어서 npm 의존성 점검은 해당 없어.`); return; }
+          await sh('npm install --no-audit --no-fund 2>&1 | tail -2', dir);
+          const au = await sh('npm audit 2>&1 | tail -15', dir);
+          const od = await sh('npm outdated 2>&1 | head -20', dir);
+          const clean = /0 vulnerabilities/.test(au.out);
+          await postAs(client, channel, thread_ts, sec, `${mention(channel)}${target} 의존성 점검 결과\n\n[취약점]\n${clean ? '깨끗해, 0개야.' : (au.out || '').slice(-700)}\n\n[오래된 패키지]\n${((od.out || '').trim()) || '다 최신이야.'}`.slice(0, 2800));
+        } finally { await prog.done(); }
       })().catch(e => postAs(client, channel, thread_ts, sec, '의존성 점검 오류: ' + String(e).slice(0, 200))).finally(() => { activeWork[channel] = null; });
       return;
     }
