@@ -311,7 +311,8 @@ async function railwayDeploy(client, channel, thread_ts, dir, repo) {
   await sh(`printf 'node_modules\\n.next\\n.git\\ndist\\nbuild\\n.turbo\\n' > .railwayignore`, dir);
   // 계정토큰이면 빌드 전용 프로젝트(BUILDS_PROJECT_ID)에 링크 (컨테이너 자동주입 RAILWAY_PROJECT_ID와 분리). </dev/null로 대화형 멈춤 방지
   if (process.env.BUILDS_PROJECT_ID) await sh(`env -u RAILWAY_TOKEN railway link --project ${process.env.BUILDS_PROJECT_ID} --environment ${process.env.BUILDS_ENV || 'production'} </dev/null 2>&1`, dir);
-  // railway up --service 가 서비스를 자동 생성하므로 별도 add 안 함 (add는 대화형이라 멈춤)
+  // railway CLI v3에서 --service는 서비스가 이미 있어야 함 — 없으면 "Service not found". 먼저 생성 시도 (이미 있으면 무시)
+  await sh(`printf '${svc}\\n' | env -u RAILWAY_TOKEN railway service create 2>&1 || true`, dir);
   const up = await sh(`env -u RAILWAY_TOKEN railway up --service ${svc} --ci </dev/null 2>&1`, dir);
   if (up.code !== 0) {
     const emsg = (up.out || up.err) || '';
