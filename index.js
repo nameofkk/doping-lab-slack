@@ -101,6 +101,14 @@ async function postAs(defaultClient, channel, thread_ts, persona, text) {
 
 let claudeRunning = 0; const claudeQueue = [];
 const MAX_CLAUDE = parseInt(process.env.MAX_CLAUDE || '3', 10);
+// 사용량 집계 (오늘 Claude 호출/토큰/한도걸림) — 번레이트 보려고
+let usageStat = { day: null, calls: 0, outTokens: 0, limitedHits: 0 };
+function bumpUsage(j, limited) {
+  try { const n = kstNow(); if (usageStat.day !== n.day) usageStat = { day: n.day, calls: 0, outTokens: 0, limitedHits: 0 };
+    usageStat.calls++; if (limited) usageStat.limitedHits++;
+    const ot = j && j.usage && (j.usage.output_tokens || 0); if (ot) usageStat.outTokens += ot;
+  } catch (e) {}
+}
 function claudeAcquire() { return new Promise(res => { if (claudeRunning < MAX_CLAUDE) { claudeRunning++; res(); } else claudeQueue.push(res); }); }
 function claudeRelease() { claudeRunning = Math.max(0, claudeRunning - 1); if (claudeQueue.length) { claudeRunning++; claudeQueue.shift()(); } }
 async function runClaude(prompt, model, cwd = WORKDIR, perm = CLAUDE_PERMISSION_MODE, timeoutMs = 150000) {
@@ -123,8 +131,10 @@ async function runClaude(prompt, model, cwd = WORKDIR, perm = CLAUDE_PERMISSION_
       let j = null; try { j = JSON.parse(out); } catch {}
       if (j) {
         const res = typeof j.result === 'string' ? j.result : '';
-        if (j.is_error || j.api_error_status === 429 || isLimit(res)) {
-          return finish({ ok: false, limited: isLimit(res) || j.api_error_status === 429, text: (isLimit(res) || j.api_error_status === 429) ? '⏳ 지금 클로드 사용량 한도에 걸렸어. 한도 리셋되면 다시 할게.' : (res || '오류가 났어').slice(0, 500) });
+        const lim = isLimit(res) || j.api_error_status === 429;
+        bumpUsage(j, lim);
+        if (j.is_error || lim) {
+          return finish({ ok: false, limited: lim, text: lim ? '⏳ 지금 클로드 사용량 한도에 걸렸어. 한도 리셋되면 다시 할게.' : (res || '오류가 났어').slice(0, 500) });
         }
         return finish({ ok: true, text: res || out.slice(0, 1500) });
       }
@@ -634,20 +644,27 @@ function registerService(repo, url, channel) {
 }
 function svcList(channel) { return Object.values(services).filter(s => !channel || s.channel === channel); }
 // 운영 헬스체크 — 각 라이브 서비스 curl로 상태 확인 → 우정잉(QA/SRE)이 보고, 다운이면 윈터가 알림
-async function checkServices(client, channel, announce = true) {
+async function checkServices(client, channel, announce = true, onlyAlert = false) {
   const sre = byName('우정잉') || LEAD;
   const list = svcList(channel).filter(s => s.url);
-  if (!list.length) { if (announce) await postAs(client, channel, undefined, sre, '아직 등록된 라이브 서비스가 없어. 뭐 하나 만들어서 배포되면 여기 대장에 올라가.'); return; }
+  if (!list.length) { if (announce && !onlyAlert) await postAs(client, channel, undefined, sre, '아직 등록된 라이브 서비스가 없어. 뭐 하나 만들어서 배포되면 여기 대장에 올라가.'); return; }
   const lines = [];
   for (const s of list) {
     const r = await sh(`curl -s -o /dev/null -w "%{http_code} %{time_total}s" --max-time 15 ${s.url} 2>/dev/null || echo "000"`);
     const out = (r.out || '').trim(); const up = /^2\d\d|^3\d\d/.test(out);
-    s.lastStatus = up ? 'up' : 'down'; s.lastCheck = Date.now();
+    const wasUp = s.lastStatus !== 'down';
+    s.lastStatus = up ? 'up' : 'down'; s.lastCheck = Date.now(); s.wasUp = wasUp;
     lines.push(`${up ? '🟢' : '🔴'} ${s.repo} · ${s.url} (${out || 'no response'})`);
   }
   persistServices();
-  await postAs(client, channel, undefined, sre, '서비스 헬스체크 결과\n' + lines.join('\n'));
   const down = list.filter(s => s.lastStatus === 'down');
+  // onlyAlert(시간별 감시)면 새로 죽은 게 있을 때만 알림, 평소엔 조용
+  if (onlyAlert) {
+    const newlyDown = down.filter(s => s.wasUp);
+    if (newlyDown.length) await postAs(client, channel, undefined, byName('윈터') || LEAD, `🔴 방금 다운 감지: ${newlyDown.map(s => s.repo).join(', ')}. 라이브가 죽었어, 확인할게.`);
+    return;
+  }
+  await postAs(client, channel, undefined, sre, '서비스 헬스체크 결과\n' + lines.join('\n'));
   if (down.length) await postAs(client, channel, undefined, byName('윈터') || LEAD, `⚠️ ${down.length}개 다운됐어. 확인 필요: ${down.map(s => s.repo).join(', ')}. 라이브가 진짜 죽은 건지 내가 로그 봐야겠어.`);
 }
 
@@ -750,6 +767,27 @@ async function handle(event, client) {
     if (/(헬스\s?체크|운영\s?점검|상태\s?점검|서비스.*점검|모니터링)/.test(raw)) {
       await postAs(client, channel, thread_ts, byName('우정잉') || LEAD, '지금 바로 다 돌려서 살아있는지 확인할게.');
       checkServices(client, channel).catch(e => postAs(client, channel, thread_ts, LEAD, '점검 오류: ' + String(e).slice(0, 200)));
+      return;
+    }
+    // 사용량/번레이트 (오늘 Claude 호출·토큰·한도걸림)
+    if (/(사용량|번레이트|토큰.*얼마|클로드.*사용|usage)/.test(raw)) {
+      await postAs(client, channel, thread_ts, LEAD, `오늘 우리 사용량이야.\n호출 ${usageStat.calls}회 · 출력토큰 약 ${usageStat.outTokens.toLocaleString()} · 한도걸림 ${usageStat.limitedHits}번.${usageStat.limitedHits ? ' 한도 자주 걸리면 팀원 모델 sonnet 유지하거나 작업 텀을 두자.' : ''}`);
+      return;
+    }
+    // 서비스 재시작 (라이브가 맛이 갔을 때)
+    if (/재시작|리스타트|restart/i.test(raw)) {
+      const win = byName('윈터') || LEAD;
+      if (!process.env.RAILWAY_API_TOKEN) { await postAs(client, channel, thread_ts, win, '재시작은 RAILWAY_API_TOKEN 있어야 돼.'); return; }
+      const match = svcList().find(s => raw.includes(s.repo.split('/').pop()));
+      const target = (match && match.repo) || lastRepo[channel];
+      if (!target) { await postAs(client, channel, thread_ts, win, '어느 서비스 재시작할지 알려줘 (레포 이름).'); return; }
+      const svc = (target.split('/').pop() || '').replace(/[^a-zA-Z0-9-]/g, '').slice(0, 28);
+      await postAs(client, channel, thread_ts, win, `${svc} 재시작할게.`);
+      (async () => {
+        const link = process.env.BUILDS_PROJECT_ID ? `RAILWAY_TOKEN= railway link --project ${process.env.BUILDS_PROJECT_ID} --environment ${process.env.BUILDS_ENV || 'production'} >/dev/null 2>&1; ` : '';
+        const r = await sh(`${link}RAILWAY_TOKEN= railway restart --service ${svc} 2>&1`, '/tmp');
+        await postAs(client, channel, thread_ts, win, r.code === 0 ? '재시작 보냈어. 곧 다시 뜰 거야.' : '재시작이 막혔어:\n' + ((r.out || r.err) || '').slice(-300));
+      })();
       return;
     }
     // 마케팅 산출물 — 영듀가 MARKETING.md + 메타 보강
@@ -883,11 +921,16 @@ app.event('app_mention', async ({ event, client }) => { await handle(event, clie
         s.lastRunDay = n.day; persistSchedules(); jobFor(s)().catch(() => {});
       }
     }
-    // 매일 OPS_HOUR에 서비스가 등록된 채널마다 자동 헬스체크 (운영 부서 자동화)
+    // 매일 OPS_HOUR에 전체 헬스체크 리포트 (운영 부서 자동화)
     if (n.h === OPS_HOUR && n.m === 0 && opsLastDay !== n.day) {
       opsLastDay = n.day;
       const chans = [...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))];
       for (const ch of chans) checkServices(botClient, ch, false).catch(() => {});
+    }
+    // 매시 정각엔 조용히 감시하다가 새로 죽은 게 있으면 즉시 알림 (실시간 다운 감지)
+    if (n.m === 0 && n.h !== OPS_HOUR) {
+      const chans = [...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))];
+      for (const ch of chans) checkServices(botClient, ch, false, true).catch(() => {});
     }
   }, 60000);
   const real = TEAM.concat(LEAD).filter(p => process.env[p.tokenEnv]).map(p => p.name);
