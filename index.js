@@ -902,10 +902,13 @@ async function handle(event, client) {
     // 중단/취소 — 명확한 중단 명령일 때만 (문장 속 '중단/스톱' 부분일치로 오작동하던 거 수정)
     if (isStopMsg(raw)) {
       if (activeWork[channel] && activeWork[channel].repo !== undefined) pausedWork[channel] = { ...activeWork[channel] }; // 재개용 컨텍스트 보관
-      workCancel[channel] = true;
-      await postAs(client, channel, thread_ts, LEAD, '오케이 멈출게. 진행 중이던 거 있으면 main엔 안 올리고 중단할게.' + (pausedWork[channel] ? ' ("이어서"라고 하면 그 작업 다시 이어갈게)' : ''));
+      const had = !!activeWork[channel];
+      workCancel[channel] = true; activeWork[channel] = null; feedback[channel] = []; // 즉시 채널 해제 (스테일 activeWork로 막히는 거 방지)
+      await postAs(client, channel, thread_ts, LEAD, (had ? '오케이 멈출게. 진행 중이던 거 main엔 안 올리고 중단할게.' : '오케이, 지금 도는 작업은 없어. 깨끗하게 풀어놨어.') + (pausedWork[channel] ? ' ("이어서"라고 하면 그 작업 다시 이어갈게)' : ''));
       return;
     }
+    // 스테일 activeWork 자동 해제 — 12분 넘게 잡혀있는데 안 끝났으면 끊긴 걸로 보고 풀어줌 (피드백 무한루프/벽돌화 방지)
+    if (activeWork[channel] && activeWork[channel].started && Date.now() - activeWork[channel].started > 12 * 60 * 1000) { activeWork[channel] = null; feedback[channel] = []; }
     // 재개 — 중단했던 작업을 새로 만들지 말고 그대로 이어감
     if (!activeWork[channel] && pausedWork[channel] && /^(이어서|이어가|이어|계속(해|하자|진행)?|마저|다시\s*진행|아까\s*거|이전\s*거)/.test(raw)) {
       const pw = pausedWork[channel]; delete pausedWork[channel];
@@ -913,10 +916,11 @@ async function handle(event, client) {
       launchWork(client, channel, thread_ts, pw.repo, pw.task, pw.newProject, pw.forcePR, pw.projName);
       return;
     }
-    // 작업 진행 중에 사용자가 끼어들어 수정/지시하면 → 새 작업 만들지 말고 "진행 중인 작업"에 반영(피드백 버퍼). 짧은 안부/상태 질문은 아래로 흘려보냄
-    if (activeWork[channel] && (/(바꿔|바꾸|수정|추가|빼|말고|대신|아니|틀렸|틀려|반영|변경|고쳐|하지\s?마|로 ?해|로 ?가|넣어|이렇게|저렇게|말고|먼저|우선|강조|제외)/.test(raw) || raw.length > 14)) {
-      (feedback[channel] = feedback[channel] || []).push(raw);
-      await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, 그거 지금 진행 중인 거에 반영할게. (${(feedback[channel].length)}개 반영 대기)`);
+    // 작업 진행 중 "수정/지시"만 진행 중 작업에 반영(피드백). 명확한 수정 신호일 때만 — 원문 재전송·새 시작명령(제작/만들/시작/진행)은 제외, 중복 방지
+    if (activeWork[channel] && /(바꿔|바꾸|수정|추가해|빼고|빼줘|말고|대신|틀렸|틀려|반영|변경|고쳐|로 ?해|로 ?가|넣어|이렇게|저렇게|먼저|우선|강조|제외|보강)/.test(raw) && !/^(제작|만들|시작|진행)/.test(raw)) {
+      const fb = (feedback[channel] = feedback[channel] || []);
+      if (fb[fb.length - 1] !== raw) fb.push(raw);
+      await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, 그거 지금 작업에 반영할게.`);
       return;
     }
     // 규칙 관리
