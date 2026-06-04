@@ -588,6 +588,7 @@ function resolveRepo(hint) {
 // 메시지에서 명시된 레포 이름을 뽑아냄 (분류기가 모르는 doping-portfolio 같은 것도 인식)
 function extractRepo(raw) {
   let m = raw.match(/\b([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+)\b/); if (m) return m[1]; // owner/repo
+  for (const k of ['sponono', '스포노노', 'wewantpeace', '위원트피스', 'myungjak', '명작']) if (raw.includes(k)) return resolveRepo(k); // 알려진 프로젝트 별칭
   const svc = svcList().find(s => raw.includes(s.repo.split('/').pop())); if (svc) return svc.repo; // 등록된 서비스
   m = raw.match(/\b(doping-[a-z0-9-]+|[a-z0-9][a-z0-9-]{2,}-(?:game|app|web|site|portfolio|tool|bot))\b/i); // doping-* 또는 -game/-app 등으로 끝나는 토큰
   if (m) return `${GH_OWNER}/${m[1].toLowerCase()}`;
@@ -1048,9 +1049,10 @@ async function handle(event, client) {
       return;
     }
     // 마케팅 산출물 — 영듀가 MARKETING.md + 메타 보강
-    if (/마케팅.*(자료|전략|준비|플랜|해줘|만들|돌려)/.test(raw)) {
-      const mrepo = lastRepo[channel];
-      if (!mrepo) { await postAs(client, channel, thread_ts, byName('영듀') || LEAD, '어느 서비스 마케팅 할지 모르겠어. 먼저 만든 거 있어야 그거 마케팅하지. 레포 이름 알려주거나 뭐 하나 만들고 말해줘.'); return; }
+    // 마케팅 "자료 생성" 명령만 (질문/조사 "어떻게/방법/보고"는 여기서 안 잡고 아래 report로 보냄)
+    if (/마케팅\s*(자료|플랜|콘텐츠|캠페인|카피|에셋|머티리얼)/.test(raw) && /(만들|작성|뽑|준비|짜|생성|돌려|올려|넣)/.test(raw) && !/어떻게|방법|어때|할까|좋을까|보고|분석|뭐가/.test(raw)) {
+      const mrepo = extractRepo(raw) || lastRepo[channel];
+      if (!mrepo) { await postAs(client, channel, thread_ts, byName('영듀') || LEAD, '어느 서비스 마케팅 자료 만들지 알려줘. 레포 이름 알려주거나 뭐 하나 만들고 말해줘.'); return; }
       await postAs(client, channel, thread_ts, byName('영듀') || LEAD, `${mrepo} 마케팅 자료 만들게. 포지셔닝부터 런칭 카피까지 정리해서 레포에 넣을게.`);
       if (await guardBusy(client, channel, thread_ts)) return;
       startWork(client, channel, event.thread_ts || event.ts, mrepo, '이 서비스 마케팅 자료를 만들어라. 포지셔닝, 타겟과 사용맥락, 핵심 한 줄 메시지, 채널별 전략(SEO·콘텐츠·SNS·커뮤니티), 런칭 카피 몇 개, 4주치 콘텐츠 캘린더, 핵심 SEO 키워드까지 MARKETING.md로 저장해. 그리고 사이트의 title/description/OG 메타태그도 더 매력적으로 다듬어라. 마케팅 담당이 메인으로.', false, !!settings.approval[channel]);
@@ -1091,6 +1093,15 @@ async function handle(event, client) {
       persistSchedules();
       const when = daily ? `매일 ${daily.hour}시${daily.minute ? ' ' + daily.minute + '분' : ''} (KST)` : humanMs(ims);
       await postAs(client, channel, thread_ts, LEAD, `⏰ 스케줄 등록했어 (#${id})\n주기: ${when}\n내용: ${s.label}\n${daily ? '예약 시각에' : '지금 한 번 돌려보고 이후'} 자동 실행할게. 재시작해도 유지돼. (취소: "스케줄 취소 ${id}")`);
+      return;
+    }
+    // 알려진 프로젝트에 대한 질문/분석/조언 요청은 무조건 조사(report)로 → 잡담으로 새서 "프라이빗이라 못 봐" 같은 헛소리 방지
+    const projRepo = extractRepo(raw);
+    if (projRepo && /어떻게|방법|전략|할까|좋을까|봐줘|봐 ?줘|보고|분석|점검|현황|어때|개선|뭐가|뭘|어디서|왜|있어\?|되[가나]/.test(raw) && canCommand(event.user) && !/만들|새로|처음부터/.test(raw)) {
+      if (await guardBusy(client, channel, thread_ts)) return;
+      const reporter = pickPersona(raw) || LEAD;
+      activeWork[channel] = { task: raw, started: Date.now(), by: lastRequester[channel] };
+      runReport(client, channel, event.thread_ts || event.ts, reporter, projRepo, raw).catch(e => postAs(client, channel, thread_ts, LEAD, '조사 오류: ' + String(e).slice(0, 300))).finally(() => { activeWork[channel] = null; });
       return;
     }
     // 특정 단어 없어도 AI가 의도 판단 → 작업이면 알아서 수행
@@ -1144,13 +1155,13 @@ async function handle(event, client) {
     }
     const targeted = pickPersona(event.text || '');
     if (targeted) {
-      const res = await runClaude(`${targeted.prompt}${STYLE}${SELF}${rulesCtx(channel)}${workStatusCtx(channel)}\n\n[최근 대화]\n${ctx}\n\n[방금 들은 말]\n${raw}\n\n위 맥락을 보고 너답게 대답해. 백그라운드 작업 진행상황은 [작업 상태]에 있는 사실만 말하고, 진행률이나 완료를 절대 지어내지 마.`, targeted.model);
+      const res = await runClaude(`${targeted.prompt}${STYLE}${SELF}${rulesCtx(channel)}${workStatusCtx(channel)}\n\n[최근 대화]\n${ctx}\n\n[방금 들은 말]\n${raw}\n\n위 맥락을 보고 너답게 대답해. 백그라운드 작업 진행상황은 [작업 상태]에 있는 사실만 말하고, 진행률이나 완료를 절대 지어내지 마. 그리고 넌 지금 잡담 중이라 레포 코드를 직접 안 봤어 — 프로젝트의 코드·기능·상태를 아는 척 지어내지 마. 잘 모르면 "그건 조사 한 번 돌려봐야 정확해"라고 솔직히 말해.`, targeted.model);
       await postAs(client, channel, thread_ts, targeted, (res.text || '').trim().slice(0, 3000));
     } else {
       // 아무도 안 부른 일반 메시지 → 랜덤하게 1~3명이 답장 + 일부 이모지
       const responders = pickRandom(ALL, 1 + Math.floor(Math.random() * 3));
       for (const p of responders) {
-        const r2 = await runClaude(`${p.prompt}${STYLE}${SELF}${rulesCtx(channel)}${workStatusCtx(channel)}\n\n[최근 대화]\n${ctx}\n\n[방금 들은 말]\n${raw}\n\n위 맥락 보고 너답게 짧게 한마디 해. 작업 진행상황은 [작업 상태] 사실만 말하고 지어내지 마.`, p.model);
+        const r2 = await runClaude(`${p.prompt}${STYLE}${SELF}${rulesCtx(channel)}${workStatusCtx(channel)}\n\n[최근 대화]\n${ctx}\n\n[방금 들은 말]\n${raw}\n\n위 맥락 보고 너답게 짧게 한마디 해. 작업 진행상황은 [작업 상태] 사실만 말하고 지어내지 마. 레포 코드를 직접 안 본 상태니 프로젝트 내용을 아는 척 지어내지 말고, 모르면 조사 돌려보자고 해.`, p.model);
         await postAs(client, channel, thread_ts, p, (r2.text || '').trim().slice(0, 1500));
         if (r2.ok === false) break; // 한도/타임아웃이면 1명만 말하고 도배 방지
       }
