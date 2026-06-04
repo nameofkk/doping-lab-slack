@@ -426,6 +426,23 @@ async function qaGate(client, channel, thread_ts, dir) {
   if (rev.text && rev.ok !== false && !rev.limited) await postAs(client, channel, thread_ts, sec, '코드 보안/버그 리뷰했어:\n' + rev.text.trim().slice(0, 900));
 }
 
+// 앱 빈구멍 탐지 — 빌드는 통과해도 실제 사용자 화면/핵심이 비어있는 "껍데기"를 잡아냄 (빈 Next 앱도 build는 통과하므로 build 성공≠완성)
+async function checkAppGaps(dir) {
+  const gaps = [];
+  try {
+    const next = (await sh(`find ${dir} -name "next.config.*" -not -path "*/node_modules/*" | head -1`, dir)).out.trim();
+    if (next) { // Next.js 앱인데 페이지(라우트)가 layout/error 빼고 하나도 없으면 = 보여줄 화면이 없음
+      const pages = (await sh(`find ${dir} \\( -name "page.tsx" -o -name "page.jsx" -o -name "page.js" -o -path "*/pages/index.*" \\) -not -path "*/node_modules/*" -not -path "*/.next/*" | head -3`, dir)).out.trim();
+      if (!pages) gaps.push('웹 화면(라우트 page)이 하나도 없음 — 사용자가 볼 게 404뿐');
+    }
+    const vite = (await sh(`find ${dir} -name "vite.config.*" -o -name "index.html" -not -path "*/node_modules/*" | head -1`, dir)).out.trim();
+    if (vite && !next) {
+      const comps = (await sh(`find ${dir}/src -name "*.tsx" -o -name "*.jsx" 2>/dev/null -not -path "*/node_modules/*" | wc -l`, dir)).out.trim();
+      if (comps === '0') gaps.push('프론트 컴포넌트가 하나도 없음');
+    }
+  } catch {}
+  return gaps;
+}
 // 제작 후 실제 빌드 검증 — npm 설치+빌드를 진짜로 돌려서 통과/실패를 정직하게 보고. 깨지면 1회 수정 시도.
 async function verifyBuild(client, channel, thread_ts, dir, repo) {
   const has = await sh('test -f package.json && grep -q \'"build"\' package.json && echo yes || echo no', dir);
@@ -438,7 +455,7 @@ async function verifyBuild(client, channel, thread_ts, dir, repo) {
   await postAs(client, channel, thread_ts, qa, '잠깐, 코드만 올리고 끝내면 안 되지. 실제로 빌드되는지 내가 돌려볼게.');
   await sh('npm install --no-audit --no-fund 2>&1 | tail -3', dir);
   let bd = await sh('npm run build 2>&1', dir);
-  if (bd.code === 0) { await postAs(client, channel, thread_ts, qa, '빌드 통과 확인했어. 실제로 컴파일까지 돼.'); await qaGate(client, channel, thread_ts, dir); await liveCheck(client, channel, thread_ts, dir, repo); return; }
+  if (bd.code === 0) { const g = await checkAppGaps(dir); await postAs(client, channel, thread_ts, qa, g.length ? `빌드는 통과하는데, 솔직히 아직 껍데기야 — ${g.join(', ')}. 컴파일만 되고 실제 화면이 없어서 이대로는 못 써.` : '빌드 통과 확인했어. 실제로 컴파일까지 돼.'); await qaGate(client, channel, thread_ts, dir); await liveCheck(client, channel, thread_ts, dir, repo); return; }
   // 실패 → 1회 자동 수정
   await postAs(client, channel, thread_ts, qa, '빌드가 깨졌네. 에러 보고 한 번 고쳐볼게.\n' + (bd.out || '').slice(-500));
   const fix = await runClaude(`이 저장소 빌드가 다음 에러로 실패했어. 원인 찾아서 실제로 고쳐. 추측 말고 에러 그대로 보고 고쳐라.\n\n[에러]\n${(bd.out || '').slice(-2500)}`, 'sonnet', dir, WORK_PERMISSION_MODE, 300000);
@@ -495,6 +512,17 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const fbBuild = drainFeedback(channel); // 제작 직전 들어온 사용자 수정요청도 반영
   const res = await runClaude(`${intro}${rulesCtx(channel)}${PLAIN}${uiish ? DESIGN_RULE : ''}${newProject ? LAUNCH_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}${fbBuild ? '\n\n[사용자가 추가로 준 지시 — 반드시 반영]\n' + fbBuild : ''}\n\n요청: ${task}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000);
   if (res.limited) { await postAs(client, channel, thread_ts, LEAD, '⏳ 제작 중에 클로드 사용량 한도에 걸렸어. 지금까지 만든 건 안 올렸어, 한도 리셋되면 이어서 만들게.'); return; }
+  // 연속완성 패스 — 신규 풀빌드는 한 번에 안 끝나고 스캐폴딩만 남는 경우가 많음. 실제 사용자 화면/핵심 루프가 빌 동안 추가로 채움(빈 껍데기 + 거짓완료 방지). 하트비트로 안 끊김.
+  if (newProject && !res.limited) {
+    for (let pass = 1; pass <= 3 && !workCancel[channel]; pass++) {
+      bumpWork(channel);
+      const gaps = await checkAppGaps(dir);
+      if (!gaps.length) break; // 화면/핵심 갖춰짐 → 멈춤
+      prog.phase(`아직 비어서 더 채우는 중 (${pass}차)`);
+      const cont = await runClaude(`이 저장소는 아직 미완성이야. 빌드는 통과해도 실제로 동작하는 앱이 아니야. 특히 지금 비어있는 것: ${gaps.join(' / ')}.\n\n지금 이걸 진짜로 동작하게 직접 구현해라. 데모·플레이스홀더·로렘입숨·"TODO" 금지 — 실제 화면(라우트 page), 실제 컴포넌트, 핵심 사용자 플로우를 끝까지 만들어라. 이미 있는 서버/타입은 활용하고, 빠진 사용자 화면을 우선 채워라. npm run build 통과 유지.${prd ? '\n\n[따라야 할 PRD — 사용자 화면·핵심 루프 부분]\n' + prd.slice(0, 6000) : ''}`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000);
+      if (cont.limited) { await postAs(client, channel, thread_ts, LEAD, '⏳ 이어서 채우다가 한도에 걸렸어. 지금까지 만든 만큼만 올릴게, 리셋되면 "이어서"라고 해줘.'); break; }
+    }
+  }
   await sh('git add -A', dir);
   const repoUrl = `https://github.com/${repo}`;
   const chk = await sh('git diff --cached --quiet; echo $?', dir);
@@ -503,6 +531,9 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const cmsg = task.slice(0, 60).replace(/[`$"\\!\r\n;|&<>()]/g, '').trim() || '작업'; // 셸 명령치환/인젝션 방지 (백틱·$·따옴표 등 제거)
   await sh(`git commit -m "도핑연구소: ${cmsg}"`, dir);
   prog.phase('빌드 되나 돌려보고 라이브로 띄우는 중');
+  const finalGaps = newProject ? await checkAppGaps(dir) : []; // 최종 빈구멍 — "다 끝냈어 상용수준" 거짓완료 방지
+  const incomplete = finalGaps.length > 0;
+  const doneHead = incomplete ? `⚠️ 초안은 올렸는데 아직 미완성이야 — ${finalGaps.join(', ')}. 이대로는 상용 아니고, 더 채워야 진짜 동작해. ("이어서"라고 하면 계속 채울게)` : '다 끝냈어!';
   let mainErr = '';
   if (!forcePR) {
     const pushMain = await sh(`git push origin HEAD:${WORK_BASE}`, dir);
@@ -510,8 +541,8 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
       const n = await distributeReport(client, channel, thread_ts, res.text);
       if (!n) await postAs(client, channel, thread_ts, LEAD, (res.text || '').trim().slice(0, 1500));
       await verifyBuild(client, channel, thread_ts, dir, repo);
-      await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}다 끝냈어! ${repoUrl} (${WORK_BASE}에 반영)\n코드 브라우저로 보려면: https://github.dev/${repo}\n빌드·라이브·스크린샷은 위에 확인해줘. (코드 파일로 받고 싶으면 "코드 줘"라고 해)`);
-      if (newProject) await handoffChecklist(client, channel, thread_ts, repo, task);
+      await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}${doneHead} ${repoUrl} (${WORK_BASE}에 반영)\n코드 브라우저로 보려면: https://github.dev/${repo}\n빌드·라이브·스크린샷은 위에 확인해줘. (코드 파일로 받고 싶으면 "코드 줘"라고 해)`);
+      if (newProject && !incomplete) await handoffChecklist(client, channel, thread_ts, repo, task); // 미완성이면 "상용 오픈 체크리스트" 안 띄움(거짓 신호 방지)
       return;
     }
     mainErr = (pushMain.err || '').slice(0, 250);
@@ -526,8 +557,8 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const n2 = await distributeReport(client, channel, thread_ts, res.text);
   if (!n2) await postAs(client, channel, thread_ts, LEAD, (res.text || '').trim().slice(0, 1500));
   await verifyBuild(client, channel, thread_ts, dir, repo);
-  await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}다 끝냈어! ${forcePR ? '승인모드라 PR로 올렸어 (머지하면 반영).' : 'PR로 올렸어.'}\nPR: ${url}\n코드 브라우저로 보려면: https://github.dev/${repo}`);
-  if (newProject) await handoffChecklist(client, channel, thread_ts, repo, task);
+  await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}${doneHead} ${forcePR ? '승인모드라 PR로 올렸어 (머지하면 반영).' : 'PR로 올렸어.'}\nPR: ${url}\n코드 브라우저로 보려면: https://github.dev/${repo}`);
+  if (newProject && !incomplete) await handoffChecklist(client, channel, thread_ts, repo, task);
   } finally { await prog.done(); }
 }
 
