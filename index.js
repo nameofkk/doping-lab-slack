@@ -184,6 +184,52 @@ function ghGet(path) {
   });
 }
 const GH_OWNER = 'nameofkk';
+const byName = (frag) => TEAM.find(p => p.name.includes(frag));
+// 기획에 의견 내는 빌더들 (PM·리서처·UX·아키텍트·보안·마케터). 반론자 안다연은 이들 뒤에 따로 반박 턴.
+function planTeam() { return ['김채원', '아이유', '정소민', '윈터', '우정잉', '영듀'].map(byName).filter(Boolean); }
+
+// 제작 전 라이브 기획 핑퐁 — 각 직원이 구어체로 자기 파트 의견을 실제로 주고받음 (사용자가 보면서)
+async function runPRD(client, channel, thread_ts, task) {
+  await postAs(client, channel, thread_ts, LEAD, `오 좋다. "${task}" 이거 바로 코드부터 짜지 말고 기획부터 같이 잡자. 다들 자기 파트 어떻게 갈지 한마디씩 줘봐.`);
+  let convo = `[만들 것]\n${task}\n`;
+  const specs = [];
+  for (const p of planTeam()) {
+    if (workCancel[channel]) break;
+    const r = await runClaude(`${p.prompt}${STYLE}${rulesCtx(channel)}\n\n[지금 팀이 기획 중인 것]\n${convo}\n\n네 담당 관점에서 이걸 어떻게 만들지 핵심 포인트 2~3개를 친한 동료한테 말하듯 편하게 말해. 앞사람 의견 있으면 받아서 이어가. 구체적으로(화면·플로우·스택·카피·보안 등 네 영역). 마크다운(별표 샵) 금지.`, p.model, WORKDIR, CLAUDE_PERMISSION_MODE, 120000);
+    const msg = (r.text || '').trim().slice(0, 900);
+    if (msg && r.ok !== false) { await postAs(client, channel, thread_ts, p, msg); convo += `\n${p.name}: ${msg}`; specs.push(`${p.name}: ${msg}`); }
+  }
+  // 반론자 안다연 — 위 기획 다 보고 약점/리스크를 콕 집어 반박 (쏠림 방지). 보완책도 같이.
+  const devil = byName('안다연');
+  if (devil && !workCancel[channel]) {
+    const r = await runClaude(`${devil.prompt}${STYLE}${rulesCtx(channel)}\n\n[팀이 방금 짠 기획]\n${convo}\n\n넌 반론자야. 위 기획에서 빠졌거나, 위험하거나, 과하거나, 사용자가 안 쓸 것 같은 부분을 콕 집어서 솔직하게 반박해. 그냥 까기만 하지 말고 지적마다 어떻게 보완할지 한 줄씩 같이. 친한 동료한테 말하듯 편하게, 마크다운 금지.`, devil.model, WORKDIR, CLAUDE_PERMISSION_MODE, 120000);
+    const dm = (r.text || '').trim().slice(0, 900);
+    if (dm && r.ok !== false) { await postAs(client, channel, thread_ts, devil, dm); convo += `\n안다연(반론): ${dm}`; specs.push(`안다연(반론): ${dm}`); }
+  }
+  const synth = await runClaude(`${LEAD.prompt}${STYLE}\n\n[방금 팀 논의 + 안다연 반론]\n${convo}\n\n위 논의를 종합하되 안다연이 짚은 반론도 반영해서 "그럼 이렇게 가자" 하고 이 프로젝트 진행 방향을 친근한 구어체로 4~6줄로 정리해. 마크다운 금지.`, LEAD.model, WORKDIR, CLAUDE_PERMISSION_MODE, 120000);
+  if (synth.text && synth.ok !== false) await postAs(client, channel, thread_ts, LEAD, synth.text.trim().slice(0, 1200));
+  return specs.join('\n') + (synth.text ? `\n[팀장 종합 방향]\n${synth.text.trim()}` : '');
+}
+
+// 제작 후 실제 빌드 검증 — npm 설치+빌드를 진짜로 돌려서 통과/실패를 정직하게 보고. 깨지면 1회 수정 시도.
+async function verifyBuild(client, channel, thread_ts, dir, repo) {
+  const has = await sh('test -f package.json && grep -q \'"build"\' package.json && echo yes || echo no', dir);
+  if (!has.out.includes('yes')) return; // 빌드 스크립트 없으면 스킵 (정적 HTML 등)
+  const qa = byName('우정잉') || LEAD;
+  await postAs(client, channel, thread_ts, qa, '잠깐, 코드만 올리고 끝내면 안 되지. 실제로 빌드되는지 내가 돌려볼게.');
+  await sh('npm install --no-audit --no-fund 2>&1 | tail -3', dir);
+  let bd = await sh('npm run build 2>&1', dir);
+  if (bd.code === 0) { await postAs(client, channel, thread_ts, qa, '빌드 통과 확인했어. 실제로 컴파일까지 돼. 다만 이건 빌드만 된 거고 실서비스로 띄운 건 아니야, 보려면 배포 따로 해야 돼.'); return; }
+  // 실패 → 1회 자동 수정
+  await postAs(client, channel, thread_ts, qa, '빌드가 깨졌네. 에러 보고 한 번 고쳐볼게.\n' + (bd.out || '').slice(-500));
+  const fix = await runClaude(`이 저장소 빌드가 다음 에러로 실패했어. 원인 찾아서 실제로 고쳐. 추측 말고 에러 그대로 보고 고쳐라.\n\n[에러]\n${(bd.out || '').slice(-2500)}`, 'sonnet', dir, WORK_PERMISSION_MODE, 300000);
+  await sh('git add -A && git commit -m "fix: 빌드 에러 수정" 2>&1', dir);
+  await sh(`git push origin HEAD:${WORK_BASE} 2>&1`, dir);
+  bd = await sh('npm run build 2>&1', dir);
+  if (bd.code === 0) await postAs(client, channel, thread_ts, qa, '고치고 다시 빌드하니까 통과했어. 수정분도 올렸어.');
+  else await postAs(client, channel, thread_ts, qa, '한 번 고쳐봤는데 아직 빌드가 안 돼. 이건 사람이 한 번 봐야 할 거 같아.\n' + (bd.out || '').slice(-400) + '\n' + (fix.text || '').slice(0, 300));
+}
+
 async function runWork(client, channel, thread_ts, repo, task, newProject, forcePR) {
   if (!GITHUB_TOKEN) { await postAs(client, channel, thread_ts, LEAD, 'GITHUB_TOKEN이 아직 없어서 작업 모드는 못 돌려요. 토큰만 넣으면 바로 돼요.'); return; }
   const id = ++workSeq;
@@ -204,14 +250,18 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   } else {
     await postAs(client, channel, thread_ts, LEAD, `🛠️ 작업 받았어요\n레포: ${repo}\n할 일: ${task}\n클론하고 코드 손본 다음 ${WORK_BASE}에 바로 반영할게요. 좀 걸려요.`);
   }
-  lastRepo[channel] = repo; // 채널이 방금 다룬 레포 기억 (후속 "이거 고쳐줘" 문맥용)
+  lastRepo[channel] = repo; persistLastRepo(); // 채널이 방금 다룬 레포 기억 (후속 "이거 고쳐줘" 문맥용, 재배포에도 유지)
   const cl = await sh(`rm -rf ${dir} && git clone https://x-access-token:${GITHUB_TOKEN}@github.com/${repo}.git ${dir} && chmod -R 777 ${dir}`);
   if (cl.code !== 0) { await postAs(client, channel, thread_ts, LEAD, '클론 실패ㅠ\n' + (cl.err || '').slice(0, 600)); return; }
   await sh(`git config user.name "doping-lab[bot]" && git config user.email "bot@doping.lab"`, dir);
   const intro = newProject
     ? '이 빈 저장소에 다음 요청대로 프로젝트를 처음부터 만들어라. 적절한 기술스택을 직접 고르고 실행 가능한 형태로, README도 작성해라.'
     : '이 저장소에서 다음 작업을 실제로 수행해라. 파일을 직접 수정하고, 필요하면 의존성 설치하고 테스트까지 돌려서 동작을 확인해라.';
-  const res = await runClaude(`${intro}${rulesCtx(channel)}${PLAIN}${DESIGN_RULE}\n\n요청: ${task}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 예:\n아키텍트: build.gradle 서명설정 추가\n보안: 미사용 권한 제거, proguard 규칙 작성\n한 역할당 1~2줄, 실제 한 일만.`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000);
+  // 신규 프로젝트는 제작 전에 팀이 라이브로 기획 핑퐁(구어체) → 그 PRD로 제작
+  const prd = newProject ? await runPRD(client, channel, thread_ts, task) : '';
+  if (workCancel[channel]) { delete workCancel[channel]; await postAs(client, channel, thread_ts, LEAD, '기획 단계에서 중단했어. 아무것도 안 올렸어.'); return; }
+  if (newProject) await postAs(client, channel, thread_ts, LEAD, '좋아 기획 정리됐고, 이제 이대로 실제로 코드 짤게. 좀 걸려.');
+  const res = await runClaude(`${intro}${rulesCtx(channel)}${PLAIN}${DESIGN_RULE}${prd ? '\n\n[팀이 방금 합의한 기획 — 이대로 구현해라]\n' + prd : ''}\n\n요청: ${task}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000);
   await sh('git add -A', dir);
   const repoUrl = `https://github.com/${repo}`;
   const chk = await sh('git diff --cached --quiet; echo $?', dir);
@@ -224,7 +274,8 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
     if (pushMain.code === 0) {
       const n = await distributeReport(client, channel, thread_ts, res.text);
       if (!n) await postAs(client, channel, thread_ts, LEAD, (res.text || '').trim().slice(0, 1500));
-      await postAs(client, channel, thread_ts, LEAD, `✅ 다 끝냈어! ${repoUrl} (${WORK_BASE}에 반영)`);
+      await verifyBuild(client, channel, thread_ts, dir, repo);
+      await postAs(client, channel, thread_ts, LEAD, `다 끝냈어! ${repoUrl} (${WORK_BASE}에 반영). 빌드는 위에서 실제로 돌려서 확인했고, 실제 화면으로 띄워서 보려면 배포는 따로 해야 돼. 띄워줄까?`);
       return;
     }
     mainErr = (pushMain.err || '').slice(0, 250);
@@ -237,7 +288,8 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const url = pr && pr.html_url ? pr.html_url : `(브랜치: ${branch})`;
   const n2 = await distributeReport(client, channel, thread_ts, res.text);
   if (!n2) await postAs(client, channel, thread_ts, LEAD, (res.text || '').trim().slice(0, 1500));
-  await postAs(client, channel, thread_ts, LEAD, `✅ 다 끝냈어! ${forcePR ? '승인모드라 PR로 올렸어 (머지하면 반영).' : 'PR로 올렸어.'}\nPR: ${url}`);
+  await verifyBuild(client, channel, thread_ts, dir, repo);
+  await postAs(client, channel, thread_ts, LEAD, `다 끝냈어! ${forcePR ? '승인모드라 PR로 올렸어 (머지하면 반영).' : 'PR로 올렸어.'}\nPR: ${url}`);
 }
 
 const ALL = TEAM.concat(LEAD);
@@ -431,6 +483,11 @@ function loadTasks() { try { if (fs.existsSync(TASK_FILE)) { const d = JSON.pars
 function persistTasks() { try { fs.writeFileSync(TASK_FILE, JSON.stringify({ seq: taskSeq, items: tasks })); } catch {} }
 function addTask(channel, text, who) { const t = { id: ++taskSeq, text, who, done: false }; (tasks[channel] = tasks[channel] || []).push(t); persistTasks(); return t; }
 
+// 채널이 마지막으로 다룬 레포 (재배포에도 살아남게 영구저장 → "어느 레포?" 무한반복 방지)
+const LASTREPO_FILE = process.env.LASTREPO_FILE || '/data/lastrepo.json';
+function loadLastRepo() { try { if (fs.existsSync(LASTREPO_FILE)) Object.assign(lastRepo, JSON.parse(fs.readFileSync(LASTREPO_FILE, 'utf8')) || {}); } catch {} }
+function persistLastRepo() { try { fs.writeFileSync(LASTREPO_FILE, JSON.stringify(lastRepo)); } catch {} }
+
 async function handle(event, client) {
   if (!event || !event.ts) return;
   if (event.subtype || event.bot_id) return;          // 사람 메시지만 (봇/시스템/수정 무시 → 무한루프 방지)
@@ -534,11 +591,10 @@ async function handle(event, client) {
     }
     const resolveR = (r) => r === '__last__' ? lastRepo[channel] : resolveRepo(r);
     if (['work', 'report', 'debate'].includes(intent && intent.action) && intent.repo === 'unknown') {
-      // 방금 다룬 레포가 있고 후속/지시대명사성 메시지면 그 레포로 이어감 (추측이 아니라 직전 문맥)
-      const followup = /이거|이것|그거|그것|저거|위에|방금|아까|좀전|실패|에러|error|오류|안돼|안 ?되|고쳐|해결|다시|계속|이어/i.test(raw);
-      if (followup && lastRepo[channel]) { intent.repo = '__last__'; intent.newProject = false; }
+      // 이 채널이 방금 다룬 레포가 있으면 그걸로 이어감 (추측이 아니라 직전 문맥 — "이거 보여줘/고쳐줘" 같은 후속)
+      if (lastRepo[channel]) { intent.repo = '__last__'; intent.newProject = false; }
       else if (intent.action === 'work') {
-        // 코드를 실제로 고치는 work만 대상이 꼭 필요 → 모르면 물어봄(추측 금지)
+        // 다룬 적 없는 채널에서 코드를 고치라는데 대상 불명 → 추측 말고 물어봄
         await postAs(client, channel, thread_ts, LEAD, '어느 프로젝트(레포)를 말하는 거야? sponono, wewantpeace, myungjak 중에 있어, 아니면 정확한 레포 이름 알려줘. 모르는 채로는 엉뚱한 데 손대거나 헛소리해서 안 할게.');
         return;
       }
@@ -596,6 +652,7 @@ app.event('app_mention', async ({ event, client }) => { await handle(event, clie
   loadRules();
   loadSettings();
   loadTasks();
+  loadLastRepo();
   setInterval(persistMemory, 15000);
   setInterval(() => {
     const n = kstNow();
