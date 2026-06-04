@@ -201,7 +201,7 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
 }
 
 // ── 실제 작업 모드: 레포 클론 → claude 코드 작업 → 브랜치 push → PR → 보고 ──
-let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {};
+let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {};
 function drainFeedback(channel) { const f = (feedback[channel] || []).join('\n'); feedback[channel] = []; return f; } // 작업 중 사용자가 끼어든 수정요청 모아서 반환
 // 명확한 "중단/취소 명령"일 때만 true (문장 속에 '중단','스톱' 단어가 섞인 일반 요청은 제외 — "중단했던 거 이어서", "스톱워치 추가" 등 오작동 방지)
 function isStopMsg(s) {
@@ -463,7 +463,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
     const desc = `도핑연구소: ${task}`.replace(/[\r\n\t\x00-\x1f\x7f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200); // 깃허브 description은 제어문자(줄바꿈 등) 금지
     let created = await ghPost('/user/repos', { name, private: true, auto_init: true, description: desc });
     if (!created || !created.full_name) created = await ghPost('/user/repos', { name, private: true, auto_init: true, description: '도핑연구소 자동 생성' }); // 1회 자동 재시도 (description 문제면 안전값으로)
-    if (created && created.full_name) { repo = created.full_name; }
+    if (created && created.full_name) { repo = created.full_name; if (activeWork[channel]) { activeWork[channel].repo = repo; activeWork[channel].newProject = false; } } // 레포 생겼으니 재개 시엔 이 레포에서 이어감(중복 생성 방지)
     else { await postAs(client, channel, thread_ts, LEAD, '레포 생성이 두 번 다 실패했어ㅠ 같은 이름이 이미 있거나 깃허브 쪽 문제일 수 있어.\n' + JSON.stringify(created || {}).slice(0, 200)); return; }
   } else {
     await postAs(client, channel, thread_ts, LEAD, `🛠️ 작업 받았어\n레포: ${repo}\n할 일: ${task}\n클론하고 코드 손본 다음 ${forcePR ? 'PR로 올릴게(승인모드)' : WORK_BASE + '에 바로 반영할게'}. 좀 걸려.`);
@@ -850,7 +850,7 @@ async function guardBusy(client, channel, thread_ts) {
 // 작업 실행(activeWork 세팅 + runWork + 정리) 공통
 function launchWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName) {
   feedback[channel] = []; // 새 작업 시작 → 묵은 피드백 정리
-  activeWork[channel] = { task, started: Date.now(), by: lastRequester[channel] };
+  activeWork[channel] = { task, started: Date.now(), by: lastRequester[channel], repo, newProject, forcePR, projName }; // 재개(이어서)용 컨텍스트 포함
   runWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName)
     .catch(e => postAs(client, channel, thread_ts, LEAD, '작업 오류: ' + String(e).slice(0, 300)))
     .finally(() => { activeWork[channel] = null; });
@@ -899,8 +899,16 @@ async function handle(event, client) {
   try {
     // 중단/취소 — 명확한 중단 명령일 때만 (문장 속 '중단/스톱' 부분일치로 오작동하던 거 수정)
     if (isStopMsg(raw)) {
+      if (activeWork[channel] && activeWork[channel].repo !== undefined) pausedWork[channel] = { ...activeWork[channel] }; // 재개용 컨텍스트 보관
       workCancel[channel] = true;
-      await postAs(client, channel, thread_ts, LEAD, '오케이 멈출게. 진행 중이던 거 있으면 main엔 안 올리고 중단할게.');
+      await postAs(client, channel, thread_ts, LEAD, '오케이 멈출게. 진행 중이던 거 있으면 main엔 안 올리고 중단할게.' + (pausedWork[channel] ? ' ("이어서"라고 하면 그 작업 다시 이어갈게)' : ''));
+      return;
+    }
+    // 재개 — 중단했던 작업을 새로 만들지 말고 그대로 이어감
+    if (!activeWork[channel] && pausedWork[channel] && /^(이어서|이어가|이어|계속(해|하자|진행)?|마저|다시\s*진행|아까\s*거|이전\s*거)/.test(raw)) {
+      const pw = pausedWork[channel]; delete pausedWork[channel];
+      await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, 아까 "${(pw.task || '').slice(0, 40)}" 그거 다시 이어갈게.`);
+      launchWork(client, channel, thread_ts, pw.repo, pw.task, pw.newProject, pw.forcePR, pw.projName);
       return;
     }
     // 작업 진행 중에 사용자가 끼어들어 수정/지시하면 → 새 작업 만들지 말고 "진행 중인 작업"에 반영(피드백 버퍼). 짧은 안부/상태 질문은 아래로 흘려보냄
