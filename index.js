@@ -35,7 +35,7 @@ const ROUNDS = parseInt(DEBATE_ROUNDS, 10) || 2;
 const TEAM = [
   { name: '김채원 (PM)', kw: ['김채원','채원','PM'], emoji: ':bust_in_silhouette:', model: process.env.AGENT_MODEL || 'sonnet', tokenEnv: 'SLACK_TOKEN_PM',
     prompt: '너는 도핑연구소 PM이고 이름은 김채원이다. 밝고 야무지게 팀을 이끄는 리더야. 핵심을 똑부러지게 짚고 우선순위를 정해. 사용자 가치랑 시장성, 전용목적 위주로 본다.' },
-  { name: '아이유 (리서처)', kw: ['아이유', '이유', '리서처', '리서치'], emoji: ':mag:', model: process.env.AGENT_MODEL || 'sonnet', tokenEnv: 'SLACK_TOKEN_RESEARCH',
+  { name: '아이유 (리서처)', kw: ['아이유', '리서처', '리서치'], emoji: ':mag:', model: process.env.AGENT_MODEL || 'sonnet', tokenEnv: 'SLACK_TOKEN_RESEARCH',
     prompt: '너는 도핑연구소 사용자 리서처이고 이름은 아이유다. 차분하고 사려깊게 사람 마음과 진짜 니즈를 섬세하게 읽는다. 페인포인트·사용성 리스크를 따뜻하지만 정확하게 짚는다.' },
   { name: '정소민 (UX)', kw: ['정소민','소민','UX','디자이너','디자인','화면','비주얼','시안'], emoji: ':art:', model: process.env.AGENT_MODEL || 'sonnet', tokenEnv: 'SLACK_TOKEN_UX',
     prompt: '너는 도핑연구소 UX·비주얼 디자이너이고 이름은 정소민이다. 친근하고 공감 가는 말투로 사용자 흐름·마찰·엣지케이스(빈상태/에러/로딩)를 챙긴다. 디자인은 항상 impeccable.style 기준(AI slop 금지: 이모지 아이콘·gradient hero·nested cards 금지, 대비 4.5:1+, 한국어 UI, 빈상태 캐릭터)과 그 프로젝트 design-system(MASTER.md)을 따른다. 만든 화면은 스크린샷으로 실제로 띄워서 눈으로 검증하는 것까지 네 일이다.' },
@@ -958,6 +958,7 @@ async function handle(event, client) {
       if (!process.env.RAILWAY_API_TOKEN) { await postAs(client, channel, thread_ts, win, '라이브 배포는 RAILWAY_API_TOKEN 있어야 돼. 넣으면 바로 해줄게.'); return; }
       const target = extractRepo(raw) || lastRepo[channel];
       if (!target) { await postAs(client, channel, thread_ts, win, '어느 레포 배포할지 알려줘. (만든 적 있는 거면 "서비스 목록"으로 이름 확인돼)'); return; }
+      if (/\/(sponono|wewantpeace|myungjak)$/.test(target)) { await postAs(client, channel, thread_ts, win, `${target.split('/').pop()}은 자기 배포 파이프라인(모노레포·전용 서비스)이 따로 있어서 내가 railway up으로 통째로 올리면 깨져. 그건 DEPLOY.md 방식대로 따로 배포해야 해. 새로 만든 단일 프로젝트만 자동배포 가능해.`); return; }
       if (await guardBusy(client, channel, thread_ts)) return;
       activeWork[channel] = { task: '재배포 ' + target, started: Date.now() };
       (async () => {
