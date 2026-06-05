@@ -217,3 +217,10 @@
 - 증상: selfHeal이 runWork를 직접 호출하는데 activeWork를 안 잡음. 시작 전(875)엔 activeWork 체크하지만 자기 runWork 도는 동안엔 activeWork가 비어 있어, 그 사이 사용자 메시지가 guardBusy를 통과해 동시 작업 시작 → 같은 채널 동시 빌드·메시지 뒤섞임. selfHealing 플래그는 다른 selfHeal만 막지 사용자 작업은 못 막음.
 - 수정: selfHeal이 runWork 동안 activeWork 점유(selfHeal:true, beat 포함), finally에서 selfHealing=false와 함께 해제. 시작 전 activeWork 체크(875)는 유지되므로 사용자 작업 중엔 selfHeal 안 끼어듦(이중세팅 없음).
 - 검증: node --check 통과. 점검 clean: 승인모드 forcePR 일관 라우팅(work/marketing/resume 다 !!settings.approval), selfHeal 쿨다운(30분 동일에러·5분 최소간격)·PR만·자기재배포 안함.
+
+### 자율루프2 틱13: 이상없음
+- depUpdate/depCheck: guardBusy 체크 + activeWork 점유 + finally 해제 정상(#31/#36 동시충돌 패턴 아님). beat는 스피너/runWork가 곧 갱신.
+- seen 중복방지: size>800이면 오래된 400 삭제·최근 400 유지. 트림 대상은 재전송 불가능한 옛 메시지라 재처리 위험 없음.
+- pickPersona: TEAM 순서 첫매치=단일 응답자 선택(설계의도). 복수 호명 시 한 명만 응답은 기능범위.
+- distributeReport 0줄 폴백: 호출측(작업 508·리포트 639)이 raw 텍스트로 폴백. OK.
+- 코드변경 없음.
