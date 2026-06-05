@@ -1233,7 +1233,8 @@ async function handle(event, client) {
     // 단, 강한 신규신호(새 게임/오마주/처음부터…)는 명시 레포가 있어도 새로, 약한 신호(만들/제작/개발)는 명시된 기존 레포가 없을 때만 새로 — "스포노노에 다크모드 만들어줘"를 새 레포로 안 빼게
     const strongNew = /새\s*게임|새\s*앱|새\s*사이트|새\s*서비스|새\s*프로젝트|새로\s*만|처음부터|오마주|클론(?!해)/.test(raw);
     const weakNew = /\b만들|만들어|만들고|제작|개발|하나\s*만들/.test(raw);
-    if (intent && intent.action === 'work' && (strongNew || (weakNew && !named))) { intent.newProject = true; intent.repo = 'new'; }
+    // 분류기가 '봇 자체 수정'(repo=bot)으로 잡았으면 "만들어"가 들어가도 새 프로젝트로 덮지 않음 — "봇에 X 기능 만들어줘"를 새 레포로 빼던 버그(봇은 extractRepo에 없어 named 보호도 못 받음)
+    if (intent && intent.action === 'work' && intent.repo !== 'bot' && (strongNew || (weakNew && !named))) { intent.newProject = true; intent.repo = 'new'; }
     // 명시된 레포가 있고 신규생성이 아니면 그 레포로 (분류기가 모르는 이름도 인식 → 엉뚱한 lastRepo 방지)
     if (named && intent && ['work', 'report', 'debate'].includes(intent.action) && !intent.newProject) { intent.repo = '__named__'; }
     if (['work', 'report', 'debate'].includes(intent && intent.action) && intent.repo === 'unknown') {
