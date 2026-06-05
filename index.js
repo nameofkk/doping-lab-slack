@@ -1312,8 +1312,12 @@ app.event('app_mention', async ({ event, client }) => { await handle(event, clie
     }
     const n = kstNow();
     for (const s of schedules) {
-      if (s.kind === 'daily' && s.hour === n.h && s.minute === n.m && s.lastRunDay !== n.day) {
-        s.lastRunDay = n.day; persistSchedules(); jobFor(s)().catch(() => {});
+      // 일일 스케줄: 정확한 분만 보면 60초 인터벌 드리프트·짧은 재시작에 그 분을 놓쳐 그날 통째 누락됨. 예정시각 지나고 15분 안이면 따라잡아 1회 실행(lastRunDay로 중복 방지), 너무 늦으면 그날 스킵.
+      if (s.kind === 'daily' && s.lastRunDay !== n.day) {
+        const nowMin = n.h * 60 + n.m, schMin = (s.hour || 0) * 60 + (s.minute || 0);
+        if (nowMin >= schMin && nowMin - schMin <= 15) {
+          s.lastRunDay = n.day; persistSchedules(); jobFor(s)().catch(() => {});
+        }
       }
     }
     // 매일 OPS_HOUR에 전체 헬스체크 리포트 (운영 부서 자동화)
