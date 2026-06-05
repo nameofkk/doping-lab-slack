@@ -286,7 +286,7 @@ async function runPRD(client, channel, thread_ts, task) {
     const synth = await runClaude(`${LEAD.prompt}${PLAIN}${rulesCtx(channel)}\n\n[지금까지 팀 논의]\n${convo}\n\n위 논의를 바탕으로 이 프로젝트 PRD를 아래 항목으로 작성해라. 구어체로 쓰되 내용은 구체적으로:\n목표 /\n타겟·사용맥락 /\n핵심기능(우선순위) /\n화면·플로우 /\n기술스택 /\n차별화 훅 /\n성공지표 /\n리스크·대응\n\n맨 마지막 줄에 반드시 "완성도: NN%" 형식으로 이 PRD 완성도를 숫자로 매겨라. ${TARGET}% 미만이면 뭐가 부족한지 한두 줄. 마크다운 별표·샵 금지.`, LEAD.model, WORKDIR, CLAUDE_PERMISSION_MODE, 180000);
     if (synth.limited) { limited = true; break; }
     if (synth.text && synth.ok !== false) { prd = synth.text.trim(); convo += `\n[팀장 PRD v${round}]\n${prd}`; await postAs(client, channel, thread_ts, LEAD, prd.slice(0, 2800)); }
-    const mm = prd.match(/완성도\s*[^0-9%]{0,5}([0-9]{1,3})\s*(?:%|퍼센트|점)/); score = mm ? parseInt(mm[1], 10) : score; // "완성도는 95%", "완성도 약 95점"도 인식
+    const all = [...prd.matchAll(/완성도\s*[^0-9%]{0,5}([0-9]{1,3})\s*(?:%|퍼센트|점)/g)]; score = all.length ? parseInt(all[all.length - 1][1], 10) : score; // 맨 마지막 "완성도 NN%"(최종 점수)를 잡음 — 본문에 목표치(예 "완성도 98% 목표") 먼저 언급해도 그걸로 오인해 조기 제작 안 하게. "완성도는 95%"/"95점"도 인식
     if (score >= TARGET) { await postAs(client, channel, thread_ts, LEAD, `좋아 PRD 완성도 ${score}% 나왔어. 이 PRD 그대로 제작 들어갈게.`); break; }
     if (round < MAX) await postAs(client, channel, thread_ts, LEAD, `아직 ${score || '미정'}%라 한 라운드 더 보강하자.`);
     else await postAs(client, channel, thread_ts, LEAD, `라운드 한계까지 끌어올려서 ${score || ''}% 됐어. 이 PRD로 제작 들어갈게.`);
