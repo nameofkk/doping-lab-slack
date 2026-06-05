@@ -200,3 +200,10 @@
 - 증상: PRD 완성도 파싱이 .match로 첫 "완성도 NN%"를 잡음. 팀장이 본문에 목표치를 먼저 언급("완성도 98% 목표인데...")하고 마지막 줄에 실제 점수("완성도: 90%")를 쓰면, 98%로 오인해 목표 미달 PRD로 조기 제작 진입 → 기획 덜 된 채 빌드.
 - 수정: matchAll로 모든 "완성도 NN%" 중 마지막(=프롬프트가 요구한 맨 마지막 줄의 최종 점수)을 채택.
 - 검증: "완성도 98%목표...완성도:90%"→90, "...최종 완성도:97%"→97, "완성도:100%"→100, "88점"→88. node --check 통과.
+
+### 자율루프2 틱10: 이상없음
+- mention(channel): activeWork.by||lastRequester[channel] 채널격리 OK.
+- registerService: repo키 dedup, url 보존갱신(url||ex.url), created 보존. svcList 채널필터 OK.
+- ghPost/ghGet: JSON.parse try/catch→null, req error→null, 비200은 기대필드 없는 객체로 와 호출측 실패처리. graceful.
+- uploadCodeZip: tar 120s 타임아웃·45MB 캡·uploadV2 try/catch→false(권한없으면 github.dev 폴백). graceful.
+- 관찰(개선 안 함): distributeReport 정규식이 "1. 마케팅: ..." 류 섹션헤더를 역할로 오분배할 이론적 엣지. "역할: 답" 포맷 프롬프트라 실발생 낮아 기록만.
