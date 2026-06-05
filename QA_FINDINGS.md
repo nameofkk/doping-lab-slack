@@ -238,3 +238,8 @@ test specified) 판별해 안 돌림.
 - node --check OK. persist 8종(schedules/memory/rules/settings/tasks/lastrepo/pending/services) 전부 try/catch 손상 폴백 확인.
 - ~/qa 하네스 5종(route/extract/sched/persona/rule) 전부 에러·undefined·NaN 없이 정상 — 라우팅 회귀 없음.
 - 코드변경 없음. 간격 3600초 유지.
+
+### 저빈도 순환 틱16: 이상없음 (4연속 무결)
+- ensureMembers: joinedChannels dedup + invite try/catch(이미멤버·권한없음 무해) graceful.
+- checkServices: curl --max-time15 || echo 000(네트워크실패=다운, 크래시X), URL 따옴표 새니타이즈(#13), onlyAlert는 신규다운만 알림. graceful.
+- 코드변경 없음.
