@@ -1222,8 +1222,11 @@ async function handle(event, client) {
     }
     const named = extractRepo(raw); // 메시지에 명시된 레포(doping-portfolio 등)
     const resolveR = (r) => r === '__last__' ? lastRepo[channel] : r === '__named__' ? named : resolveRepo(r);
-    // 새로 만들/개발하라는 신호가 있으면 lastRepo로 끌고가지 말고 무조건 새 프로젝트로 (직전 레포 오염 방지)
-    if (intent && intent.action === 'work' && /\b만들|만들어|만들고|제작|개발|새로 ?만|하나 ?만들|새 게임|새 앱|새 사이트|새 서비스|오마주|클론(?!해)/.test(raw)) { intent.newProject = true; intent.repo = 'new'; }
+    // 새로 만들/개발하라는 신호가 있으면 lastRepo로 끌고가지 말고 새 프로젝트로 (직전 레포 오염 방지)
+    // 단, 강한 신규신호(새 게임/오마주/처음부터…)는 명시 레포가 있어도 새로, 약한 신호(만들/제작/개발)는 명시된 기존 레포가 없을 때만 새로 — "스포노노에 다크모드 만들어줘"를 새 레포로 안 빼게
+    const strongNew = /새\s*게임|새\s*앱|새\s*사이트|새\s*서비스|새\s*프로젝트|새로\s*만|처음부터|오마주|클론(?!해)/.test(raw);
+    const weakNew = /\b만들|만들어|만들고|제작|개발|하나\s*만들/.test(raw);
+    if (intent && intent.action === 'work' && (strongNew || (weakNew && !named))) { intent.newProject = true; intent.repo = 'new'; }
     // 명시된 레포가 있고 신규생성이 아니면 그 레포로 (분류기가 모르는 이름도 인식 → 엉뚱한 lastRepo 방지)
     if (named && intent && ['work', 'report', 'debate'].includes(intent.action) && !intent.newProject) { intent.repo = '__named__'; }
     if (['work', 'report', 'debate'].includes(intent && intent.action) && intent.repo === 'unknown') {
