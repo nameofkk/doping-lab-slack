@@ -698,9 +698,15 @@ function persistSchedules() {
 }
 function jobFor(s) {
   return async () => {
+    if (activeWork[s.channel]) return; // 채널에 진행 중 작업 있으면 이번 스케줄은 양보(동시 빌드·메시지 뒤섞임 방지)
     const reporter = ALL.find(p => p.name === s.reporter) || LEAD;
-    if (s.action === 'work' && s.task) await runWork(botClient, s.channel, undefined, s.newProject ? WORK_DEFAULT_REPO : resolveRepo(s.repo), s.task, !!s.newProject, true);
-    else await runReport(botClient, s.channel, undefined, reporter, resolveRepo(s.repo), s.task || s.label);
+    const repo = s.newProject ? WORK_DEFAULT_REPO : resolveRepo(s.repo);
+    activeWork[s.channel] = { task: s.task || s.label, started: Date.now(), beat: Date.now(), repo, scheduled: true }; // 스케줄 작업도 채널 점유(진행중 새작업 차단 + beat로 워치독 적용)
+    try {
+      if (s.action === 'work' && s.task) await runWork(botClient, s.channel, undefined, repo, s.task, !!s.newProject, true);
+      else await runReport(botClient, s.channel, undefined, reporter, repo, s.task || s.label);
+    } catch (e) { /* 스케줄 작업 오류는 조용히 — 다음 회차에 재시도 */ }
+    finally { activeWork[s.channel] = null; }
   };
 }
 function startSchedule(s, runNow) {
@@ -1315,7 +1321,7 @@ app.event('app_mention', async ({ event, client }) => { await handle(event, clie
       // 일일 스케줄: 정확한 분만 보면 60초 인터벌 드리프트·짧은 재시작에 그 분을 놓쳐 그날 통째 누락됨. 예정시각 지나고 15분 안이면 따라잡아 1회 실행(lastRunDay로 중복 방지), 너무 늦으면 그날 스킵.
       if (s.kind === 'daily' && s.lastRunDay !== n.day) {
         const nowMin = n.h * 60 + n.m, schMin = (s.hour || 0) * 60 + (s.minute || 0);
-        if (nowMin >= schMin && nowMin - schMin <= 15) {
+        if (nowMin >= schMin && nowMin - schMin <= 15 && !activeWork[s.channel]) { // 진행중이면 lastRunDay 안 박고 다음 틱(윈도우 내) 재시도 → 사용자 작업 끝나면 따라잡음
           s.lastRunDay = n.day; persistSchedules(); jobFor(s)().catch(() => {});
         }
       }
