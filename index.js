@@ -444,7 +444,7 @@ async function checkAppGaps(dir) {
   return gaps;
 }
 // 제작 후 실제 빌드 검증 — npm 설치+빌드를 진짜로 돌려서 통과/실패를 정직하게 보고. 깨지면 1회 수정 시도.
-async function verifyBuild(client, channel, thread_ts, dir, repo) {
+async function verifyBuild(client, channel, thread_ts, dir, repo, pushRef = WORK_BASE) {
   const has = await sh('test -f package.json && grep -q \'"build"\' package.json && echo yes || echo no', dir);
   if (!has.out.includes('yes')) { // 빌드 스크립트 없음(정적 HTML 등) → 빌드는 스킵하되 라이브/스크린샷은 띄워
     const idx = (await sh(`find ${dir} -maxdepth 3 -name index.html -not -path '*/node_modules/*' | head -1`, dir)).out.trim();
@@ -460,7 +460,7 @@ async function verifyBuild(client, channel, thread_ts, dir, repo) {
   await postAs(client, channel, thread_ts, qa, '빌드가 깨졌네. 에러 보고 한 번 고쳐볼게.\n' + (bd.out || '').slice(-500));
   const fix = await runClaude(`이 저장소 빌드가 다음 에러로 실패했어. 원인 찾아서 실제로 고쳐. 추측 말고 에러 그대로 보고 고쳐라.\n\n[에러]\n${(bd.out || '').slice(-2500)}`, 'sonnet', dir, WORK_PERMISSION_MODE, 300000);
   await sh('git add -A && git commit -m "fix: 빌드 에러 수정" 2>&1', dir);
-  await sh(`git push origin HEAD:${WORK_BASE} 2>&1`, dir);
+  await sh(`git push origin HEAD:${pushRef} 2>&1`, dir); // 작업이 올라간 ref로 푸시(승인모드/PR이면 그 브랜치로) — main 직행해 승인 우회하던 거 방지
   bd = await sh('npm run build 2>&1', dir);
   if (bd.code === 0) await postAs(client, channel, thread_ts, qa, '고치고 다시 빌드하니까 통과했어. 수정분도 올렸어.');
   else await postAs(client, channel, thread_ts, qa, '한 번 고쳐봤는데 아직 빌드가 안 돼. 이건 사람이 한 번 봐야 할 거 같아.\n' + (bd.out || '').slice(-400) + '\n' + (fix.text || '').slice(0, 300));
@@ -557,7 +557,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const url = pr && pr.html_url ? pr.html_url : `(브랜치: ${branch})`;
   const n2 = await distributeReport(client, channel, thread_ts, res.text);
   if (!n2) await postAs(client, channel, thread_ts, LEAD, (res.text || '').trim().slice(0, 1500));
-  await verifyBuild(client, channel, thread_ts, dir, repo);
+  await verifyBuild(client, channel, thread_ts, dir, repo, branch); // PR 경로 → 빌드 자동수정도 PR 브랜치로(main 직행 금지)
   await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}${doneHead} ${forcePR ? '승인모드라 PR로 올렸어 (머지하면 반영).' : 'PR로 올렸어.'}\nPR: ${url}\n코드 브라우저로 보려면: https://github.dev/${repo}`);
   if (newProject && !incomplete) await handoffChecklist(client, channel, thread_ts, repo, task);
   } finally { await prog.done(); }

@@ -243,3 +243,8 @@ test specified) 판별해 안 돌림.
 - ensureMembers: joinedChannels dedup + invite try/catch(이미멤버·권한없음 무해) graceful.
 - checkServices: curl --max-time15 || echo 000(네트워크실패=다운, 크래시X), URL 따옴표 새니타이즈(#13), onlyAlert는 신규다운만 알림. graceful.
 - 코드변경 없음.
+
+### #37 빌드 자동수정이 PR/승인모드에서 main 직행 (저빈도 틱17)
+- 증상: verifyBuild의 빌드 1회 자동수정이 git push HEAD:WORK_BASE(main) 하드코딩. PR 경로(승인모드 또는 main push 실패 폴백)에서 호출되면 빌드 수정이 PR 브랜치가 아니라 main으로 직행 → 승인모드 우회(미리뷰 코드가 main에 반영) + 정작 PR엔 수정 누락.
+- 수정: verifyBuild에 pushRef 파라미터(기본 WORK_BASE). main-성공 경로(544)는 기본값, PR 경로(560)는 branch 전달 → 자동수정이 작업과 같은 ref로.
+- 검증: node --check 통과. main 경로 영향없음(기본 WORK_BASE), PR/승인모드는 브랜치로.
