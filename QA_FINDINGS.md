@@ -224,3 +224,12 @@
 - pickPersona: TEAM 순서 첫매치=단일 응답자 선택(설계의도). 복수 호명 시 한 명만 응답은 기능범위.
 - distributeReport 0줄 폴백: 호출측(작업 508·리포트 639)이 raw 텍스트로 폴백. OK.
 - 코드변경 없음.
+
+### 자율루프2 틱14: 이상없음 → 2연속 무결, 간격 확대
+- restart: 대상해석·svc 새니타이즈·실패 정직보고. railway CLI 빠른 호출이라 activeWork 불필요(빌드와 독립).
+- usageStat: kstNow 날짜 바뀌면 리셋, calls/limitedHits/outTokens 갱신 정상. 날짜경계 OK.
+- captureShots: require(playwright)/launch/goto 실패 모두 rejected→호출측(liveCheck try-catch, 스크린샷 핸들러 .catch) graceful. uploadShot try/catch→false.
+- qaGate: placeholder 테스트(no
+test specified) 판별해 안 돌림.
+
+## 자율루프2 핵심영역 검증 완료(틱13·14 연속무결): 실버그 9건 수정·배포 #28~#36. 검증 clean 다수. 감시 간격 1500→3600초로 확대(순환 유지).
