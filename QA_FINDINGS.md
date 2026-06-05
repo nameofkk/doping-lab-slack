@@ -179,3 +179,9 @@
 - 수정: jobFor가 (a)이미 activeWork 있으면 이번 회차 양보 (b)자기 작업 동안 activeWork 점유(scheduled:true, beat 포함)하고 finally에서 해제. 일일 스케줄 틱도 busy면 lastRunDay 안 박고 다음 틱(15분 윈도우)에 재시도 → 사용자 작업 끝나면 따라잡음.
 - 효과: 스케줄↔사용자 작업 동시충돌 제거, 스케줄 작업도 워치독(beat) 적용, daily는 busy여도 윈도우 내 캐치업.
 - 검증: node --check 통과. runReport/runWork는 원래 activeWork를 호출측에서 잡으므로 jobFor가 잡는 것과 이중세팅 없음.
+
+### 자율루프2 틱6: 이상없음
+- (m)읽기명령(스크린샷/코드줘/헬스체크/사용량): guardBusy로 작업중 차단되거나 순수읽기 → activeWork 안 건드림, 안전.
+- (i)재배포: railwayDeploy가 실패를 내부 정직보고(363), 모노레포(sponono/wewantpeace/myungjak) 가드, extractRepo||lastRepo 해석 정상.
+- (d)마케팅생성 vs REPORT(known) vs 작업/토론 경계: #28 라우팅 변경 후에도 회귀 없음(route 하네스 확인).
+- 관찰(개선 안 함): railwayDeploy 실패→selfHeal 트리거 정규식이 사용자 프로젝트 배포실패에도 발동 가능하나 PR만·쿨다운이라 무해. 코드변경 없음.
