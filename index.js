@@ -513,13 +513,14 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const res = await runClaude(`${intro}${rulesCtx(channel)}${PLAIN}${uiish ? DESIGN_RULE : ''}${newProject ? LAUNCH_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}${fbBuild ? '\n\n[사용자가 추가로 준 지시 — 반드시 반영]\n' + fbBuild : ''}\n\n요청: ${task}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000, true);
   if (res.limited) { await postAs(client, channel, thread_ts, LEAD, '⏳ 제작 중에 클로드 사용량 한도에 걸렸어. 지금까지 만든 건 안 올렸어, 한도 리셋되면 이어서 만들게.'); return; }
   // 연속완성 패스 — 신규 풀빌드/화면작업은 한 번에 안 끝나고 스캐폴딩만 남는 경우가 많음. 실제 사용자 화면/핵심 루프가 빌 동안 추가로 채움(빈 껍데기 + 거짓완료 방지). 하트비트로 안 끊김.
-  if ((newProject || uiish) && !res.limited) {
+  if ((newProject || uiish || (feedback[channel] || []).length) && !res.limited) {
     for (let pass = 1; pass <= 3 && !workCancel[channel]; pass++) {
       bumpWork(channel);
       const gaps = await checkAppGaps(dir);
-      if (!gaps.length) break; // 화면/핵심 갖춰짐 → 멈춤
-      prog.phase(`아직 비어서 더 채우는 중 (${pass}차)`);
-      const cont = await runClaude(`이 저장소는 아직 미완성이야. 빌드는 통과해도 실제로 동작하는 앱이 아니야. 특히 지금 비어있는 것: ${gaps.join(' / ')}.\n\n지금 이걸 진짜로 동작하게 직접 구현해라. 데모·플레이스홀더·로렘입숨·"TODO" 금지 — 실제 화면(라우트 page), 실제 컴포넌트, 핵심 사용자 플로우를 끝까지 만들어라. 이미 있는 서버/타입은 활용하고, 빠진 사용자 화면을 우선 채워라. npm run build 통과 유지.${prd ? '\n\n[따라야 할 PRD — 사용자 화면·핵심 루프 부분]\n' + prd.slice(0, 6000) : ''}`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000, true);
+      const fbCont = drainFeedback(channel); // 메인 생성 도중 들어온 사용자 피드백("그거 빼고/바꿔")을 이 패스에서 실제로 반영 — "반영할게" 약속 지키기
+      if (!gaps.length && !fbCont) break; // 화면/핵심 갖춰지고 반영할 피드백도 없음 → 멈춤
+      prog.phase(fbCont ? `방금 준 피드백 반영하는 중 (${pass}차)` : `아직 비어서 더 채우는 중 (${pass}차)`);
+      const cont = await runClaude(`이 저장소를 더 다듬어라.${gaps.length ? ` 특히 지금 비어있는 것: ${gaps.join(' / ')} — 데모·플레이스홀더·로렘입숨·"TODO" 금지로 실제 화면(라우트 page)·컴포넌트·핵심 플로우를 끝까지 만들어라.` : ''}${fbCont ? `\n\n[사용자가 방금 추가로 준 지시 — 반드시 그대로 반영]\n${fbCont}` : ''}\n\n이미 있는 서버/타입은 활용하고 npm run build 통과 유지.${prd ? '\n\n[따라야 할 PRD]\n' + prd.slice(0, 5000) : ''}`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000, true);
       if (cont.limited) { await postAs(client, channel, thread_ts, LEAD, '⏳ 이어서 채우다가 한도에 걸렸어. 지금까지 만든 만큼만 올릴게, 리셋되면 "이어서"라고 해줘.'); break; }
     }
   }
