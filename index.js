@@ -283,7 +283,7 @@ async function runPRD(client, channel, thread_ts, task) {
       if (dm && r.ok !== false) { await postAs(client, channel, thread_ts, devil, dm); convo += `\n안다연(반론): ${dm}`; }
     }
     // 팀장: PRD 문서 작성 + 완성도 평가
-    const synth = await runClaude(`${LEAD.prompt}${PLAIN}\n\n[지금까지 팀 논의]\n${convo}\n\n위 논의를 바탕으로 이 프로젝트 PRD를 아래 항목으로 작성해라. 구어체로 쓰되 내용은 구체적으로:\n목표 /\n타겟·사용맥락 /\n핵심기능(우선순위) /\n화면·플로우 /\n기술스택 /\n차별화 훅 /\n성공지표 /\n리스크·대응\n\n맨 마지막 줄에 반드시 "완성도: NN%" 형식으로 이 PRD 완성도를 숫자로 매겨라. ${TARGET}% 미만이면 뭐가 부족한지 한두 줄. 마크다운 별표·샵 금지.`, LEAD.model, WORKDIR, CLAUDE_PERMISSION_MODE, 180000);
+    const synth = await runClaude(`${LEAD.prompt}${PLAIN}${rulesCtx(channel)}\n\n[지금까지 팀 논의]\n${convo}\n\n위 논의를 바탕으로 이 프로젝트 PRD를 아래 항목으로 작성해라. 구어체로 쓰되 내용은 구체적으로:\n목표 /\n타겟·사용맥락 /\n핵심기능(우선순위) /\n화면·플로우 /\n기술스택 /\n차별화 훅 /\n성공지표 /\n리스크·대응\n\n맨 마지막 줄에 반드시 "완성도: NN%" 형식으로 이 PRD 완성도를 숫자로 매겨라. ${TARGET}% 미만이면 뭐가 부족한지 한두 줄. 마크다운 별표·샵 금지.`, LEAD.model, WORKDIR, CLAUDE_PERMISSION_MODE, 180000);
     if (synth.limited) { limited = true; break; }
     if (synth.text && synth.ok !== false) { prd = synth.text.trim(); convo += `\n[팀장 PRD v${round}]\n${prd}`; await postAs(client, channel, thread_ts, LEAD, prd.slice(0, 2800)); }
     const mm = prd.match(/완성도\s*[^0-9%]{0,5}([0-9]{1,3})\s*(?:%|퍼센트|점)/); score = mm ? parseInt(mm[1], 10) : score; // "완성도는 95%", "완성도 약 95점"도 인식
@@ -668,7 +668,7 @@ async function runReport(client, channel, thread_ts, reporter, repo, task) {
     const cl = await sh(`rm -rf ${dir} && git clone --depth 1 https://x-access-token:${GITHUB_TOKEN}@github.com/${repo}.git ${dir} && chmod -R 777 ${dir}`);
     if (cl.code !== 0) { await postAs(client, channel, thread_ts, reporter, `${mention(channel)}${repo} 레포를 못 찾았어ㅠ (이름 확인 필요)\n${(cl.err || '').slice(0, 200)}`); return; }
     const GROUND = '\n\n[사실 근거 규칙 — 엄격] 레포 코드/파일로 직접 확인되는 것만 사실로 말해라. 배포 여부, 앱스토어·플레이스토어 제출/승인 여부, 실제 유저 수, 매출, 광고 활성화 여부 같은 외부·운영 상태는 코드만으론 절대 알 수 없다. 코드에 준비/설정이 있어도 "제출됨/출시됨/활성화됨"이라고 단정하지 마. 그런 건 "코드엔 준비돼 있는데 실제 제출/활성화 여부는 확인 안 됨"으로 표시해라. 지어내면 안 된다.';
-    const res = await runClaude(`이 저장소를 실제로 열어보고, 사용자의 요청 "${task}"에 직접 답해라. 단순 현황 나열이 아니라, 레포에서 확인한 사실을 근거로 실제 답·제안·전략을 내라. 코드는 읽기만 해. 레포에 없는 시장·경쟁사·트렌드·벤치마크는 웹서치(WebSearch)로 찾아서 근거로 써도 돼.${GROUND}\n\n역할별로 각자 그 요청에 대한 자기 분야의 답/제안을 줘. 각 줄 "역할: 답/제안" 형식(관련된 역할만, PM/리서처/UX/아키텍트/보안/마케터). 질문 분야의 담당이 메인으로 구체적인 안을 내고(예: 마케팅 질문이면 마케터가 채널·메시지·실행안까지), 나머지는 거들어. 한 역할당 2~4줄.${PLAIN}`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000);
+    const res = await runClaude(`이 저장소를 실제로 열어보고, 사용자의 요청 "${task}"에 직접 답해라. 단순 현황 나열이 아니라, 레포에서 확인한 사실을 근거로 실제 답·제안·전략을 내라. 코드는 읽기만 해. 레포에 없는 시장·경쟁사·트렌드·벤치마크는 웹서치(WebSearch)로 찾아서 근거로 써도 돼.${GROUND}${rulesCtx(channel)}\n\n역할별로 각자 그 요청에 대한 자기 분야의 답/제안을 줘. 각 줄 "역할: 답/제안" 형식(관련된 역할만, PM/리서처/UX/아키텍트/보안/마케터). 질문 분야의 담당이 메인으로 구체적인 안을 내고(예: 마케팅 질문이면 마케터가 채널·메시지·실행안까지), 나머지는 거들어. 한 역할당 2~4줄.${PLAIN}`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000);
     if (res.limited) { await postAs(client, channel, thread_ts, reporter, `${mention(channel)}⏳ 조사 중에 클로드 사용량 한도에 걸렸어. 리셋되면 다시 봐줄게.`); return; }
     const n = await distributeReport(client, channel, thread_ts, res.text);
     if (!n) await postAs(client, channel, thread_ts, reporter, (res.text || '(내용 없음)').trim().slice(0, 3000));
@@ -680,7 +680,7 @@ async function runReport(client, channel, thread_ts, reporter, repo, task) {
     }
     // 팀장 한로로 — 의견들 + 반론 다 검토해서 최종 실행안으로 종합·보완 (그냥 의견 나열로 끝내지 않게)
     if (workCancel[channel]) { delete workCancel[channel]; return; } // 중단 요청 시 종합 안 함
-    const synth = await runClaude(`${LEAD.prompt}${PLAIN}\n\n[사용자 질문]\n${task}\n\n[팀 의견]\n${(res.text || '').slice(0, 2500)}\n\n[안다연 반론]\n${devilText.slice(0, 1200)}\n\n위를 다 검토해서 "최종안"으로 종합·보완해라. 의견 충돌은 네가 정리하고, 우선순위(1·2·3)를 매기고, 코드로 확인 안 된 가정은 빼거나 "확인 필요"로 표시해라. 바로 실행 가능한 구체적 액션으로 끝내. 마크다운 금지.`, LEAD.model, WORKDIR, CLAUDE_PERMISSION_MODE, 180000);
+    const synth = await runClaude(`${LEAD.prompt}${PLAIN}${rulesCtx(channel)}\n\n[사용자 질문]\n${task}\n\n[팀 의견]\n${(res.text || '').slice(0, 2500)}\n\n[안다연 반론]\n${devilText.slice(0, 1200)}\n\n위를 다 검토해서 "최종안"으로 종합·보완해라. 의견 충돌은 네가 정리하고, 우선순위(1·2·3)를 매기고, 코드로 확인 안 된 가정은 빼거나 "확인 필요"로 표시해라. 바로 실행 가능한 구체적 액션으로 끝내. 마크다운 금지.`, LEAD.model, WORKDIR, CLAUDE_PERMISSION_MODE, 180000);
     if (synth.text && synth.ok !== false) await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}📌 최종안 (팀 의견+반론 종합)\n${synth.text.trim().slice(0, 2500)}`);
     else await postAs(client, channel, thread_ts, reporter, `${mention(channel)}다 정리했어, 위에 봐줘!`);
   } finally { await prog.done(); }
