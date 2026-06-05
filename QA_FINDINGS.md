@@ -207,3 +207,8 @@
 - ghPost/ghGet: JSON.parse try/catch→null, req error→null, 비200은 기대필드 없는 객체로 와 호출측 실패처리. graceful.
 - uploadCodeZip: tar 120s 타임아웃·45MB 캡·uploadV2 try/catch→false(권한없으면 github.dev 폴백). graceful.
 - 관찰(개선 안 함): distributeReport 정규식이 "1. 마케팅: ..." 류 섹션헤더를 역할로 오분배할 이론적 엣지. "역할: 답" 포맷 프롬프트라 실발생 낮아 기록만.
+
+### #35 addRule 길이제한·중복방지 없음 → 프롬프트 토큰 폭증 (자율루프2 틱11)
+- 증상: addRule이 raw(전체 메시지)를 규칙으로 저장하는데 개별 길이제한·중복 dedup 없음. "항상" 든 긴 단락이 통째 영구 규칙이 되면 rulesCtx가 모든 작업/리포트/잡담/PRD 프롬프트에 주입되니, 30개×수천자 = 매 claude 호출 토큰 폭증·비용·혼란. 같은 규칙 반복 저장도 누적.
+- 수정: addRule에서 (a)개별 규칙 200자 캡+공백정규화 (b)이미 있는 규칙이면 스킵(중복방지). 개수 30 캡은 유지.
+- 검증: 중복 1개 제거(4→3), 긴 규칙 200자 캡, 40개→30 캡. node --check 통과.

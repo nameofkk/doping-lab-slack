@@ -773,7 +773,15 @@ const RULES_FILE = process.env.RULES_FILE || '/data/rules.json';
 let rules = {};
 function loadRules() { try { if (fs.existsSync(RULES_FILE)) rules = JSON.parse(fs.readFileSync(RULES_FILE, 'utf8')) || {}; } catch { rules = {}; } }
 function persistRules() { try { fs.writeFileSync(RULES_FILE, JSON.stringify(rules)); } catch {} }
-function addRule(channel, text) { (rules[channel] = rules[channel] || []).push(text); if (rules[channel].length > 30) rules[channel] = rules[channel].slice(-30); persistRules(); }
+function addRule(channel, text) {
+  const t = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 200); // 개별 규칙 길이 제한 — 긴 단락이 통째 규칙되어 모든 프롬프트(rulesCtx) 부풀리는 거 방지
+  if (!t) return;
+  const arr = (rules[channel] = rules[channel] || []);
+  if (arr.includes(t)) return; // 같은 규칙 중복 저장 방지
+  arr.push(t);
+  if (arr.length > 30) rules[channel] = arr.slice(-30);
+  persistRules();
+}
 function rulesCtx(channel) { const r = rules[channel] || []; return r.length ? `\n\n[팀 규칙 — 항상 지켜라]\n${r.map((x, i) => `${i + 1}. ${x}`).join('\n')}` : ''; }
 
 // ── 설정(권한/승인) + 태스크보드 (영구) ──
