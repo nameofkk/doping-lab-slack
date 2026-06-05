@@ -212,3 +212,8 @@
 - 증상: addRule이 raw(전체 메시지)를 규칙으로 저장하는데 개별 길이제한·중복 dedup 없음. "항상" 든 긴 단락이 통째 영구 규칙이 되면 rulesCtx가 모든 작업/리포트/잡담/PRD 프롬프트에 주입되니, 30개×수천자 = 매 claude 호출 토큰 폭증·비용·혼란. 같은 규칙 반복 저장도 누적.
 - 수정: addRule에서 (a)개별 규칙 200자 캡+공백정규화 (b)이미 있는 규칙이면 스킵(중복방지). 개수 30 캡은 유지.
 - 검증: 중복 1개 제거(4→3), 긴 규칙 200자 캡, 40개→30 캡. node --check 통과.
+
+### #36 selfHeal이 activeWork 미점유 → 자가수정 중 사용자 작업 동시충돌 (자율루프2 틱12, #31과 동류)
+- 증상: selfHeal이 runWork를 직접 호출하는데 activeWork를 안 잡음. 시작 전(875)엔 activeWork 체크하지만 자기 runWork 도는 동안엔 activeWork가 비어 있어, 그 사이 사용자 메시지가 guardBusy를 통과해 동시 작업 시작 → 같은 채널 동시 빌드·메시지 뒤섞임. selfHealing 플래그는 다른 selfHeal만 막지 사용자 작업은 못 막음.
+- 수정: selfHeal이 runWork 동안 activeWork 점유(selfHeal:true, beat 포함), finally에서 selfHealing=false와 함께 해제. 시작 전 activeWork 체크(875)는 유지되므로 사용자 작업 중엔 selfHeal 안 끼어듦(이중세팅 없음).
+- 검증: node --check 통과. 점검 clean: 승인모드 forcePR 일관 라우팅(work/marketing/resume 다 !!settings.approval), selfHeal 쿨다운(30분 동일에러·5분 최소간격)·PR만·자기재배포 안함.

@@ -877,12 +877,13 @@ async function selfHeal(client, channel, thread_ts, errText) {
   if (now - selfHealAt < 30 * 60 * 1000 && sig === lastHealSig) return; // 같은 에러 30분 내 반복 자가수정 금지
   if (now - selfHealAt < 5 * 60 * 1000) return;                          // 어떤 에러든 최소 5분 간격
   selfHealing = true; selfHealAt = now; lastHealSig = sig;
+  activeWork[channel] = { task: '봇 자가수정', started: Date.now(), beat: Date.now(), repo: SELF_HEAL_REPO, selfHeal: true }; // 자가수정 도는 동안 채널 점유 → 사용자 메시지가 동시 작업 시작하는 충돌 방지(beat로 워치독도 적용)
   const sec = byName('우정잉') || LEAD;
   try {
     await postAs(client, channel, thread_ts, sec, '방금 내부 에러 났네. 내 봇 코드에서 원인 찾아서 고쳐볼게. 고치면 PR로 올릴 테니까 확인하고 머지해줘 (라이브 반영은 재배포 필요).');
     await runWork(client, channel, thread_ts, SELF_HEAL_REPO, `이 슬랙 봇(너 자신)이 방금 다음 에러를 냈다. index.js에서 원인을 찾아 실제로 고쳐라. 추측하지 말고 코드를 직접 읽어서 정확한 원인을 짚고 최소한으로 안전하게 수정해라. node --check 통과하는지 확인하고, 뭘 왜 고쳤는지 보고해라.\n\n[에러]\n${sig ? String(errText).slice(0, 900) : '(내용 미상)'}`, false, true);
   } catch (e) { try { await postAs(client, channel, thread_ts, sec, '자가수정 시도 중에 또 막혔어: ' + String(e).slice(0, 150)); } catch (_) {} }
-  finally { selfHealing = false; }
+  finally { selfHealing = false; activeWork[channel] = null; }
 }
 // 작업 생존신호(heartbeat) — 진행 중이면 beat 갱신. "오래 걸린다"고 살아있는 작업을 죽은 걸로 오인하지 않게 (워치독/스테일해제가 시작시각 아닌 beat 기준으로 판단)
 function bumpWork(channel) { if (activeWork[channel]) activeWork[channel].beat = Date.now(); }
