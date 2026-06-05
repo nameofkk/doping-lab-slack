@@ -233,3 +233,8 @@
 test specified) 판별해 안 돌림.
 
 ## 자율루프2 핵심영역 검증 완료(틱13·14 연속무결): 실버그 9건 수정·배포 #28~#36. 검증 clean 다수. 감시 간격 1500→3600초로 확대(순환 유지).
+
+### 저빈도 순환 틱15: 이상없음 (3연속 무결)
+- node --check OK. persist 8종(schedules/memory/rules/settings/tasks/lastrepo/pending/services) 전부 try/catch 손상 폴백 확인.
+- ~/qa 하네스 5종(route/extract/sched/persona/rule) 전부 에러·undefined·NaN 없이 정상 — 라우팅 회귀 없음.
+- 코드변경 없음. 간격 3600초 유지.
