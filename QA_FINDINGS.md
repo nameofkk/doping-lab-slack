@@ -254,3 +254,9 @@ test specified) 판별해 안 돌림.
 - 구현: 결론 뒤 extractActionItems로 착수가능 액션 추출·분류(investigate/build/human) → 번호목록 제시 + pendingDispatch에 보관. 사용자가 "실행"/"실행 1,3" 하면(승인 게이트) dispatchActionItems가 조사는 read-only 리포트 한 번에, 코드수정은 forcePR(머지로 또 승인)로 착수. "넘어가"면 폐기. 30분 만료. human(계정·심사 등)은 제외.
 - 안전장치: 자동실행 안 함(반드시 승인), guardBusy로 작업중엔 보류, 코드수정은 PR만(main 직행 X), 코드작업 3개 캡.
 - 검증: node --check 통과, 트리거 정규식(실행/넘어가/오발동) 검증.
+
+## R1 [기능] 영속 작업 보드(jobs) — fire-and-forget 탈피
+- 배경: 레퍼런스 벤치마크 최대 갭 = 작업이 메모리에만 있고 재시작하면 날아가고 현황 조회 불가(Magentic-One 원장·LangGraph 체크포인트).
+- 구현: jobs 스토어(/data/jobs.json 영속, 최근200개). createJob/jobUpdate/ensureJob/endJob. work/build/report/debate 라이프사이클 훅 — 생성 시 running, 종료 시 정확한 상태(done/awaiting-approval/limited/cancelled/failed/변경없음). 재시작 시 running/planning→interrupted(awaiting-approval=PR대기는 유지). 슬랙 "작업현황/진행상황/jobs"로 최근 12개 조회(아이콘·타입·경과·산출물링크).
+- 효과: 지금 뭐 돌고 끝났는지 실패했는지 재시작에 끊겼는지 한눈에. R2~R5의 토대(원장·resume·계획승인이 이 job 레코드에 얹힘).
+- 검증: node --check 통과, createJob/상태전이/재시작 interrupt/보드출력 시뮬 정상.

@@ -168,6 +168,7 @@ async function runClaudeOnce(prompt, model, cwd = WORKDIR, perm = CLAUDE_PERMISS
 }
 
 async function runDebate(client, channel, thread_ts, idea, repo) {
+  ensureJob(channel, 'debate', idea, repo); // R1: 보드에 기록
   await postAs(client, channel, thread_ts, LEAD, `🧪 토론 시작할게. 주제: ${idea}\n${repo ? '먼저 프로젝트 좀 까보고 ' : ''}${ROUNDS}라운드 치고받은 다음에 내가 결론 정리할게.`);
   let facts = '';
   if (repo && GITHUB_TOKEN) {
@@ -510,6 +511,7 @@ async function verifyBuild(client, channel, thread_ts, dir, repo, pushRef = WORK
 }
 
 async function runWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName) {
+  ensureJob(channel, newProject ? 'build' : 'work', task, repo); // R1: launchWork 외 경로(스케줄·자가수정·디스패치)가 부른 작업도 보드에 기록
   if (!GITHUB_TOKEN) { await postAs(client, channel, thread_ts, LEAD, 'GITHUB_TOKEN이 아직 없어서 작업 모드는 못 돌려. 토큰만 넣으면 바로 돼.'); return; }
   const id = ++workSeq;
   workCancel[channel] = false;
@@ -554,7 +556,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const uiish = newProject || /ui|화면|디자인|프론트|컴포넌트|페이지|버튼|css|스타일|레이아웃|frontend|react|html|랜딩|사이트|홈페이지|게임/i.test(task);
   const fbBuild = drainFeedback(channel); // 제작 직전 들어온 사용자 수정요청도 반영
   const res = await runClaude(`${intro}${rulesCtx(channel)}${PLAIN}${uiish ? DESIGN_RULE : ''}${newProject ? LAUNCH_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}${fbBuild ? '\n\n[사용자가 추가로 준 지시 — 반드시 반영]\n' + fbBuild : ''}\n\n요청: ${task}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000, true);
-  if (res.limited) { await postAs(client, channel, thread_ts, LEAD, '⏳ 제작 중에 클로드 사용량 한도에 걸렸어. 지금까지 만든 건 안 올렸어, 한도 리셋되면 이어서 만들게.'); return; }
+  if (res.limited) { jobUpdate(channel, { status: 'limited' }); await postAs(client, channel, thread_ts, LEAD, '⏳ 제작 중에 클로드 사용량 한도에 걸렸어. 지금까지 만든 건 안 올렸어, 한도 리셋되면 이어서 만들게.'); return; }
   // 연속완성 패스 — 신규 풀빌드/화면작업은 한 번에 안 끝나고 스캐폴딩만 남는 경우가 많음. 실제 사용자 화면/핵심 루프가 빌 동안 추가로 채움(빈 껍데기 + 거짓완료 방지). 하트비트로 안 끊김.
   if ((newProject || uiish || (feedback[channel] || []).length) && !res.limited) {
     for (let pass = 1; pass <= 3 && !workCancel[channel]; pass++) {
@@ -570,8 +572,8 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   await sh('git add -A', dir);
   const repoUrl = `https://github.com/${repo}`;
   const chk = await sh('git diff --cached --quiet; echo $?', dir);
-  if (chk.out.trim().endsWith('0')) { await postAs(client, channel, thread_ts, LEAD, `변경/생성된 게 없었어.\n${repoUrl}\n\n` + (res.text || '').trim().slice(0, 1500)); return; }
-  if (workCancel[channel]) { delete workCancel[channel]; await postAs(client, channel, thread_ts, LEAD, '작업 중단했어. main엔 아무것도 안 올렸어.'); return; }
+  if (chk.out.trim().endsWith('0')) { jobUpdate(channel, { status: 'done', note: '변경 없음' }); await postAs(client, channel, thread_ts, LEAD, `변경/생성된 게 없었어.\n${repoUrl}\n\n` + (res.text || '').trim().slice(0, 1500)); return; }
+  if (workCancel[channel]) { delete workCancel[channel]; jobUpdate(channel, { status: 'cancelled' }); await postAs(client, channel, thread_ts, LEAD, '작업 중단했어. main엔 아무것도 안 올렸어.'); return; }
   const cmsg = task.slice(0, 60).replace(/[`$"\\!\r\n;|&<>()]/g, '').trim() || '작업'; // 셸 명령치환/인젝션 방지 (백틱·$·따옴표 등 제거)
   await sh(`git commit -m "도핑연구소: ${cmsg}"`, dir);
   prog.phase('빌드 되나 돌려보고 라이브로 띄우는 중');
@@ -585,6 +587,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
       const n = await distributeReport(client, channel, thread_ts, res.text);
       if (!n) await postAs(client, channel, thread_ts, LEAD, (res.text || '').trim().slice(0, 1500));
       await verifyBuild(client, channel, thread_ts, dir, repo);
+      jobUpdate(channel, { status: incomplete ? 'awaiting-approval' : 'done', artifacts: [repoUrl], note: incomplete ? '미완성(이어서 필요)' : undefined });
       await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}${doneHead} ${repoUrl} (${WORK_BASE}에 반영)\n코드 브라우저로 보려면: https://github.dev/${repo}\n빌드·라이브·스크린샷은 위에 확인해줘. (코드 파일로 받고 싶으면 "코드 줘"라고 해)`);
       if (newProject && !incomplete) await handoffChecklist(client, channel, thread_ts, repo, task); // 미완성이면 "상용 오픈 체크리스트" 안 띄움(거짓 신호 방지)
       return;
@@ -601,6 +604,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const n2 = await distributeReport(client, channel, thread_ts, res.text);
   if (!n2) await postAs(client, channel, thread_ts, LEAD, (res.text || '').trim().slice(0, 1500));
   await verifyBuild(client, channel, thread_ts, dir, repo, branch); // PR 경로 → 빌드 자동수정도 PR 브랜치로(main 직행 금지)
+  jobUpdate(channel, { status: 'awaiting-approval', artifacts: [url], note: 'PR 머지 대기' });
   await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}${doneHead} ${forcePR ? '승인모드라 PR로 올렸어 (머지하면 반영).' : 'PR로 올렸어.'}\nPR: ${url}\n코드 브라우저로 보려면: https://github.dev/${repo}`);
   if (newProject && !incomplete) await handoffChecklist(client, channel, thread_ts, repo, task);
   } finally { await prog.done(); }
@@ -703,7 +707,8 @@ function extractRepo(raw) {
   return null;
 }
 async function runReport(client, channel, thread_ts, reporter, repo, task) {
-  if (!GITHUB_TOKEN) { await postAs(client, channel, thread_ts, reporter, 'GITHUB_TOKEN이 없어서 조사를 못 해.'); return; }
+  ensureJob(channel, 'report', task, repo); // R1: 보드에 기록
+  if (!GITHUB_TOKEN) { jobUpdate(channel, { status: 'failed', error: 'GITHUB_TOKEN 없음' }); await postAs(client, channel, thread_ts, reporter, 'GITHUB_TOKEN이 없어서 조사를 못 해.'); return; }
   await postAs(client, channel, thread_ts, reporter, `${repo} 한번 까볼게. 잠깐만.`);
   const id = ++workSeq; const dir = `/tmp/r${id}`;
   const prog = startProgress(channel, thread_ts, `${repo.split('/').pop()} 까보고 정리하는 중`, reporter);
@@ -838,6 +843,27 @@ let tasks = {}; let taskSeq = 0;
 function loadTasks() { try { if (fs.existsSync(TASK_FILE)) { const d = JSON.parse(fs.readFileSync(TASK_FILE, 'utf8')); tasks = d.items || {}; taskSeq = d.seq || 0; } } catch { tasks = {}; } }
 function persistTasks() { try { fs.writeFileSync(TASK_FILE, JSON.stringify({ seq: taskSeq, items: tasks })); } catch {} }
 function addTask(channel, text, who) { const t = { id: ++taskSeq, text, who, done: false }; (tasks[channel] = tasks[channel] || []).push(t); persistTasks(); return t; }
+// ── R1: 자동 작업 보드(jobs) — 봇이 실제로 돌리는 작업을 영속 추적. fire-and-forget 탈피 + 재시작 생존 + 조회 ──
+const JOBS_FILE = process.env.JOBS_FILE || '/data/jobs.json';
+let jobs = {}; let jobSeq = 0; // jobs[id] = {id,channel,type,title,repo,status,by,createdAt,updatedAt,artifacts[],error,plan,note}
+function loadJobs() {
+  try { if (fs.existsSync(JOBS_FILE)) { const d = JSON.parse(fs.readFileSync(JOBS_FILE, 'utf8')); jobs = d.items || {}; jobSeq = d.seq || 0; } } catch { jobs = {}; }
+  for (const id of Object.keys(jobs)) { const j = jobs[id]; if (['planning', 'running'].includes(j.status)) { j.status = 'interrupted'; j.note = (j.note ? j.note + ' / ' : '') + '재시작으로 중단됨'; } } // 프로세스 죽으면 진행중이던 것만 interrupted (awaiting-approval=PR대기는 재시작에도 유효하니 유지)
+  persistJobs();
+}
+function persistJobs() { try { const ids = Object.keys(jobs).map(Number).sort((a, b) => a - b); if (ids.length > 200) for (const id of ids.slice(0, ids.length - 200)) delete jobs[id]; fs.writeFileSync(JOBS_FILE, JSON.stringify({ seq: jobSeq, items: jobs })); } catch {} } // 최근 200개만 유지
+function createJob(channel, type, title, repo, by) { const id = ++jobSeq; jobs[id] = { id, channel, type, title: String(title || '').slice(0, 120), repo: repo || null, status: 'running', by: by || null, createdAt: Date.now(), updatedAt: Date.now(), artifacts: [] }; persistJobs(); return jobs[id]; }
+function jobUpdateById(id, patch) { const j = jobs[id]; if (!j) return; Object.assign(j, patch, { updatedAt: Date.now() }); persistJobs(); }
+function jobUpdate(channel, patch) { const id = activeWork[channel] && activeWork[channel].jobId; if (id) jobUpdateById(id, patch); } // 현재 채널 진행작업에 연결된 job 갱신 (jobId 없으면 무시)
+function ensureJob(channel, type, title, repo) { if (!activeWork[channel]) return null; if (!activeWork[channel].jobId) activeWork[channel].jobId = createJob(channel, type, title, repo, activeWork[channel].by).id; return activeWork[channel].jobId; } // report/debate처럼 호출측이 activeWork만 세팅한 경우 job 붙이기
+function endJob(channel) { const id = activeWork[channel] && activeWork[channel].jobId; if (id && jobs[id] && jobs[id].status === 'running') jobUpdateById(id, { status: 'done' }); } // 종료 시 아직 running이면 done (정확한 상태는 각 함수가 먼저 박음)
+function jobBoard(channel) {
+  const mine = Object.values(jobs).filter(j => j.channel === channel).sort((a, b) => b.id - a.id).slice(0, 12);
+  if (!mine.length) return '아직 기록된 작업이 없어.';
+  const icon = { running: '🔵', 'awaiting-approval': '🟡', done: '✅', failed: '❌', interrupted: '⚠️', limited: '⏳', cancelled: '⏹️', planning: '📝' };
+  const fmt = j => { const m = Math.round((j.updatedAt - j.createdAt) / 60000); return `${icon[j.status] || '•'} #${j.id} [${j.status}] ${j.type} · ${j.title}${j.repo ? ' (' + j.repo.split('/').pop() + ')' : ''}${m ? ' ·' + m + '분' : ''}${j.artifacts && j.artifacts.length ? '\n   ↳ ' + j.artifacts.join(' ') : ''}`; };
+  return '📋 작업 현황 (최근 12개)\n' + mine.map(fmt).join('\n');
+}
 
 // 채널이 마지막으로 다룬 레포 (재배포에도 살아남게 영구저장 → "어느 레포?" 무한반복 방지)
 const LASTREPO_FILE = process.env.LASTREPO_FILE || '/data/lastrepo.json';
@@ -952,10 +978,11 @@ async function guardBusy(client, channel, thread_ts) {
 // 작업 실행(activeWork 세팅 + runWork + 정리) 공통
 function launchWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName) {
   feedback[channel] = []; delete pausedWork[channel]; // 새 작업 시작 → 묵은 피드백·옛 중단작업 정리(스테일 "이어서" 방지)
-  activeWork[channel] = { task, started: Date.now(), beat: Date.now(), by: lastRequester[channel], repo, newProject, forcePR, projName }; // 재개(이어서)용 컨텍스트 포함
+  const job = createJob(channel, newProject ? 'build' : 'work', task, repo, lastRequester[channel]); // R1: 작업 보드에 기록
+  activeWork[channel] = { task, started: Date.now(), beat: Date.now(), by: lastRequester[channel], repo, newProject, forcePR, projName, jobId: job.id }; // 재개(이어서)용 컨텍스트 포함
   runWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName)
-    .catch(e => postAs(client, channel, thread_ts, LEAD, '작업 오류: ' + String(e).slice(0, 300)))
-    .finally(() => { activeWork[channel] = null; });
+    .catch(e => { jobUpdateById(job.id, { status: 'failed', error: String(e).slice(0, 200) }); postAs(client, channel, thread_ts, LEAD, '작업 오류: ' + String(e).slice(0, 300)); })
+    .finally(() => { if (jobs[job.id] && jobs[job.id].status === 'running') jobUpdateById(job.id, { status: 'done' }); activeWork[channel] = null; }); // runWork가 정확한 종료상태 안 박았으면 done 처리
 }
 // 작업(신규 제작이든 기존 수정이든) 시작 전, 정말 방향이 갈리는 중요한 결정이 있으면 사용자에게 먼저 물어봄 (없으면 그냥 진행)
 async function planQuestions(task, newProject) {
@@ -1078,6 +1105,8 @@ async function handle(event, client) {
     let tm;
     if ((tm = raw.match(/^태스크\s*추가\s*[:：]?\s*([\s\S]+)/))) { const t = addTask(channel, tm[1].trim(), event.user); await postAs(client, channel, thread_ts, LEAD, `📌 태스크 추가 (#${t.id}): ${t.text}`); return; }
     if (/^태스크\s*(목록|보드|리스트)/.test(raw)) { const l = tasks[channel] || []; await postAs(client, channel, thread_ts, LEAD, l.length ? '📋 할 일 보드:\n' + l.map(t => `#${t.id} [${t.done ? '완료' : '진행'}] ${t.text}`).join('\n') : '등록된 태스크가 없어.'); return; }
+    // R1: 봇 작업 현황 보드 (자동 추적 — 지금 뭐 돌고 있는지, 뭐 끝났는지, 재시작에 끊긴 건 뭔지)
+    if (/^(작업\s*현황|진행\s*상황|작업\s*보드|jobs?|작업\s*목록|뭐\s*(하는|돌)|현황)\b/i.test(raw) || /^(작업|진행)\s*어때/.test(raw)) { await postAs(client, channel, thread_ts, LEAD, jobBoard(channel)); return; }
     if ((tm = raw.match(/^태스크\s*완료\s*(\d+)/))) { const t = (tasks[channel] || []).find(x => x.id === parseInt(tm[1])); if (t) { t.done = true; persistTasks(); await postAs(client, channel, thread_ts, LEAD, `#${tm[1]} 완료 처리했어.`); } else await postAs(client, channel, thread_ts, LEAD, '그 태스크 못 찾겠어.'); return; }
     if ((tm = raw.match(/^태스크\s*삭제\s*(\d+)/))) { tasks[channel] = (tasks[channel] || []).filter(x => x.id !== parseInt(tm[1])); persistTasks(); await postAs(client, channel, thread_ts, LEAD, `#${tm[1]} 삭제했어.`); return; }
     // 배포 — 특정/직전 레포를 Railway에 다시 올림 (단, 고치고/만들고 같은 작업 의도가 있으면 여기서 안 잡고 작업으로 보냄)
@@ -1116,7 +1145,7 @@ async function handle(event, client) {
     if (m && m[2].trim()) {
       if (await guardBusy(client, channel, thread_ts)) return;
       activeWork[channel] = { task: m[2].trim(), started: Date.now() };
-      runDebate(client, channel, event.thread_ts || event.ts, m[2].trim(), null).catch(() => {}).finally(() => { activeWork[channel] = null; });
+      runDebate(client, channel, event.thread_ts || event.ts, m[2].trim(), null).catch(e => jobUpdate(channel, { status: 'failed', error: String(e).slice(0, 150) })).finally(() => { endJob(channel); activeWork[channel] = null; });
       return;
     }
     // 운영: 서비스 대장 + 헬스체크
@@ -1278,7 +1307,7 @@ async function handle(event, client) {
       if (await guardBusy(client, channel, thread_ts)) return;
       const reporter = pickPersona(raw) || LEAD;
       activeWork[channel] = { task: raw, started: Date.now(), by: lastRequester[channel] };
-      runReport(client, channel, event.thread_ts || event.ts, reporter, projRepo, raw).catch(e => postAs(client, channel, thread_ts, LEAD, '조사 오류: ' + String(e).slice(0, 300))).finally(() => { activeWork[channel] = null; });
+      runReport(client, channel, event.thread_ts || event.ts, reporter, projRepo, raw).catch(e => { jobUpdate(channel, { status: 'failed', error: String(e).slice(0, 150) }); postAs(client, channel, thread_ts, LEAD, '조사 오류: ' + String(e).slice(0, 300)); }).finally(() => { endJob(channel); activeWork[channel] = null; });
       return;
     }
     // 특정 단어 없어도 AI가 의도 판단 → 작업이면 알아서 수행
@@ -1325,13 +1354,13 @@ async function handle(event, client) {
     if (intent && intent.action === 'report' && intent.task) {
       const reporter = pickPersona(event.text || '') || LEAD;
       activeWork[channel] = { task: intent.task, started: Date.now() };
-      runReport(client, channel, event.thread_ts || event.ts, reporter, resolveR(intent.repo), intent.task).catch(e => postAs(client, channel, thread_ts, LEAD, '조사 오류: ' + String(e).slice(0, 300))).finally(() => { activeWork[channel] = null; });
+      runReport(client, channel, event.thread_ts || event.ts, reporter, resolveR(intent.repo), intent.task).catch(e => { jobUpdate(channel, { status: 'failed', error: String(e).slice(0, 150) }); postAs(client, channel, thread_ts, LEAD, '조사 오류: ' + String(e).slice(0, 300)); }).finally(() => { endJob(channel); activeWork[channel] = null; });
       return;
     }
     if (intent && intent.action === 'debate' && intent.task) {
       const drepo = (intent.repo && intent.repo !== 'new') ? resolveR(intent.repo) : null;
       activeWork[channel] = { task: intent.task, started: Date.now() };
-      runDebate(client, channel, event.thread_ts || event.ts, intent.task, drepo).catch(e => postAs(client, channel, thread_ts, LEAD, '토론 오류: ' + String(e).slice(0, 300))).finally(() => { activeWork[channel] = null; });
+      runDebate(client, channel, event.thread_ts || event.ts, intent.task, drepo).catch(e => { jobUpdate(channel, { status: 'failed', error: String(e).slice(0, 150) }); postAs(client, channel, thread_ts, LEAD, '토론 오류: ' + String(e).slice(0, 300)); }).finally(() => { endJob(channel); activeWork[channel] = null; });
       return;
     }
     const targeted = pickPersona(event.text || '');
@@ -1368,7 +1397,7 @@ app.event('app_mention', async ({ event, client }) => { await handle(event, clie
   loadMemory();
   loadRules();
   loadSettings();
-  loadTasks();
+  loadTasks(); loadJobs();
   loadLastRepo();
   loadServices();
   loadPending();
