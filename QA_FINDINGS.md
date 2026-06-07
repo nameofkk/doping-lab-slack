@@ -248,3 +248,9 @@ test specified) 판별해 안 돌림.
 - 증상: verifyBuild의 빌드 1회 자동수정이 git push HEAD:WORK_BASE(main) 하드코딩. PR 경로(승인모드 또는 main push 실패 폴백)에서 호출되면 빌드 수정이 PR 브랜치가 아니라 main으로 직행 → 승인모드 우회(미리뷰 코드가 main에 반영) + 정작 PR엔 수정 누락.
 - 수정: verifyBuild에 pushRef 파라미터(기본 WORK_BASE). main-성공 경로(544)는 기본값, PR 경로(560)는 branch 전달 → 자동수정이 작업과 같은 ref로.
 - 검증: node --check 통과. main 경로 영향없음(기본 WORK_BASE), PR/승인모드는 브랜치로.
+
+## #38 [기능] 토론 결론 액션아이템 → 승인 후 실제 디스패치
+- 배경: 사용자 지적 — 토론(runDebate)이 결론·액션아이템을 텍스트로만 뱉고 실제 실행은 0이었음(말만 함).
+- 구현: 결론 뒤 extractActionItems로 착수가능 액션 추출·분류(investigate/build/human) → 번호목록 제시 + pendingDispatch에 보관. 사용자가 "실행"/"실행 1,3" 하면(승인 게이트) dispatchActionItems가 조사는 read-only 리포트 한 번에, 코드수정은 forcePR(머지로 또 승인)로 착수. "넘어가"면 폐기. 30분 만료. human(계정·심사 등)은 제외.
+- 안전장치: 자동실행 안 함(반드시 승인), guardBusy로 작업중엔 보류, 코드수정은 PR만(main 직행 X), 코드작업 3개 캡.
+- 검증: node --check 통과, 트리거 정규식(실행/넘어가/오발동) 검증.

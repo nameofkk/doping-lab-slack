@@ -202,11 +202,54 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
   if (stopped) { delete workCancel[channel]; await postAs(client, channel, thread_ts, LEAD, '토론 중단했어.'); return; }
   const synth = await runClaude(`${LEAD.prompt}${STYLE}${rulesCtx(channel)}\n\n[토론 전체]\n${transcript}\n\n이 토론을 종합해. 의견 갈린 지점 짚고, 가장 설득력 있는 쪽으로 최적 결론을 내려. 단순 요약 말고 결정과 다음 액션까지.${HONEST}`, LEAD.model);
   await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}📋 결론\n` + (synth.text || '').trim().slice(0, 2800));
+  // 결론의 액션아이템을 뽑아서 "승인하면 실제로 착수"하게 제시 (자동 실행 X — 사용자 승인 게이트). 레포 있을 때만(코드로 할 게 있어야 함).
+  if (repo && synth.text && synth.ok !== false) {
+    const items = await extractActionItems(synth.text);
+    const doable = items.filter(x => x.kind !== 'human');
+    if (doable.length) {
+      pendingDispatch[channel] = { repo, items, at: Date.now() };
+      const label = k => k === 'investigate' ? '조사' : k === 'build' ? '코드수정' : '사람만';
+      const fmt = items.map((x, i) => `${i + 1}. [${label(x.kind)}] ${x.who ? x.who + ' — ' : ''}${x.task}`).join('\n');
+      await postAs(client, channel, thread_ts, LEAD, `위 결론에서 실제로 착수 가능한 액션 뽑았어:\n${fmt}\n\n"실행"이라고 하면 조사·코드수정 항목을 내가 바로 돌릴게(조사는 코드 까서 사실로, 코드수정은 PR로 올려서 네가 머지). 골라서 "실행 1,3"도 돼. 안 할 거면 "넘어가". (사람만 가능한 건 빼고 돌려)`);
+    }
+  }
 }
 
 // ── 실제 작업 모드: 레포 클론 → claude 코드 작업 → 브랜치 push → PR → 보고 ──
-let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {};
+let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {};
 function drainFeedback(channel) { const f = (feedback[channel] || []).join('\n'); feedback[channel] = []; return f; } // 작업 중 사용자가 끼어든 수정요청 모아서 반환
+// 토론/회의 결론 → 실제 착수 가능한 액션아이템 추출 (조사/코드수정/사람만 분류). 자동 실행 아님 — 사용자 승인용 목록.
+async function extractActionItems(conclusion) {
+  try {
+    const r = await runClaude(`다음은 팀 회의 결론이야. 우리 팀(에이전트)이 코드/레포로 실제 착수 가능한 구체 액션아이템만 뽑아 JSON 배열로만 출력해. 설명 금지.\n\n[결론]\n${String(conclusion || '').slice(0, 3000)}\n\n각 항목: {"who":"담당(한 단어)","task":"무엇을 할지 한 문장, 레포에서 확인/수정할 구체 대상 포함","kind":"investigate|build|human"}\n- investigate: 레포 코드/파일 까서 확인하는 읽기전용(예 "regex 실행에 타임아웃 있는지 확인")\n- build: 코드를 실제 고치거나 추가(예 "regex에 타임아웃 추가")\n- human: 계정·심사·결제·외부결정 등 사람만 가능(예 "Play Store 심사상태 확인")\n추상적 방향·중복은 빼고 최대 8개. JSON 배열만.`, 'sonnet', WORKDIR, CLAUDE_PERMISSION_MODE, 120000);
+    const m = (r.text || '').match(/\[[\s\S]*\]/);
+    const arr = m ? JSON.parse(m[0]) : [];
+    return Array.isArray(arr) ? arr.filter(x => x && x.task && ['investigate', 'build', 'human'].includes(x.kind)).slice(0, 8) : [];
+  } catch { return []; }
+}
+// 승인된 액션아이템 실제 실행 — 조사는 한 번에 묶어 read-only 리포트로, 코드수정은 PR로(또 승인받게). 사람만 항목은 건너뜀.
+async function dispatchActionItems(client, channel, thread_ts, repo, items) {
+  const investigates = items.filter(x => x.kind === 'investigate');
+  const builds = items.filter(x => x.kind === 'build');
+  if (!investigates.length && !builds.length) { await postAs(client, channel, thread_ts, LEAD, '코드로 착수할 수 있는 건 없네. 나머진 사람이 해야 하는 거야(계정·심사 등).'); return; }
+  activeWork[channel] = { task: '액션아이템 실행 ' + repo, started: Date.now(), beat: Date.now(), repo };
+  try {
+    if (investigates.length) {
+      const combined = '팀이 "확인 필요"라고 한 것들을 레포 코드로 직접 확인해서 사실로 답해라(추측 금지, 코드 근거로):\n' + investigates.map((x, i) => `${i + 1}. ${x.task}`).join('\n');
+      await postAs(client, channel, thread_ts, LEAD, `🔍 조사 ${investigates.length}건 한 번에 까볼게.`);
+      await runReport(client, channel, thread_ts, byName('우정잉') || LEAD, repo, combined);
+    }
+    for (const b of builds.slice(0, 3)) {
+      if (workCancel[channel]) { delete workCancel[channel]; break; }
+      bumpWork(channel);
+      await postAs(client, channel, thread_ts, LEAD, `🛠️ 코드작업: ${b.task} — PR로 올릴게(머지는 네가).`);
+      await runWork(client, channel, thread_ts, repo, b.task, false, true); // forcePR — 승인(머지) 거쳐 반영
+    }
+    if (builds.length > 3) await postAs(client, channel, thread_ts, LEAD, `코드작업 ${builds.length}개 중 3개만 했어. 나머진 "작업: ..."로 시켜줘.`);
+    await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}액션아이템 실행 끝. 조사 결과·PR 위에서 확인해줘.`);
+  } catch (e) { await postAs(client, channel, thread_ts, LEAD, '실행 중 오류: ' + String(e).slice(0, 200)); }
+  finally { activeWork[channel] = null; }
+}
 // 명확한 "중단/취소 명령"일 때만 true (문장 속에 '중단','스톱' 단어가 섞인 일반 요청은 제외 — "중단했던 거 이어서", "스톱워치 추가" 등 오작동 방지)
 function isStopMsg(s) {
   const t = (s || '').trim();
@@ -986,6 +1029,22 @@ async function handle(event, client) {
       await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, 직전에 만들던 ${tgt.split('/').pop()}에서 아직 미완성인 부분(특히 사용자 화면) 마저 완성할게.`);
       launchWork(client, channel, thread_ts, tgt, '이전에 만들던 이 프로젝트에서 아직 미완성인 부분, 특히 사용자한테 보이는 화면(라우트 page)과 핵심 사용자 플로우를 실제로 동작하게 끝까지 완성해라. 데모·플레이스홀더·로렘입숨 금지, 실제 화면과 로직으로. npm run build 통과 유지.', false, !!settings.approval[channel]);
       return;
+    }
+    // 토론 결론 액션아이템 실행 승인 — "실행"/"실행 1,3"으로 착수, "넘어가"로 폐기 (승인 게이트: 자동 실행 안 함)
+    if (pendingDispatch[channel]) {
+      if (pendingDispatch[channel].at && Date.now() - pendingDispatch[channel].at > 30 * 60 * 1000) { delete pendingDispatch[channel]; } // 30분 만료
+      else if (/^(넘어가|패스|무시|안\s?해|됐어|취소|놔둬|나중에)/.test(raw)) { delete pendingDispatch[channel]; await postAs(client, channel, thread_ts, LEAD, '오케이, 그건 안 돌릴게. 나중에 "스포노노 ~ 조사해줘"나 "작업: ..."로 직접 시켜도 돼.'); return; }
+      else if (/^(실행|진행해?|착수|돌려(줘)?|고고|ㄱㄱ|다\s*해|전부\s*(해|돌려))(\s*[\d,\s및과~-]+)?\s*$/.test(raw) && canCommand(event.user)) {
+        if (await guardBusy(client, channel, thread_ts)) return; // 작업 중이면 안내만, pendingDispatch 유지
+        const pd = pendingDispatch[channel]; delete pendingDispatch[channel];
+        let items = pd.items;
+        const nums = (raw.match(/\d+/g) || []).map(Number);
+        if (nums.length) items = items.filter((_, i) => nums.includes(i + 1));
+        const doable = items.filter(x => x.kind !== 'human');
+        await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, ${doable.length}개 착수할게 (조사 ${doable.filter(x => x.kind === 'investigate').length}·코드수정 ${doable.filter(x => x.kind === 'build').length}). 좀 걸려.`);
+        dispatchActionItems(client, channel, thread_ts, pd.repo, items).catch(e => postAs(client, channel, thread_ts, LEAD, '실행 오류: ' + String(e).slice(0, 200)));
+        return;
+      }
     }
     // 작업 진행 중 "수정/지시"만 진행 중 작업에 반영(피드백). 명확한 수정 신호일 때만 — 원문 재전송·새 시작명령(제작/만들/시작/진행)은 제외, 중복 방지
     if (activeWork[channel] && /(바꿔|바꾸|수정|추가해|빼고|빼줘|말고|대신|틀렸|틀려|반영|변경|고쳐|로 ?해|로 ?가|넣어|이렇게|저렇게|먼저|우선|강조|제외|보강)/.test(raw) && !/^(제작|만들|시작|진행)/.test(raw)) {
