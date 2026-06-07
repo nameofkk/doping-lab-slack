@@ -557,15 +557,21 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const fbBuild = drainFeedback(channel); // 제작 직전 들어온 사용자 수정요청도 반영
   const res = await runClaude(`${intro}${rulesCtx(channel)}${PLAIN}${uiish ? DESIGN_RULE : ''}${newProject ? LAUNCH_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}${fbBuild ? '\n\n[사용자가 추가로 준 지시 — 반드시 반영]\n' + fbBuild : ''}\n\n요청: ${task}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000, true);
   if (res.limited) { jobUpdate(channel, { status: 'limited' }); await postAs(client, channel, thread_ts, LEAD, '⏳ 제작 중에 클로드 사용량 한도에 걸렸어. 지금까지 만든 건 안 올렸어, 한도 리셋되면 이어서 만들게.'); return; }
-  // 연속완성 패스 — 신규 풀빌드/화면작업은 한 번에 안 끝나고 스캐폴딩만 남는 경우가 많음. 실제 사용자 화면/핵심 루프가 빌 동안 추가로 채움(빈 껍데기 + 거짓완료 방지). 하트비트로 안 끊김.
+  // 연속완성 패스(R2: Task/Progress 원장 + 재계획) — 신규 풀빌드/화면작업은 한 번에 안 끝나고 스캐폴딩만 남기 쉬움. 갭이 줄어드는지(진척) 추적해서, 직전 패스가 진척이 없었으면(스톨) 같은 방식 반복 말고 접근을 바꿔 재계획. 진행기록은 job 원장에 남김.
   if ((newProject || uiish || (feedback[channel] || []).length) && !res.limited) {
-    for (let pass = 1; pass <= 3 && !workCancel[channel]; pass++) {
+    let prevGapCount = Infinity; const progress = [];
+    for (let pass = 1; pass <= 4 && !workCancel[channel]; pass++) { // 재계획 여지로 3→4
       bumpWork(channel);
       const gaps = await checkAppGaps(dir);
-      const fbCont = drainFeedback(channel); // 메인 생성 도중 들어온 사용자 피드백("그거 빼고/바꿔")을 이 패스에서 실제로 반영 — "반영할게" 약속 지키기
-      if (!gaps.length && !fbCont) break; // 화면/핵심 갖춰지고 반영할 피드백도 없음 → 멈춤
-      prog.phase(fbCont ? `방금 준 피드백 반영하는 중 (${pass}차)` : `아직 비어서 더 채우는 중 (${pass}차)`);
-      const cont = await runClaude(`이 저장소를 더 다듬어라.${gaps.length ? ` 특히 지금 비어있는 것: ${gaps.join(' / ')} — 데모·플레이스홀더·로렘입숨·"TODO" 금지로 실제 화면(라우트 page)·컴포넌트·핵심 플로우를 끝까지 만들어라.` : ''}${fbCont ? `\n\n[사용자가 방금 추가로 준 지시 — 반드시 그대로 반영]\n${fbCont}` : ''}\n\n이미 있는 서버/타입은 활용하고 npm run build 통과 유지.${prd ? '\n\n[따라야 할 PRD]\n' + prd.slice(0, 5000) : ''}`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000, true);
+      const fbCont = drainFeedback(channel); // 메인 생성 도중 들어온 사용자 피드백("그거 빼고/바꿔")을 이 패스에서 실제로 반영
+      if (!gaps.length && !fbCont) { progress.push(`${pass - 1}차 후 갭 없음 → 완료`); break; }
+      const stalled = gaps.length && gaps.length >= prevGapCount; // 직전 패스가 갭을 못 줄임 = 진척 없음
+      prevGapCount = gaps.length;
+      progress.push(`${pass}차: 갭 ${gaps.length}개${stalled ? '(진척없음→재계획)' : ''}${fbCont ? '+피드백' : ''}`);
+      jobUpdate(channel, { ledger: { plan: prd ? 'PRD 기반 빌드' : task.slice(0, 80), gaps, progress: progress.slice(-6) } });
+      prog.phase(stalled ? `접근 바꿔서 다시 (${pass}차)` : fbCont ? `방금 준 피드백 반영 (${pass}차)` : `아직 비어서 더 채우는 중 (${pass}차)`);
+      const replanNote = stalled ? '\n\n[중요 — 재계획] 직전 시도가 진척이 없었어(같은 게 여전히 비어있음). 똑같은 방식 반복하지 마. 왜 안 됐는지 코드를 직접 보고 원인을 짚은 다음, 다른 접근(다른 파일 구조/다른 구현 방식)으로 실제로 끝까지 구현해라.' : '';
+      const cont = await runClaude(`이 저장소를 더 다듬어라.${gaps.length ? ` 특히 지금 비어있는 것: ${gaps.join(' / ')} — 데모·플레이스홀더·로렘입숨·"TODO" 금지로 실제 화면(라우트 page)·컴포넌트·핵심 플로우를 끝까지 만들어라.` : ''}${replanNote}${fbCont ? `\n\n[사용자가 방금 추가로 준 지시 — 반드시 그대로 반영]\n${fbCont}` : ''}\n\n이미 있는 서버/타입은 활용하고 npm run build 통과 유지.${prd ? '\n\n[따라야 할 PRD]\n' + prd.slice(0, 5000) : ''}`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000, true);
       if (cont.limited) { await postAs(client, channel, thread_ts, LEAD, '⏳ 이어서 채우다가 한도에 걸렸어. 지금까지 만든 만큼만 올릴게, 리셋되면 "이어서"라고 해줘.'); break; }
     }
   }
@@ -861,7 +867,7 @@ function jobBoard(channel) {
   const mine = Object.values(jobs).filter(j => j.channel === channel).sort((a, b) => b.id - a.id).slice(0, 12);
   if (!mine.length) return '아직 기록된 작업이 없어.';
   const icon = { running: '🔵', 'awaiting-approval': '🟡', done: '✅', failed: '❌', interrupted: '⚠️', limited: '⏳', cancelled: '⏹️', planning: '📝' };
-  const fmt = j => { const m = Math.round((j.updatedAt - j.createdAt) / 60000); return `${icon[j.status] || '•'} #${j.id} [${j.status}] ${j.type} · ${j.title}${j.repo ? ' (' + j.repo.split('/').pop() + ')' : ''}${m ? ' ·' + m + '분' : ''}${j.artifacts && j.artifacts.length ? '\n   ↳ ' + j.artifacts.join(' ') : ''}`; };
+  const fmt = j => { const m = Math.round((j.updatedAt - j.createdAt) / 60000); const led = j.ledger && j.ledger.progress && j.ledger.progress.length ? '\n   📝 ' + j.ledger.progress[j.ledger.progress.length - 1] : ''; return `${icon[j.status] || '•'} #${j.id} [${j.status}] ${j.type} · ${j.title}${j.repo ? ' (' + j.repo.split('/').pop() + ')' : ''}${m ? ' ·' + m + '분' : ''}${led}${j.artifacts && j.artifacts.length ? '\n   ↳ ' + j.artifacts.join(' ') : ''}`; };
   return '📋 작업 현황 (최근 12개)\n' + mine.map(fmt).join('\n');
 }
 
