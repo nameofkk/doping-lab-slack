@@ -1106,7 +1106,7 @@ async function handle(event, client) {
     if ((tm = raw.match(/^태스크\s*추가\s*[:：]?\s*([\s\S]+)/))) { const t = addTask(channel, tm[1].trim(), event.user); await postAs(client, channel, thread_ts, LEAD, `📌 태스크 추가 (#${t.id}): ${t.text}`); return; }
     if (/^태스크\s*(목록|보드|리스트)/.test(raw)) { const l = tasks[channel] || []; await postAs(client, channel, thread_ts, LEAD, l.length ? '📋 할 일 보드:\n' + l.map(t => `#${t.id} [${t.done ? '완료' : '진행'}] ${t.text}`).join('\n') : '등록된 태스크가 없어.'); return; }
     // R1: 봇 작업 현황 보드 (자동 추적 — 지금 뭐 돌고 있는지, 뭐 끝났는지, 재시작에 끊긴 건 뭔지)
-    if (/^(작업\s*현황|진행\s*상황|작업\s*보드|jobs?|작업\s*목록|뭐\s*(하는|돌)|현황)\b/i.test(raw) || /^(작업|진행)\s*어때/.test(raw)) { await postAs(client, channel, thread_ts, LEAD, jobBoard(channel)); return; }
+    if ((/^(작업\s*현황|진행\s*상황|작업\s*보드|작업\s*목록|작업\s*리스트|jobs?|지금\s*뭐\s*(하|돌)|뭐\s*(하는\s*중|돌아가))/i.test(raw) || /^(작업|진행)\s*(어때|있어|중이야)/.test(raw)) && !/(만들|짜줘|짜봐|추가|구현|개발|보고서|작성)/.test(raw)) { await postAs(client, channel, thread_ts, LEAD, jobBoard(channel)); return; }
     if ((tm = raw.match(/^태스크\s*완료\s*(\d+)/))) { const t = (tasks[channel] || []).find(x => x.id === parseInt(tm[1])); if (t) { t.done = true; persistTasks(); await postAs(client, channel, thread_ts, LEAD, `#${tm[1]} 완료 처리했어.`); } else await postAs(client, channel, thread_ts, LEAD, '그 태스크 못 찾겠어.'); return; }
     if ((tm = raw.match(/^태스크\s*삭제\s*(\d+)/))) { tasks[channel] = (tasks[channel] || []).filter(x => x.id !== parseInt(tm[1])); persistTasks(); await postAs(client, channel, thread_ts, LEAD, `#${tm[1]} 삭제했어.`); return; }
     // 배포 — 특정/직전 레포를 Railway에 다시 올림 (단, 고치고/만들고 같은 작업 의도가 있으면 여기서 안 잡고 작업으로 보냄)

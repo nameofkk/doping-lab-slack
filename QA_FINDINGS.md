@@ -260,3 +260,7 @@ test specified) 판별해 안 돌림.
 - 구현: jobs 스토어(/data/jobs.json 영속, 최근200개). createJob/jobUpdate/ensureJob/endJob. work/build/report/debate 라이프사이클 훅 — 생성 시 running, 종료 시 정확한 상태(done/awaiting-approval/limited/cancelled/failed/변경없음). 재시작 시 running/planning→interrupted(awaiting-approval=PR대기는 유지). 슬랙 "작업현황/진행상황/jobs"로 최근 12개 조회(아이콘·타입·경과·산출물링크).
 - 효과: 지금 뭐 돌고 끝났는지 실패했는지 재시작에 끊겼는지 한눈에. R2~R5의 토대(원장·resume·계획승인이 이 job 레코드에 얹힘).
 - 검증: node --check 통과, createJob/상태전이/재시작 interrupt/보드출력 시뮬 정상.
+
+### R1-fix: 작업현황 명령 한글 미매칭( 워드경계 버그)
+- 테스트로 발견: 끝의 가 ASCII 기준이라 한글 "현황" 뒤 경계 없어 매칭 실패 → 작업현황/진행상황/작업보드/작업목록 전부 안 먹히고 "jobs"만 됐음.
+- 수정:  제거, 시작앵커+구체구문, 빌드동사(만들/짜/추가/보고서) 동반 시 제외(오발동 방지). 테스트 12케이스 전부 통과.
