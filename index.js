@@ -154,6 +154,9 @@ function commandMenuText() {
     '• `헬스체크` · `서비스 목록` · `서비스 등록 <레포> <url>`',
     '• `운영 브리핑` — 종합 진단 · `운영 리포트` — 사용량/성공률',
     '',
+    '📈 *사업(비즈니스)*',
+    '• `사업 지표` — 실수치(가입·활동·구독자) · `사업 메트릭 등록 <레포> <url>`',
+    '',
     '🤖 *자율(오토파일럿)*',
     '• `오토파일럿 켜` / `끄` / `상태` — 위험도별 자동실행',
     '• `개선 제안` — 운영 개선 · `자기개선` — 봇 자체 개선',
@@ -1274,6 +1277,47 @@ function svcTrend(s) {
   }
   return '';
 }
+// ── Phase A1: 사업 메트릭 수집 — 서비스 자체 stats 엔드포인트(키 0 또는 👤 토큰)에서 실수치 curl→JSON→일별 history. 추정 아님, 실데이터만. ──
+const BIZ_FILE = process.env.BIZ_FILE || '/data/biz.json';
+let bizData = {}; // bizData[repo] = { repo, sources:[{name,url,authHeader?}], history:[{day, metrics:{"src.field":num}}] }
+function loadBiz() { try { if (fs.existsSync(BIZ_FILE)) bizData = JSON.parse(fs.readFileSync(BIZ_FILE, 'utf8')) || {}; } catch { bizData = {}; } seedBizDefaults(); }
+function persistBiz() { try { fs.writeFileSync(BIZ_FILE, JSON.stringify(bizData)); } catch {} }
+// 확인된 공개 엔드포인트 기본 시드(키 0) — wewantpeace는 바로 동작
+function seedBizDefaults() {
+  const wwp = 'nameofkk/wewantpeace';
+  if (!bizData[wwp]) bizData[wwp] = { repo: wwp, sources: [{ name: 'platform', url: 'https://api.wewantpeace.live/public/stats' }, { name: 'newsletter', url: 'https://api.wewantpeace.live/newsletter/stats' }], history: [] };
+}
+function registerBizSource(repo, url, name, authHeader) {
+  if (!repo || !url) return false;
+  const b = bizData[repo] = bizData[repo] || { repo, sources: [], history: [] };
+  const ex = b.sources.find(s => s.url === url || s.name === name);
+  if (ex) { ex.url = url; if (authHeader) ex.authHeader = authHeader; } else b.sources.push({ name: name || ('src' + (b.sources.length + 1)), url, ...(authHeader ? { authHeader } : {}) });
+  persistBiz(); return true;
+}
+// 숫자 필드만 평탄화(시크릿/문자열 제외) — "src.field": number
+function flattenNums(obj, prefix, out) { for (const k of Object.keys(obj || {})) { const v = obj[k]; const key = prefix ? prefix + '.' + k : k; if (typeof v === 'number' && isFinite(v)) out[key] = v; else if (v && typeof v === 'object' && !Array.isArray(v)) flattenNums(v, key, out); } return out; }
+async function bizFetch(repo) {
+  const b = bizData[repo]; if (!b || !b.sources.length) return null;
+  const metrics = {};
+  for (const src of b.sources) {
+    try {
+      const hdr = src.authHeader ? `-H ${JSON.stringify(src.authHeader)}` : '';
+      const r = await sh(`curl -s --max-time 15 ${hdr} '${String(src.url).replace(/'/g, '')}'`);
+      let j = null; try { j = JSON.parse((r.out || '').trim()); } catch {}
+      if (j && typeof j === 'object') flattenNums(j, src.name, metrics);
+    } catch {}
+  }
+  if (!Object.keys(metrics).length) return null;
+  const day = kstNow().day;
+  const hist = b.history = b.history || [];
+  const todayIdx = hist.findIndex(h => h.day === day);
+  if (todayIdx >= 0) hist[todayIdx] = { day, metrics, at: Date.now() }; else hist.push({ day, metrics, at: Date.now() });
+  if (hist.length > 60) b.history = hist.slice(-60); // 60일 롤링
+  persistBiz();
+  try { log('info', 'biz-fetch', { repo, fields: Object.keys(metrics).length }); } catch (_) {}
+  return metrics;
+}
+function bizLatest(repo) { const b = bizData[repo]; const h = b && b.history && b.history[b.history.length - 1]; return h ? h.metrics : null; }
 // 운영 헬스체크 — 각 라이브 서비스 curl로 상태 확인 → 우정잉(QA/SRE)이 보고, 다운이면 윈터가 알림
 async function checkServices(client, channel, announce = true, onlyAlert = false) {
   const sre = byName('윈터') || LEAD; // 운영·헬스체크 = 인프라
@@ -1819,6 +1863,18 @@ async function handle(event, client) {
       checkServices(client, channel).catch(e => postAs(client, channel, thread_ts, LEAD, '점검 오류: ' + String(e).slice(0, 200)));
       return;
     }
+    // A1: 사업 메트릭 소스 등록 — 서비스 stats 엔드포인트(실수치). "사업 메트릭 등록 wewantpeace https://api.../public/stats [이름] [헤더]"
+    { const bm = raw.replace(/<(https?:\/\/[^>|]+)(\|[^>]*)?>/g, '$1').match(/^사업\s*(?:메트릭|지표)\s*(?:등록|추가)\s+(\S+)\s+(https?:\/\/\S+)\s*(\S+)?\s*(.+)?$/i);
+      if (bm) { const rsv = extractRepo(bm[1]); const repoKey = (rsv && !rsv.startsWith('alias:')) ? rsv : resolveRepo(bm[1]); registerBizSource(repoKey, bm[2].replace(/[)>,]+$/, ''), bm[3], bm[4]); logDecision(channel, 'biz-source', `${repoKey} ← ${bm[2]}`); const got = await bizFetch(repoKey); await postAs(client, channel, thread_ts, byName('김채원') || LEAD, `📈 사업 메트릭 소스 등록했어: ${repoKey.split('/').pop()}\n${got ? '바로 긁어왔어 — ' + Object.entries(got).slice(0, 6).map(([k, v]) => `${k}=${v}`).join(' · ') : '근데 지금 수치를 못 받았어(URL/인증 확인). "사업 지표"로 재시도.'}`); return; } }
+    // A1: 사업 지표 조회 — 실수치 fetch + 표시 (지어내기 0)
+    if (/^사업\s*지표\s*(\S+)?\s*\??$/.test(raw)) {
+      const m = raw.match(/^사업\s*지표\s*(\S+)/); const targetRepo = m && m[1] ? (extractRepo(m[1]) && !extractRepo(m[1]).startsWith('alias:') ? extractRepo(m[1]) : resolveRepo(m[1])) : null;
+      const repos = targetRepo ? [targetRepo] : Object.keys(bizData);
+      if (!repos.length) { await postAs(client, channel, thread_ts, LEAD, '아직 등록된 사업 메트릭 소스가 없어. "사업 메트릭 등록 <레포> <stats_url>"로 올려줘. (wewantpeace는 기본 시드돼 있어 — "사업 지표"로 바로 확인)'); return; }
+      const lines = [];
+      for (const rp of repos) { const got = await bizFetch(rp); const cur = got || bizLatest(rp); lines.push(`*${rp.split('/').pop()}*\n` + (cur ? Object.entries(cur).map(([k, v]) => `· ${k}: ${typeof v === 'number' ? v.toLocaleString() : v}`).join('\n') : '_(수치 못 받음 — URL/인증 확인)_')); }
+      await postAs(client, channel, thread_ts, byName('김채원') || LEAD, '📈 사업 지표 (실데이터)\n' + lines.join('\n\n')); return;
+    }
     // 사용량/번레이트 (오늘 Claude 호출·토큰·한도걸림)
     if (/(사용량|번레이트|토큰.*얼마|클로드.*사용|usage)/.test(raw) && !/운영|리포트|report/.test(raw)) {
       await postAs(client, channel, thread_ts, LEAD, `오늘 우리 사용량이야.\n호출 ${usageStat.calls}회 · 출력토큰 약 ${usageStat.outTokens.toLocaleString()} · 한도걸림 ${usageStat.limitedHits}번.${usageStat.limitedHits ? ' 한도 자주 걸리면 팀원 모델 sonnet 유지하거나 작업 텀을 두자.' : ''}`);
@@ -2130,7 +2186,7 @@ async function postButtons(channel, thread_ts, buttons) {
   loadMemory();
   loadRules();
   loadSettings();
-  loadTasks(); loadJobs(); loadFacts(); loadSkills(); buildMcpConfig(); loadDecisions(); loadUsage();
+  loadTasks(); loadJobs(); loadFacts(); loadSkills(); buildMcpConfig(); loadDecisions(); loadUsage(); loadBiz();
   loadLastRepo();
   loadServices();
   loadPending();
