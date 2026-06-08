@@ -1159,6 +1159,15 @@ async function guardrailCheck(task) {
     return o.verdict === 'refuse' ? o : { verdict: 'proceed' };
   } catch { return { verdict: 'proceed' }; }
 }
+// #2(리서치 최고레버리지): 의도-행동 일치 체크 — 위험·비가역 행동 직전, 별도 LLM이 "사용자가 말한 것"과 "내가 하려는 행동"이 맞는지만 판정. 정규식이 못 잡는 의도 오해(스펙 속 시각 등)를 일반적으로 잡음. 모델 확신도가 아니라 *불일치* 신호로 트리거(과신 회피). 실패 시 진행(가용성).
+async function intentActionCheck(message, actionDesc) {
+  try {
+    const r = await runClaude(`사용자 메시지와 내가 막 실행하려는 행동이 일치하는지만 판정해. JSON만, 설명 금지.\n사용자: ${JSON.stringify(String(message).slice(0, 400))}\n내가 하려는 행동: ${JSON.stringify(String(actionDesc).slice(0, 200))}\n\n{"verdict":"MATCH|MISMATCH|UNSURE","ask":"MISMATCH나 UNSURE면 사용자에게 물을 한 줄(두 해석을 가르는 질문), MATCH면 빈 문자열"}\n기준: 행동이 사용자가 진짜 원한 것과 정확히 맞으면 MATCH. 어긋나거나(예: 일회성 요청을 반복 스케줄로, 기존 프로젝트 수정을 새 프로젝트 생성으로) 두 해석이 갈리면 MISMATCH/UNSURE. 메시지에 든 시각·날짜가 '스케줄 지시'인지 '기능 스펙'인지 특히 주의.`, 'haiku');
+    const m = (r.text || '').match(/\{[\s\S]*\}/);
+    const o = m ? JSON.parse(m[0]) : { verdict: 'MATCH' };
+    return ['MATCH', 'MISMATCH', 'UNSURE'].includes(o.verdict) ? o : { verdict: 'MATCH' };
+  } catch { return { verdict: 'MATCH' }; }
+}
 async function startWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName) {
   // 이미 질문 던져놓고 답 기다리는 중이면 똑같은 질문 또 안 함 (같은 요청 재전송 시 무한 질문 방지)
   if (pendingProject[channel]) { await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}아까 물어본 거에 답해주면 바로 들어갈게. 알아서 정해도 되면 "알아서 해"라고 해도 돼.`); return; }
@@ -1167,6 +1176,11 @@ async function startWork(client, channel, thread_ts, repo, task, newProject, for
   // R4: 무거운 작업 전 안전·범위 가드 (파괴적·악의적·범위밖 차단) — LLM 보조 스크린(fail-open)
   const guard = await guardrailCheck(task);
   if (guard.verdict === 'refuse') { await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}이건 못 해줘 — ${guard.reason || '안전·범위 밖 요청'}. 코드 제작·수정·조사·배포 쪽으로 다시 말해줘.`); return; }
+  // #2: 새 프로젝트 생성은 비용 큰 비가역 행동 — 정말 새로 만드는 게 맞는지(기존 레포 수정 오인 아닌지) 의도-행동 일치 체크. 어긋나면 한 줄 묻고 멈춤(active disambiguation).
+  if (newProject) {
+    const iac = await intentActionCheck(task, '기존 레포 수정이 아니라, 새 프로젝트/레포(새 깃허브 저장소)를 처음부터 새로 생성');
+    if (iac.verdict !== 'MATCH') { logDecision(channel, 'newproj-iac', `${iac.verdict}: ${String(task).slice(0, 50)}`); await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}${iac.ask || '이거 새로 만드는 거야, 아니면 기존 프로젝트를 고치는 거야?'}\n→ 새로면 "새로 만들어줘", 기존이면 "(레포이름) 고쳐줘"로 다시 말해줘.`); return; }
+  }
   // 기존 레포 작업·이어가기·완성은 질문 없이 바로 진행 (정체성/경로 같은 쓸데없는 재질문 마찰 제거). 질문은 방향이 크게 갈리는 '신규 제작'에서만.
   const qs = newProject ? await planQuestions(task, newProject) : [];
   if (qs.length) {
@@ -1513,7 +1527,15 @@ async function handle(event, client) {
       const base = { id, channel, label: taskText || raw, action: it.action, task: it.task, repo: it.repo, newProject: !!it.newProject, reporter };
       const s = daily ? { ...base, kind: 'daily', hour: daily.hour, minute: daily.minute } : { ...base, kind: 'interval', ms: ims };
       const when = daily ? `매일 ${daily.hour}시${daily.minute ? ' ' + daily.minute + '분' : ''} (KST)` : humanMs(ims);
-      // A: 이상행동 sanity-check — 반복 스케줄이 'work'(코드 변경)면 거의 다 실수(매일 같은 코드를 재실행). 조용히 등록하지 말고 확인받는다. report/유지보수는 정상이라 바로 등록.
+      // #2: 의도-행동 일치 체크 (LLM) — 정규식 게이트가 통과시켜도 "반복 스케줄 등록"이 진짜 의도와 맞는지 확인. 스펙 속 시각 오인을 일반적으로 방어.
+      const iac = await intentActionCheck(raw, `이 요청을 "${when}"마다 자동 반복 실행하는 스케줄로 등록`);
+      if (iac.verdict !== 'MATCH') {
+        pendingSchedule[channel] = { s, when, at: Date.now() };
+        logDecision(channel, 'schedule-iac', `의도불일치(${iac.verdict}) → 확인: "${s.label}"`);
+        await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}${iac.ask || `이거 "${when}"마다 반복하는 스케줄로 등록할까, 한 번만 할까?`}\n• 반복이면 "스케줄 등록" • 한 번만이면 "1회만" • 아니면 "취소"`);
+        return;
+      }
+      // A: 결정론적 백스톱 — 반복 스케줄이 'work'(코드 변경)면(LLM이 MATCH라 해도) 확인. report/유지보수는 바로 등록.
       if (it.action === 'work') {
         pendingSchedule[channel] = { s, when, at: Date.now() };
         logDecision(channel, 'schedule-confirm', `반복 코드변경 스케줄 의심 → 확인요청: "${s.label}" (${when})`);
