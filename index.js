@@ -361,25 +361,31 @@ async function extractActionItems(conclusion) {
     return Array.isArray(arr) ? arr.filter(x => x && x.task && ['investigate', 'build', 'human'].includes(x.kind)).slice(0, 8) : [];
   } catch { return []; }
 }
-// 승인된 액션아이템 실제 실행 — 조사는 한 번에 묶어 read-only 리포트로, 코드수정은 PR로(또 승인받게). 사람만 항목은 건너뜀.
-async function dispatchActionItems(client, channel, thread_ts, repo, items) {
-  const investigates = items.filter(x => x.kind === 'investigate');
-  const builds = items.filter(x => x.kind === 'build');
-  if (!investigates.length && !builds.length) { await postAs(client, channel, thread_ts, LEAD, '코드로 착수할 수 있는 건 없네. 나머진 사람이 해야 하는 거야(계정·심사 등).'); return; }
-  activeWork[channel] = { task: '액션아이템 실행 ' + repo, started: Date.now(), beat: Date.now(), repo };
+// 승인된 액션아이템 실제 실행 — 아이템별 repo 지원(여러 서비스 섞인 제안). 조사는 묶어 read-only 리포트, 코드수정은 PR로.
+async function dispatchActionItems(client, channel, thread_ts, defaultRepo, items) {
+  const byRepo = {}; for (const it of items) { if (it.kind === 'human') continue; const r = it.repo || defaultRepo; (byRepo[r] = byRepo[r] || []).push(it); }
+  const repos = Object.keys(byRepo).filter(Boolean);
+  if (!repos.length) { await postAs(client, channel, thread_ts, LEAD, '코드로 착수할 수 있는 건 없네. 나머진 사람이 해야 하는 거야(계정·심사 등).'); return; }
+  activeWork[channel] = { task: '액션아이템 실행', started: Date.now(), beat: Date.now() };
   try {
-    if (investigates.length) {
-      const combined = '팀이 "확인 필요"라고 한 것들을 레포 코드로 직접 확인해서 사실로 답해라(추측 금지, 코드 근거로):\n' + investigates.map((x, i) => `${i + 1}. ${x.task}`).join('\n');
-      await postAs(client, channel, thread_ts, LEAD, `🔍 조사 ${investigates.length}건 한 번에 까볼게.`);
-      await runReport(client, channel, thread_ts, byName('우정잉') || LEAD, repo, combined);
+    for (const repo of repos) {
+      const its = byRepo[repo]; const investigates = its.filter(x => x.kind === 'investigate'); const builds = its.filter(x => x.kind === 'build');
+      if (!investigates.length && !builds.length) continue;
+      if (repos.length > 1) await postAs(client, channel, thread_ts, LEAD, `■ ${repo.split('/').pop()}`);
+      activeWork[channel].repo = repo;
+      if (investigates.length) {
+        const combined = '팀이 "확인 필요"라고 한 것들을 레포 코드로 직접 확인해서 사실로 답해라(추측 금지, 코드 근거로):\n' + investigates.map((x, i) => `${i + 1}. ${x.task}`).join('\n');
+        await postAs(client, channel, thread_ts, LEAD, `조사 ${investigates.length}건 까볼게.`);
+        await runReport(client, channel, thread_ts, byName('우정잉') || LEAD, repo, combined);
+      }
+      for (const b of builds.slice(0, 3)) {
+        if (workCancel[channel]) { delete workCancel[channel]; break; }
+        bumpWork(channel);
+        await postAs(client, channel, thread_ts, LEAD, `코드작업: ${b.task} — PR로 올릴게(머지는 네가).`);
+        await runWork(client, channel, thread_ts, repo, b.task, false, true); // forcePR
+      }
+      if (builds.length > 3) await postAs(client, channel, thread_ts, LEAD, `${repo.split('/').pop()} 코드작업 ${builds.length}개 중 3개만 했어. 나머진 "작업: ..."로.`);
     }
-    for (const b of builds.slice(0, 3)) {
-      if (workCancel[channel]) { delete workCancel[channel]; break; }
-      bumpWork(channel);
-      await postAs(client, channel, thread_ts, LEAD, `🛠️ 코드작업: ${b.task} — PR로 올릴게(머지는 네가).`);
-      await runWork(client, channel, thread_ts, repo, b.task, false, true); // forcePR — 승인(머지) 거쳐 반영
-    }
-    if (builds.length > 3) await postAs(client, channel, thread_ts, LEAD, `코드작업 ${builds.length}개 중 3개만 했어. 나머진 "작업: ..."로 시켜줘.`);
     await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}액션아이템 실행 끝. 조사 결과·PR 위에서 확인해줘.`);
   } catch (e) { await postAs(client, channel, thread_ts, LEAD, '실행 중 오류: ' + String(e).slice(0, 200)); }
   finally { activeWork[channel] = null; }
@@ -408,7 +414,7 @@ async function proposeOrAuto(client, channel, repo, items, headerLine) {
   }
   // 오토파일럿 ON → 티어 분기
   const n = kstNow(); if (apBuildDay !== n.day) { apBuildDay = n.day; apBuildCount = 0; }
-  const tiered = items.map(x => ({ x, t: apTier(x.kind, repo, x.task) }));
+  const tiered = items.map(x => ({ x, t: apTier(x.kind, x.repo || repo, x.task) }));
   const autoInv = tiered.filter(z => z.t === 'auto').map(z => z.x);
   let autoBuild = tiered.filter(z => z.t === 'auto-build').map(z => z.x);
   const gated = tiered.filter(z => z.t === 'gate' || z.t === 'block').map(z => z.x);
@@ -1483,21 +1489,21 @@ async function runBizGrowth(client, channel, manual = false) {
   if (!manual && Date.now() - bizGrowthAt < 6 * 86400000) return; bizGrowthAt = Date.now();
   if (!channel) return;
   try {
+    startTyping(channel); // 생성 동안 스피너
+    const allItems = []; // 서비스별 아이템을 한 제안으로 합침(각 아이템에 repo 부착 → 버튼 충돌 방지)
     for (const rp of Object.keys(bizData)) {
       const cur = await bizFetch(rp); const m = cur || bizLatest(rp); if (!m) continue;
       const name = rp.split('/').pop(); const sc = bizScorecard(rp); const availKeys = Object.keys(m).filter(k => typeof m[k] === 'number');
       const prod = BIZ_PRODUCT[rp] ? `\n제품: ${BIZ_PRODUCT[rp]}` : '';
-      startTyping(channel); // 생성 동안 스피너
       const out = await runClaude(`너는 "${name}" 그로스 책임자다.${prod}\n아래 사업 스코어카드를 보고, 지금 하면 효과 클 그로스 실험 1~2개를 제안해라. 각 실험은 반드시 "어떤 지표를 올리려는지(타겟)"가 명확하고, 측정 가능하면 아래 키 중 하나를 target_key로.${UNTRUSTED_PREAMBLE}\n${wrapUntrusted(sc)}\n\n측정가능 타겟키(이 중 하나 또는 null): ${availKeys.join(', ') || '(없음)'}\n\nJSON만: {"experiments":[{"focus":"한줄 요약","target_key":"위 키중 하나 or null","hypothesis":"이걸 하면 ~될 거란 가설","action":{"task":"구체적으로 뭘 할지 한 문장","kind":"investigate|build"}}]}. 데이터 근거로만, 측정갭 메우기(계측 추가)도 좋은 실험.`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 150000);
-      const mm = (out.text || '').match(/\{[\s\S]*\}/); if (!mm) { stopTyping(channel); continue; }
-      let obj; try { obj = JSON.parse(mm[0]); } catch { stopTyping(channel); continue; }
-      const exps = (obj.experiments || []).slice(0, 2); const items = [];
-      for (const e of exps) { if (!e || !e.action || !e.action.task) continue; const tk = (e.target_key && e.target_key !== 'null') ? e.target_key : null; const eid = addExperiment(rp, e.focus, tk, e.hypothesis); const tgtLabel = tk ? (BIZ_LABELS[tk] ? BIZ_LABELS[tk].ko : tk) : (e.focus || '지표'); items.push({ who: '그로스', task: `[실험#${eid}] ${e.action.task} (타겟: ${tgtLabel} / 가설: ${String(e.hypothesis || '').slice(0, 60)})`, kind: ['investigate', 'build'].includes(e.action.kind) ? e.action.kind : 'investigate' }); }
-      if (!items.length) { stopTyping(channel); if (manual) await postAs(client, channel, undefined, byName('김채원') || LEAD, `${name}: 지금 데이터로 뽑을 그로스 실험이 마땅찮아. 측정 갭부터 메우자("사업 브리핑" 참고).`); continue; }
-      log('info', 'biz-growth', { repo: rp, n: items.length });
-      await proposeOrAuto(client, channel, resolveRepo(rp), items, `그로스 실험 제안 — ${name} (승인하면 착수, 효과는 다음 측정에서 baseline 대비 비교)`); // postAs가 스피너 정리
+      const mm = (out.text || '').match(/\{[\s\S]*\}/); if (!mm) continue;
+      let obj; try { obj = JSON.parse(mm[0]); } catch { continue; }
+      for (const e of (obj.experiments || []).slice(0, 2)) { if (!e || !e.action || !e.action.task) continue; const tk = (e.target_key && e.target_key !== 'null') ? e.target_key : null; const eid = addExperiment(rp, e.focus, tk, e.hypothesis); const tgtLabel = tk ? (BIZ_LABELS[tk] ? BIZ_LABELS[tk].ko : tk) : (e.focus || '지표'); allItems.push({ who: '그로스', repo: resolveRepo(rp), task: `[${name}·실험#${eid}] ${e.action.task} (타겟: ${tgtLabel} / 가설: ${String(e.hypothesis || '').slice(0, 60)})`, kind: ['investigate', 'build'].includes(e.action.kind) ? e.action.kind : 'investigate' }); }
     }
-  } catch (e) { try { log('error', 'biz-growth-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
+    if (!allItems.length) { stopTyping(channel); if (manual) await postAs(client, channel, undefined, byName('김채원') || LEAD, '지금 데이터로 뽑을 그로스 실험이 마땅찮아. 측정 갭부터 메우자("사업 브리핑" 참고).'); return; }
+    log('info', 'biz-growth', { n: allItems.length });
+    await proposeOrAuto(client, channel, allItems[0].repo, allItems, '그로스 실험 제안 (승인하면 착수, "실행 1,3"으로 골라도 됨. 효과는 다음 측정에서 baseline 대비 비교)'); // 한 제안으로 — 아이템별 repo
+  } catch (e) { try { stopTyping(channel); log('error', 'biz-growth-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
 }
 // 운영 헬스체크 — 각 라이브 서비스 curl로 상태 확인 → 우정잉(QA/SRE)이 보고, 다운이면 윈터가 알림
 async function checkServices(client, channel, announce = true, onlyAlert = false) {
