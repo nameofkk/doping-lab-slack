@@ -62,7 +62,7 @@ const LEAD = { name: '한로로 (팀장)', kw: ['한로로','로로','팀장'], 
   prompt: '너는 도핑연구소 팀장이고 이름은 한로로다(최상위 모델). 진솔하고 본질을 짚는 스타일로 팀을 이끈다. 질문엔 직접 답하고, 기획 토론을 종합할 땐 목적·핵심기능·리스크 대응·다음 액션으로 정리한다.' };
 
 // 모든 발언에 적용되는 말투/가독성 규칙
-const STYLE = '\n\n[말투 규칙] 실제 한국 여성이 친한 동료랑 메신저로 편하게 수다 떨듯 자연스러운 구어체로 써라. 무조건 반말로 일관되게 써라 — 존댓말(~요, ~습니다, ~에요)을 절대 섞지 마라(한 메시지 안에서 반말/존댓말 왔다갔다 금지). 딱딱한 문어체나 설명조, 번역투 금지. 대시 기호(—, –, ㅡ, -)는 절대 쓰지 마라. 끊고 싶으면 문장을 나누거나 쉼표나 줄바꿈으로 해라. AI 티 나는 말투(도와드릴 수 있어요, ~에 대해 말씀드리면, 불필요한 사과나 안내) 금지. 마크다운 볼드 별표(**)나 머리표(#)도 쓰지 마라. 핵심만 2~4문장으로 짧고 친근하게, 읽기 쉽게. 중요: 네 속생각이나 "이렇게 답하자, 솔직하게 말하고 넘어가자, 사용자 화났네" 같은 메타 서술·지문은 절대 쓰지 말고, 실제로 상대한테 할 말만 바로 해라.';
+const STYLE = '\n\n[말투 규칙] 실제 한국 여성이 친한 동료랑 메신저로 편하게 수다 떨듯 자연스러운 구어체로 써라. 무조건 반말로 일관되게 써라 — 존댓말(~요, ~습니다, ~에요)을 절대 섞지 마라(한 메시지 안에서 반말/존댓말 왔다갔다 금지). 딱딱한 문어체나 설명조, 번역투 금지. 대시 기호(—, –, ㅡ, -)는 절대 쓰지 마라. 끊고 싶으면 문장을 나누거나 쉼표나 줄바꿈으로 해라. AI 티 나는 말투(도와드릴 수 있어요, ~에 대해 말씀드리면, 불필요한 사과나 안내) 금지. 마크다운 볼드 별표(**)나 머리표(#)도 쓰지 마라. 이모지(그림문자)는 웬만하면 쓰지 마라 — 꼭 필요한 상태표시 아니면 텍스트로. 핵심만 2~4문장으로 짧고 친근하게, 읽기 쉽게. 중요: 네 속생각이나 "이렇게 답하자, 솔직하게 말하고 넘어가자, 사용자 화났네" 같은 메타 서술·지문은 절대 쓰지 말고, 실제로 상대한테 할 말만 바로 해라.';
 // 너희 자신에 대해 물으면 정직하게 답할 사실 (모델 등)
 const SELF = '\n\n[너에 대한 사실 — 물어보면 이것만 정직하게, 모르면 모른다고 해] 너는 도핑연구소 팀원이고 Claude Code(클코)를 구독 토큰으로 헤드리스 실행해서 돌아가. 팀장 한로로는 Claude Opus, 나머지 팀원들은 Claude Sonnet으로 동작해(사용량 한도 아끼려고 팀원은 sonnet, 팀장만 opus로 맞춰놨어). 메시지 의도분류는 haiku로 돌아. 이게 전부야. 중요: 한도가 왜 걸렸는지, 모델별 쿼터가 어떻게 나뉘는지, 인프라가 어떻게 도는지 같은 내부 동작은 네가 정확히 알 수 없는 거야. 그럴듯하게 추측해서 사실처럼 설명하지 마. 모르면 "그건 나도 정확힌 몰라"라고 솔직히 말해.';
 // 작업/조사 보고용 — 마크다운 금지 + 사람 말투 (길이는 제한 안 함)
@@ -1342,26 +1342,38 @@ const BIZ_LABELS = {
 function bizLabel(key, value) {
   const v = typeof value === 'number' ? value.toLocaleString() : value;
   const L = BIZ_LABELS[key];
-  if (L) return `${L.e || '·'} ${L.ko}: ${v}${L.unit || ''}`;
-  return `· ${key.split('.').pop().replace(/_/g, ' ')}: ${v}`; // 모르는 키 폴백
+  if (L) return `- ${L.ko}: ${v}${L.unit || ''}`;
+  return `- ${key.split('.').pop().replace(/_/g, ' ')}: ${v}`; // 모르는 키 폴백
 }
 // 마크다운 제거 — LLM이 **별표**·#헤더·-불릿 쓰면 슬랙에서 지저분. 사람 말투 평문으로.
 function deMd(t) { return String(t || '').replace(/\*\*(.+?)\*\*/g, '$1').replace(/(?<!\w)\*(?!\s)(.+?)(?<!\s)\*(?!\w)/g, '$1').replace(/^#{1,6}\s+/gm, '').replace(/^\s*[-*]\s+/gm, '• '); }
 // 운영자 스코어카드 — "봐야 할 모든 사업지표"를 AARRR로 정리. 연결된 건 값, 안 된 건 연결법. (지표가 적어 보이던 문제 해결)
 const BIZ_SCORECARD = [
-  { cat: '👥 획득', items: [{ ko: '총 회원수', keys: ['admin.total_users'], how: 'admin 토큰 연결' }, { ko: '오늘 신규가입', keys: ['admin.new_today'], how: 'admin 토큰' }] },
-  { cat: '⚡ 활성화', items: [{ ko: '활성화율(가입→첫 핵심행동)', keys: [], how: '가입·첫핵심행동 이벤트 계측' }, { ko: '푸시 알림 대상', keys: ['admin.push_tokens'], how: 'admin 토큰' }] },
-  { cat: '🔄 리텐션', items: [{ ko: '오늘 활성유저(DAU)', keys: ['admin.dau'], how: 'admin 토큰' }, { ko: 'D1/D7 리텐션', keys: [], how: '재방문 이벤트 계측' }, { ko: '최근 24시간 활동', keys: ['platform.events_24h', 'admin.events_today'], how: '' }] },
-  { cat: '💰 수익', items: [{ ko: '활성 구독자(유료)', keys: ['admin.subscribers'], how: 'admin 토큰' }, { ko: '이번달 매출', keys: ['admin.monthly_revenue'], how: 'admin 토큰' }, { ko: '무료→유료 전환율', keys: [], how: '결제·가입 이벤트 계측' }, { ko: 'LTV / LTV:CAC', keys: [], how: '매출+이탈+획득비 계측' }] },
-  { cat: '📣 추천', items: [{ ko: '뉴스레터 구독자', keys: ['newsletter.subscriber_count'], how: '' }, { ko: '공유·바이럴', keys: [], how: '공유 이벤트 계측' }] },
-  { cat: '⭐ 노스스타', items: [{ ko: '전달 가치(누적 이벤트/차단)', keys: ['platform.total_events', 'stats.total_blocks'], how: '' }, { ko: '활성 이슈/위기국가', keys: ['platform.active_clusters', 'admin.crisis_countries'], how: '' }] },
+  { cat: '[획득]', items: [{ ko: '총 회원수', keys: ['admin.total_users'], how: 'admin 토큰 연결' }, { ko: '오늘 신규가입', keys: ['admin.new_today'], how: 'admin 토큰' }] },
+  { cat: '[활성화]', items: [{ ko: '활성화율(가입→첫 핵심행동)', keys: [], how: '가입·첫핵심행동 이벤트 계측' }, { ko: '푸시 알림 대상', keys: ['admin.push_tokens'], how: 'admin 토큰' }] },
+  { cat: '[리텐션]', items: [{ ko: '오늘 활성유저(DAU)', keys: ['admin.dau'], how: 'admin 토큰' }, { ko: 'D1/D7 리텐션', keys: [], how: '재방문 이벤트 계측' }, { ko: '최근 24시간 활동', keys: ['platform.events_24h', 'admin.events_today'], how: '' }] },
+  { cat: '[수익]', items: [{ ko: '활성 구독자(유료)', keys: ['admin.subscribers'], how: 'admin 토큰' }, { ko: '이번달 매출', keys: ['admin.monthly_revenue'], how: 'admin 토큰' }, { ko: '무료→유료 전환율', keys: [], how: '결제·가입 이벤트 계측' }, { ko: 'LTV / LTV:CAC', keys: [], how: '매출+이탈+획득비 계측' }] },
+  { cat: '[추천]', items: [{ ko: '뉴스레터 구독자', keys: ['newsletter.subscriber_count'], how: '' }, { ko: '공유·바이럴', keys: [], how: '공유 이벤트 계측' }] },
+  { cat: '[노스스타]', items: [{ ko: '전달 가치(누적 이벤트/차단)', keys: ['platform.total_events', 'stats.total_blocks'], how: '' }, { ko: '활성 이슈/위기국가', keys: ['platform.active_clusters', 'admin.crisis_countries'], how: '' }] },
 ];
-function bizScorecard(metrics) {
-  const m = metrics || {};
+// YYYYMMDD 두 날짜 간 일수
+function daysBetweenDay(a, b) { const p = d => new Date(Math.floor(d / 10000), Math.floor(d / 100) % 100 - 1, d % 100); return Math.round((p(b) - p(a)) / 86400000); }
+// 지표 변동 주석 — 비교기간을 스냅샷 간격에 맞춤(전일/전주/전달), 큰 변동은 [특이] 표시. 설명은 사업 브리핑(LLM)이.
+function bizChange(repo, key) {
+  const h = (bizData[repo] && bizData[repo].history) || []; if (h.length < 2) return '';
+  const cur = h[h.length - 1], pr = h[h.length - 2]; const cv = cur.metrics[key], pv = pr.metrics[key];
+  if (typeof cv !== 'number' || typeof pv !== 'number' || pv === cv) return '';
+  const gap = daysBetweenDay(pr.day, cur.day); const period = gap <= 1 ? '전일' : gap <= 10 ? '전주' : '전달';
+  const d = cv - pv, pct = pv ? Math.round(d / pv * 100) : null; const sign = d > 0 ? '+' : '';
+  const big = pct !== null && Math.abs(pct) >= 20;
+  return ` ← ${period} 대비 ${sign}${d.toLocaleString()}${pct !== null ? `(${sign}${pct}%)` : ''}${big ? ` [특이: ${d > 0 ? '급증' : '급감'}]` : ''}`;
+}
+function bizScorecard(repo) {
+  const m = bizLatest(repo) || {};
   return BIZ_SCORECARD.map(g => g.cat + '\n' + g.items.map(it => {
     const k = it.keys.find(kk => typeof m[kk] === 'number');
-    if (k != null) { const u = (BIZ_LABELS[k] && BIZ_LABELS[k].unit) || ''; return `  ✅ ${it.ko}: ${m[k].toLocaleString()}${u}`; }
-    return `  🔌 ${it.ko}: 미연결${it.how ? ` (${it.how})` : ''}`;
+    if (k != null) { const u = (BIZ_LABELS[k] && BIZ_LABELS[k].unit) || ''; return `  - ${it.ko}: ${m[k].toLocaleString()}${u}${bizChange(repo, k)}`; }
+    return `  - ${it.ko}: 미연결${it.how ? ` (${it.how})` : ''}`;
   }).join('\n')).join('\n');
 }
 // 지표별 추세(직전 스냅샷 대비 증감) 한 줄
@@ -1401,11 +1413,11 @@ async function runBizBriefing(client, channel, manual = false) {
       const metricsTxt = Object.entries(m).map(([k, v]) => `${(BIZ_LABELS[k] ? BIZ_LABELS[k].ko : k)}: ${v}${tr[k] ? ' ' + tr[k] : ''}`).join('\n');
       const name = rp.split('/').pop();
       const prod = BIZ_PRODUCT[rp] ? `\n[이 서비스가 뭐냐]\n${BIZ_PRODUCT[rp]}` : '';
-      const r = await runClaude(`너는 도핑연구소 사업 책임자(PM/그로스)다. 아래는 "${name}" 서비스 하나의 실제 사업 지표(직전 대비 추세 포함)다. 다른 서비스랑 섞지 말고 이 서비스만 분석해라.${prod}${UNTRUSTED_PREAMBLE}\n[${name} 지표]\n${wrapUntrusted(metricsTxt)}\n\n${BIZ_RUBRIC}\n\n친근한 한국어 반말로(절대 마크다운·별표(*)·#·영어약어남발 금지, 쉬운 말, 그냥 문장으로). 구성: ①지금 상태(AARRR 단계별, 있는 데이터만) ②눈에 띄는 변화 ③측정 갭(중요한데 안 보이는 지표+어떻게 계측) ④지금 하면 효과 클 개선 1~3개(각각 어떤 지표 올리려는지 타겟). 데이터에 없는 수치는 절대 지어내지 마.`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 180000);
+      const r = await runClaude(`너는 도핑연구소 사업 책임자(PM/그로스)다. 아래는 "${name}" 서비스 하나의 실제 사업 지표(직전 대비 추세 포함)다. 다른 서비스랑 섞지 말고 이 서비스만 분석해라.${prod}${UNTRUSTED_PREAMBLE}\n[${name} 지표]\n${wrapUntrusted(metricsTxt)}\n\n${BIZ_RUBRIC}\n\n친근한 한국어 반말로(절대 마크다운·별표(*)·#·이모지·영어약어남발 금지, 쉬운 말, 그냥 문장으로). 구성: 1)지금 상태(AARRR 단계별, 있는 데이터만) 2)눈에 띄는 변화·특이사항(전일/전주/전달 대비 변동 크면 왜 중요한지 설명) 3)측정 갭(중요한데 안 보이는 지표+어떻게 계측) 4)지금 하면 효과 클 개선 1~3개(각각 어떤 지표 올리려는지 타겟). 데이터에 없는 수치는 절대 지어내지 마.`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 180000);
       const text = deMd((r.text || '').trim()) || '(이 서비스 브리핑 생성 실패 — 데이터부족/한도)';
       log('info', 'biz-briefing', { manual, repo: rp });
-      if (channel) await postAs(client, channel, undefined, byName('김채원') || LEAD, `📈 사업 브리핑 — ${name}\n${text}`);
-      if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: `📈 사업 브리핑 — ${name}\n${scrubOutput(text)}` }).catch(() => {});
+      if (channel) await postAs(client, channel, undefined, byName('김채원') || LEAD, `사업 브리핑 — ${name}\n${text}`);
+      if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: `사업 브리핑 — ${name}\n${scrubOutput(text)}` }).catch(() => {});
     }
     if (!any && manual) await postAs(client, channel, undefined, LEAD, '지금 사업 수치를 못 받았어(서비스 stats URL/인증 확인). "사업 지표"로 점검해줘.');
   } catch (e) { try { log('error', 'biz-briefing-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
@@ -1957,15 +1969,15 @@ async function handle(event, client) {
     }
     // A1: 사업 메트릭 소스 등록 — 서비스 stats 엔드포인트(실수치). "사업 메트릭 등록 wewantpeace https://api.../public/stats [이름] [헤더]"
     { const bm = raw.replace(/<(https?:\/\/[^>|]+)(\|[^>]*)?>/g, '$1').match(/^사업\s*(?:메트릭|지표)\s*(?:등록|추가)\s+(\S+)\s+(https?:\/\/\S+)\s*(\S+)?\s*(.+)?$/i);
-      if (bm) { const rsv = extractRepo(bm[1]); const repoKey = (rsv && !rsv.startsWith('alias:')) ? rsv : resolveRepo(bm[1]); registerBizSource(repoKey, bm[2].replace(/[)>,]+$/, ''), bm[3], bm[4]); logDecision(channel, 'biz-source', `${repoKey} ← ${bm[2]}`); const got = await bizFetch(repoKey); await postAs(client, channel, thread_ts, byName('김채원') || LEAD, `📈 사업 메트릭 소스 등록했어: ${repoKey.split('/').pop()}\n${got ? '바로 긁어왔어 — ' + Object.entries(got).slice(0, 6).map(([k, v]) => `${k}=${v}`).join(' · ') : '근데 지금 수치를 못 받았어(URL/인증 확인). "사업 지표"로 재시도.'}`); return; } }
+      if (bm) { const rsv = extractRepo(bm[1]); const repoKey = (rsv && !rsv.startsWith('alias:')) ? rsv : resolveRepo(bm[1]); registerBizSource(repoKey, bm[2].replace(/[)>,]+$/, ''), bm[3], bm[4]); logDecision(channel, 'biz-source', `${repoKey} ← ${bm[2]}`); const got = await bizFetch(repoKey); await postAs(client, channel, thread_ts, byName('김채원') || LEAD, `사업 메트릭 소스 등록했어: ${repoKey.split('/').pop()}\n${got ? '바로 긁어왔어. ' + Object.entries(got).slice(0, 6).map(([k, v]) => `${(BIZ_LABELS[k] ? BIZ_LABELS[k].ko : k)}=${v}`).join(', ') : '근데 지금 수치를 못 받았어(URL/인증 확인). "사업 지표"로 재시도.'}`); return; } }
     // A1: 사업 지표 조회 — 실수치 fetch + 표시 (지어내기 0)
     if (/^사업\s*지표\s*(\S+)?\s*\??$/.test(raw)) {
       const m = raw.match(/^사업\s*지표\s*(\S+)/); const targetRepo = m && m[1] ? (extractRepo(m[1]) && !extractRepo(m[1]).startsWith('alias:') ? extractRepo(m[1]) : resolveRepo(m[1])) : null;
       const repos = targetRepo ? [targetRepo] : Object.keys(bizData);
       if (!repos.length) { await postAs(client, channel, thread_ts, LEAD, '아직 등록된 사업 메트릭 소스가 없어. "사업 메트릭 등록 <레포> <stats_url>"로 올려줘. (wewantpeace는 기본 시드돼 있어 — "사업 지표"로 바로 확인)'); return; }
       const lines = [];
-      for (const rp of repos) { const got = await bizFetch(rp); const cur = got || bizLatest(rp); lines.push(`■ ${rp.split('/').pop()}\n` + bizScorecard(cur)); }
-      await postAs(client, channel, thread_ts, byName('김채원') || LEAD, '📈 사업 스코어카드 — 봐야 할 지표 전체 (✅연결 / 🔌미연결, 실데이터·추정0)\n\n' + lines.join('\n\n')); return;
+      for (const rp of repos) { await bizFetch(rp); lines.push(`■ ${rp.split('/').pop()}\n` + bizScorecard(rp)); }
+      await postAs(client, channel, thread_ts, byName('김채원') || LEAD, '사업 스코어카드 — 봐야 할 지표 전체 (값=연결됨 / 미연결=연결법 표시, 실데이터·추정0)\n변동률은 직전 기록 대비(주기에 맞춰 전일/전주/전달), [특이] 표시는 큰 변동. 자세한 설명은 "사업 브리핑".\n\n' + lines.join('\n\n')); return;
     }
     // A2: 사업 브리핑 (실수치 → AARRR 루브릭 해석 + 측정갭 + 개선안)
     if (/(사업\s*브리핑|비즈니스\s*브리핑|사업\s*분석|사업\s*진단)/i.test(raw)) {
