@@ -31,24 +31,34 @@ if (!SLACK_BOT_TOKEN || !SLACK_APP_TOKEN) {
 const ALLOWED = ALLOWED_SLACK_USER_IDS.split(',').map(s => s.trim()).filter(Boolean);
 const ROUNDS = parseInt(DEBATE_ROUNDS, 10) || 2;
 
+// L5: 모델 라우팅 — 티어를 한 곳에서 관리(흩어진 매직스트링 제거, env로 티어별 오버라이드). 작업 성격에 맞는 모델 비용/품질 균형.
+//  LEAD = 통합·최종판단(한로로) → opus
+//  TEAM = 실제 제작·리포트·토론·코드비평·리뷰·계획 등 추론 필요한 일 → sonnet
+//  FAST = 분류·가드레일·의도일치·질문생성·사실추출 같은 짧고 잦은 판정 → haiku (싸고 빠름)
+const MODEL = {
+  LEAD: process.env.LEAD_MODEL || 'opus',
+  TEAM: process.env.AGENT_MODEL || 'sonnet',
+  FAST: process.env.FAST_MODEL || 'haiku',
+};
+
 // ── 직원(페르소나). tokenEnv 에 토큰이 있으면 진짜 별도 멤버로 게시 ──
 const TEAM = [
-  { name: '김채원 (PM)', kw: ['김채원','채원','PM'], emoji: ':bust_in_silhouette:', model: process.env.AGENT_MODEL || 'sonnet', tokenEnv: 'SLACK_TOKEN_PM',
+  { name: '김채원 (PM)', kw: ['김채원','채원','PM'], emoji: ':bust_in_silhouette:', model: MODEL.TEAM, tokenEnv: 'SLACK_TOKEN_PM',
     prompt: '너는 도핑연구소 PM이고 이름은 김채원이다. 밝고 야무지게 팀을 이끄는 리더야. 핵심을 똑부러지게 짚고 우선순위를 정해. 사용자 가치랑 시장성, 전용목적 위주로 본다.' },
-  { name: '아이유 (리서처)', kw: ['아이유', '리서처', '리서치'], emoji: ':mag:', model: process.env.AGENT_MODEL || 'sonnet', tokenEnv: 'SLACK_TOKEN_RESEARCH',
+  { name: '아이유 (리서처)', kw: ['아이유', '리서처', '리서치'], emoji: ':mag:', model: MODEL.TEAM, tokenEnv: 'SLACK_TOKEN_RESEARCH',
     prompt: '너는 도핑연구소 사용자 리서처이고 이름은 아이유다. 차분하고 사려깊게 사람 마음과 진짜 니즈를 섬세하게 읽는다. 페인포인트·사용성 리스크를 따뜻하지만 정확하게 짚는다.' },
-  { name: '정소민 (UX)', kw: ['정소민','소민','UX','디자이너','디자인','화면','비주얼','시안'], emoji: ':art:', model: process.env.AGENT_MODEL || 'sonnet', tokenEnv: 'SLACK_TOKEN_UX',
+  { name: '정소민 (UX)', kw: ['정소민','소민','UX','디자이너','디자인','화면','비주얼','시안'], emoji: ':art:', model: MODEL.TEAM, tokenEnv: 'SLACK_TOKEN_UX',
     prompt: '너는 도핑연구소 UX·비주얼 디자이너이고 이름은 정소민이다. 친근하고 공감 가는 말투로 사용자 흐름·마찰·엣지케이스(빈상태/에러/로딩)를 챙긴다. 디자인은 항상 impeccable.style 기준(AI slop 금지: 이모지 아이콘·gradient hero·nested cards 금지, 대비 4.5:1+, 한국어 UI, 빈상태 캐릭터)과 그 프로젝트 design-system(MASTER.md)을 따른다. 만든 화면은 스크린샷으로 실제로 띄워서 눈으로 검증하는 것까지 네 일이다.' },
-  { name: '윈터 (아키텍트)', kw: ['윈터', '아키텍트', '아키', '배포', '운영', '데브옵스', 'devops', '인프라', '빌드', '서버'], emoji: ':building_construction:', model: process.env.AGENT_MODEL || 'sonnet', tokenEnv: 'SLACK_TOKEN_ARCHITECT',
+  { name: '윈터 (아키텍트)', kw: ['윈터', '아키텍트', '아키', '배포', '운영', '데브옵스', 'devops', '인프라', '빌드', '서버'], emoji: ':building_construction:', model: MODEL.TEAM, tokenEnv: 'SLACK_TOKEN_ARCHITECT',
     prompt: '너는 도핑연구소 아키텍트 겸 엔지니어이고 이름은 윈터다. 시크하고 군더더기 없이 구조·스택을 정하고, 빌드·테스트·배포·인프라·운영(헬스체크/장애대응/재시작)·의존성 관리까지 직접 책임진다. 기술/배포 리스크를 깔끔하게 정리한다.' },
-  { name: '우정잉 (보안)', kw: ['우정잉', '정잉', '보안', '취약점', '시크릿'], emoji: ':lock:', model: process.env.AGENT_MODEL || 'sonnet', tokenEnv: 'SLACK_TOKEN_SECURITY',
+  { name: '우정잉 (보안)', kw: ['우정잉', '정잉', '보안', '취약점', '시크릿'], emoji: ':lock:', model: MODEL.TEAM, tokenEnv: 'SLACK_TOKEN_SECURITY',
     prompt: '너는 도핑연구소 보안 엔지니어이고 이름은 우정잉이다. 꼼꼼하고 의심 많게 인증·권한·시크릿·개인정보·규제 리스크와 코드 취약점(보안 리뷰·의존성 취약점 스캔)을 파고들고 완화책을 댄다.' },
-  { name: '영듀 (마케터)', kw: ['영듀', '마케터', '마케팅'], emoji: ':mega:', model: process.env.AGENT_MODEL || 'sonnet', tokenEnv: 'SLACK_TOKEN_MARKETING',
+  { name: '영듀 (마케터)', kw: ['영듀', '마케터', '마케팅'], emoji: ':mega:', model: MODEL.TEAM, tokenEnv: 'SLACK_TOKEN_MARKETING',
     prompt: '너는 도핑연구소 마케터이고 이름은 영듀다. 텐션 높고 유쾌하게 바이럴·차별점·타깃·GTM을 재밌게 풀어낸다.' },
-  { name: '안다연 (반론자)', kw: ['안다연','다연'], emoji: ':smiling_imp:', model: process.env.AGENT_MODEL || 'sonnet', tokenEnv: 'SLACK_TOKEN_DEVIL',
+  { name: '안다연 (반론자)', kw: ['안다연','다연'], emoji: ':smiling_imp:', model: MODEL.TEAM, tokenEnv: 'SLACK_TOKEN_DEVIL',
     prompt: '너는 도핑연구소의 악마의 변호인이고 이름은 안다연이다. 기획의 약점을 날카롭게 파고들어 반대 의견과 리스크를 짚고, 각 약점에 보완책도 함께 제시한다.' },
 ];
-const LEAD = { name: '한로로 (팀장)', kw: ['한로로','로로','팀장'], emoji: ':test_tube:', model: process.env.LEAD_MODEL || 'opus', tokenEnv: 'SLACK_TOKEN_LEAD',
+const LEAD = { name: '한로로 (팀장)', kw: ['한로로','로로','팀장'], emoji: ':test_tube:', model: MODEL.LEAD, tokenEnv: 'SLACK_TOKEN_LEAD',
   prompt: '너는 도핑연구소 팀장이고 이름은 한로로다(최상위 모델). 진솔하고 본질을 짚는 스타일로 팀을 이끈다. 질문엔 직접 답하고, 기획 토론을 종합할 땐 목적·핵심기능·리스크 대응·다음 액션으로 정리한다.' };
 
 // 모든 발언에 적용되는 말투/가독성 규칙
@@ -191,7 +201,7 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
     const id = ++workSeq; const dir = `/tmp/d${id}`;
     const cl = await sh(`rm -rf ${dir} && git clone --depth 1 https://x-access-token:${GITHUB_TOKEN}@github.com/${repo}.git ${dir} && chmod -R 777 ${dir}`);
     if (cl.code === 0) {
-      const sum = await runClaude(`이 저장소가 실제로 뭘 하는 프로젝트인지 README랑 코드를 읽고 사실만 6~10줄로 요약해. 필요하면 웹서치로 비슷한 서비스나 시장 맥락도 한두 줄 덧붙여도 돼. 마크다운 금지.`, 'sonnet', dir, WORK_PERMISSION_MODE, 300000);
+      const sum = await runClaude(`이 저장소가 실제로 뭘 하는 프로젝트인지 README랑 코드를 읽고 사실만 6~10줄로 요약해. 필요하면 웹서치로 비슷한 서비스나 시장 맥락도 한두 줄 덧붙여도 돼. 마크다운 금지.`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 300000);
       if (sum.text && sum.ok !== false) facts = `\n[프로젝트 실제 정보 (${repo})]\n${sum.text.trim().slice(0, 1500)}\n`;
     } else {
       await postAs(client, channel, thread_ts, LEAD, `${repo} 레포를 못 찾겠어. 정확한 레포 이름 알려주면 까보고 제대로 토론할게. 모르는 채로는 헛소리 나와서 안 할래.`);
@@ -247,7 +257,7 @@ function drainFeedback(channel) { const f = (feedback[channel] || []).join('\n')
 // 토론/회의 결론 → 실제 착수 가능한 액션아이템 추출 (조사/코드수정/사람만 분류). 자동 실행 아님 — 사용자 승인용 목록.
 async function extractActionItems(conclusion) {
   try {
-    const r = await runClaude(`다음은 팀 회의 결론이야. 우리 팀(에이전트)이 코드/레포로 실제 착수 가능한 구체 액션아이템만 뽑아 JSON 배열로만 출력해. 설명 금지.\n\n[결론]\n${String(conclusion || '').slice(0, 3000)}\n\n각 항목: {"who":"담당(한 단어)","task":"무엇을 할지 한 문장, 레포에서 확인/수정할 구체 대상 포함","kind":"investigate|build|human"}\n- investigate: 레포 코드/파일 까서 확인하는 읽기전용(예 "regex 실행에 타임아웃 있는지 확인")\n- build: 코드를 실제 고치거나 추가(예 "regex에 타임아웃 추가")\n- human: 계정·심사·결제·외부결정 등 사람만 가능(예 "Play Store 심사상태 확인")\n추상적 방향·중복은 빼고 최대 8개. JSON 배열만.`, 'sonnet', WORKDIR, CLAUDE_PERMISSION_MODE, 120000);
+    const r = await runClaude(`다음은 팀 회의 결론이야. 우리 팀(에이전트)이 코드/레포로 실제 착수 가능한 구체 액션아이템만 뽑아 JSON 배열로만 출력해. 설명 금지.\n\n[결론]\n${String(conclusion || '').slice(0, 3000)}\n\n각 항목: {"who":"담당(한 단어)","task":"무엇을 할지 한 문장, 레포에서 확인/수정할 구체 대상 포함","kind":"investigate|build|human"}\n- investigate: 레포 코드/파일 까서 확인하는 읽기전용(예 "regex 실행에 타임아웃 있는지 확인")\n- build: 코드를 실제 고치거나 추가(예 "regex에 타임아웃 추가")\n- human: 계정·심사·결제·외부결정 등 사람만 가능(예 "Play Store 심사상태 확인")\n추상적 방향·중복은 빼고 최대 8개. JSON 배열만.`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 120000);
     const m = (r.text || '').match(/\[[\s\S]*\]/);
     const arr = m ? JSON.parse(m[0]) : [];
     return Array.isArray(arr) ? arr.filter(x => x && x.task && ['investigate', 'build', 'human'].includes(x.kind)).slice(0, 8) : [];
@@ -513,7 +523,7 @@ async function qaGate(client, channel, thread_ts, dir) {
   if (/0 vulnerabilities/.test(au.out)) await postAs(client, channel, thread_ts, sec, '의존성 취약점 스캔도 깨끗해.');
   else if ((au.out || '').trim()) await postAs(client, channel, thread_ts, sec, '의존성에 취약점 좀 떴어. 심각한 건 잡자:\n' + au.out.slice(-400));
   // 3) 코드/보안 리뷰 (진짜 문제만)
-  const rev = await runClaude(`이 저장소를 보안·버그 관점에서 빠르게 리뷰해라. 진짜 문제만 짚어 (하드코딩된 시크릿/키, 입력검증 누락, 명백한 버그, 인증·권한 허점, 위험한 패턴). 없으면 솔직히 "큰 문제 없음"이라고 해. 지어내지 마.${PLAIN}`, 'sonnet', dir, WORK_PERMISSION_MODE, 180000);
+  const rev = await runClaude(`이 저장소를 보안·버그 관점에서 빠르게 리뷰해라. 진짜 문제만 짚어 (하드코딩된 시크릿/키, 입력검증 누락, 명백한 버그, 인증·권한 허점, 위험한 패턴). 없으면 솔직히 "큰 문제 없음"이라고 해. 지어내지 마.${PLAIN}`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 180000);
   if (rev.text && rev.ok !== false && !rev.limited) await postAs(client, channel, thread_ts, sec, '코드 보안/버그 리뷰했어:\n' + rev.text.trim().slice(0, 900));
 }
 
@@ -567,13 +577,13 @@ async function runCritic(client, channel, thread_ts, dir, task, prd) {
     if (/typescript/.test(pkg) && (await sh(`test -f ${dir}/tsconfig.json && echo y`, dir)).out.includes('y')) { const tc = await sh('npx --no-install tsc --noEmit 2>&1 | tail -15', dir); signals.push(tc.code === 0 ? '✅ 타입체크(tsc) 통과' : '❌ 타입에러:\n' + (tc.out || '').slice(-800)); }
     if (/"test"\s*:/.test(pkg) && !/no test specified/.test(pkg)) { bumpWork(channel); const ts = await sh('npm test 2>&1 | tail -15', dir, 240000); signals.push(ts.code === 0 ? '✅ 테스트 통과' : '❌ 테스트 실패:\n' + (ts.out || '').slice(-800)); }
     const buildSignal = signals.length ? signals.join('\n') : '(빌드/테스트 스크립트 없음 — 정적/단순 프로젝트)';
-    const c = await runClaude(`너는 깐깐한 심사자(critic)다. 의견이 아니라 아래 [실제 검증 결과(빌드·타입·테스트)]와 코드를 근거로만 판정해라. 후하게 주지 마.\n\n요청: "${task}"\n\n[실제 검증 결과 — 이게 1차 ground truth]\n${buildSignal}\n\n루브릭(각 0~1, 코드 근거로):\n- 요청충족: 요청한 걸 실제 구현(빈껍데기·플레이스홀더·TODO=0)\n- 검증: 위 빌드/타입/테스트 결과 기준(하나라도 실패면 0)\n- 정합성: 명백한 버그·미연결·깨진 import 없음\n- 보안: 하드코딩 시크릿·주입 구멍 없음${prd ? '\n- PRD반영: PRD 핵심기능 구현' : ''}\n\n첫 줄에 반드시 "PASS"(평균 ≥0.7 그리고 검증=1) 또는 "FAIL". 다음 줄에 각 항목 점수, 그 다음 FAIL이면 무엇을·어느 파일을 고쳐야 하는지. 마크다운 금지.`, 'sonnet', dir, WORK_PERMISSION_MODE, 300000);
+    const c = await runClaude(`너는 깐깐한 심사자(critic)다. 의견이 아니라 아래 [실제 검증 결과(빌드·타입·테스트)]와 코드를 근거로만 판정해라. 후하게 주지 마.\n\n요청: "${task}"\n\n[실제 검증 결과 — 이게 1차 ground truth]\n${buildSignal}\n\n루브릭(각 0~1, 코드 근거로):\n- 요청충족: 요청한 걸 실제 구현(빈껍데기·플레이스홀더·TODO=0)\n- 검증: 위 빌드/타입/테스트 결과 기준(하나라도 실패면 0)\n- 정합성: 명백한 버그·미연결·깨진 import 없음\n- 보안: 하드코딩 시크릿·주입 구멍 없음${prd ? '\n- PRD반영: PRD 핵심기능 구현' : ''}\n\n첫 줄에 반드시 "PASS"(평균 ≥0.7 그리고 검증=1) 또는 "FAIL". 다음 줄에 각 항목 점수, 그 다음 FAIL이면 무엇을·어느 파일을 고쳐야 하는지. 마크다운 금지.`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 300000);
     const verdict = (c.text || '').trim();
     if (c.limited || /^\s*PASS/i.test(verdict)) { jobUpdate(channel, { critic: 'PASS' }); return true; }
     await postAs(client, channel, thread_ts, sec, `🔎 심사에서 걸렸어(빌드결과 기반). 고치고 갈게:\n${verdict.slice(0, 500)}`);
     jobUpdate(channel, { critic: 'FAIL→수정', note: verdict.replace(/\n/g, ' ').slice(0, 150) });
     if (attempt >= 2) return false; // 두 번째도 FAIL이면 더 안 돌리고 정직하게 미충족 보고(아래 호출측)
-    const fix = await runClaude(`심사자가 [실제 빌드 결과]와 코드를 근거로 다음을 지적했어. 지적대로 실제로 고쳐라(추측 말고 코드 직접 수정). 빌드 통과 유지.\n\n[지적]\n${verdict.slice(0, 2000)}\n\n원래 요청: "${task}"`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000, true);
+    const fix = await runClaude(`심사자가 [실제 빌드 결과]와 코드를 근거로 다음을 지적했어. 지적대로 실제로 고쳐라(추측 말고 코드 직접 수정). 빌드 통과 유지.\n\n[지적]\n${verdict.slice(0, 2000)}\n\n원래 요청: "${task}"`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 540000, true);
     addJobTokens(channel, estTokens(c.text) + estTokens(fix.text)); // I8
     if (fix.limited) return false;
   }
@@ -594,7 +604,7 @@ async function verifyBuild(client, channel, thread_ts, dir, repo, pushRef = WORK
   if (bd.code === 0) { const g = await checkAppGaps(dir); await postAs(client, channel, thread_ts, qa, g.length ? `빌드는 통과하는데, 솔직히 아직 껍데기야 — ${g.join(', ')}. 컴파일만 되고 실제 화면이 없어서 이대로는 못 써.` : '빌드 통과 확인했어. 실제로 컴파일까지 돼.'); await qaGate(client, channel, thread_ts, dir); await liveCheck(client, channel, thread_ts, dir, repo); return; }
   // 실패 → 1회 자동 수정
   await postAs(client, channel, thread_ts, qa, '빌드가 깨졌네. 에러 보고 한 번 고쳐볼게.\n' + (bd.out || '').slice(-500));
-  const fix = await runClaude(`이 저장소 빌드가 다음 에러로 실패했어. 원인 찾아서 실제로 고쳐. 추측 말고 에러 그대로 보고 고쳐라.\n\n[에러]\n${(bd.out || '').slice(-2500)}`, 'sonnet', dir, WORK_PERMISSION_MODE, 300000);
+  const fix = await runClaude(`이 저장소 빌드가 다음 에러로 실패했어. 원인 찾아서 실제로 고쳐. 추측 말고 에러 그대로 보고 고쳐라.\n\n[에러]\n${(bd.out || '').slice(-2500)}`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 300000);
   await sh('git add -A && git commit -m "fix: 빌드 에러 수정" 2>&1', dir);
   await sh(`git push origin HEAD:${pushRef} 2>&1`, dir); // 작업이 올라간 ref로 푸시(승인모드/PR이면 그 브랜치로) — main 직행해 승인 우회하던 거 방지
   bd = await sh('npm run build 2>&1', dir);
@@ -649,7 +659,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const fbBuild = drainFeedback(channel); // 제작 직전 들어온 사용자 수정요청도 반영
   const rmap = !newProject ? await repoMap(dir) : ''; // I8: 기존 레포는 구조 맵으로 그라운딩(신규는 빈 레포라 생략)
   const prules = await readProjectRules(dir); // L1: AGENTS.md/CLAUDE.md 컨벤션 주입
-  const res = await runClaude(`${intro}${rulesCtx(channel)}${prules}${repo ? recallFacts(repo, task) : ''}${rmap}${PLAIN}${uiish ? DESIGN_RULE : ''}${newProject ? LAUNCH_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}${fbBuild ? '\n\n[사용자가 추가로 준 지시 — 반드시 반영]\n' + fbBuild : ''}\n\n요청: ${task}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000, true);
+  const res = await runClaude(`${intro}${rulesCtx(channel)}${prules}${repo ? recallFacts(repo, task) : ''}${rmap}${PLAIN}${uiish ? DESIGN_RULE : ''}${newProject ? LAUNCH_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}${fbBuild ? '\n\n[사용자가 추가로 준 지시 — 반드시 반영]\n' + fbBuild : ''}\n\n요청: ${task}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 540000, true);
   if (res.limited) { jobUpdate(channel, { status: 'limited' }); await postAs(client, channel, thread_ts, LEAD, '⏳ 제작 중에 클로드 사용량 한도에 걸렸어. 지금까지 만든 건 안 올렸어, 한도 리셋되면 이어서 만들게.'); return; }
   jobUpdate(channel, { stage: '코드생성' }); // R9: 진행 단계 체크포인트(재시작 알림용)
   addJobTokens(channel, estTokens(res.text) + estTokens(task) + (prd ? estTokens(prd) : 0)); // I8: 비용 추적
@@ -671,7 +681,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
       jobUpdate(channel, { ledger: { plan: prd ? 'PRD 기반 빌드' : task.slice(0, 80), gaps, progress: progress.slice(-6) } });
       prog.phase(stalled ? `접근 바꿔서 다시 (${pass}차)` : fbCont ? `방금 준 피드백 반영 (${pass}차)` : `아직 비어서 더 채우는 중 (${pass}차)`);
       const replanNote = stalled ? '\n\n[중요 — 재계획] 직전 시도가 진척이 없었어(같은 게 여전히 비어있음). 똑같은 방식 반복하지 마. 왜 안 됐는지 코드를 직접 보고 원인을 짚은 다음, 다른 접근(다른 파일 구조/다른 구현 방식)으로 실제로 끝까지 구현해라.' : '';
-      const cont = await runClaude(`이 저장소를 더 다듬어라.${gaps.length ? ` 특히 지금 비어있는 것: ${gaps.join(' / ')} — 데모·플레이스홀더·로렘입숨·"TODO" 금지로 실제 화면(라우트 page)·컴포넌트·핵심 플로우를 끝까지 만들어라.` : ''}${replanNote}${fbCont ? `\n\n[사용자가 방금 추가로 준 지시 — 반드시 그대로 반영]\n${fbCont}` : ''}\n\n이미 있는 서버/타입은 활용하고 npm run build 통과 유지.${prd ? '\n\n[따라야 할 PRD]\n' + prd.slice(0, 5000) : ''}`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000, true);
+      const cont = await runClaude(`이 저장소를 더 다듬어라.${gaps.length ? ` 특히 지금 비어있는 것: ${gaps.join(' / ')} — 데모·플레이스홀더·로렘입숨·"TODO" 금지로 실제 화면(라우트 page)·컴포넌트·핵심 플로우를 끝까지 만들어라.` : ''}${replanNote}${fbCont ? `\n\n[사용자가 방금 추가로 준 지시 — 반드시 그대로 반영]\n${fbCont}` : ''}\n\n이미 있는 서버/타입은 활용하고 npm run build 통과 유지.${prd ? '\n\n[따라야 할 PRD]\n' + prd.slice(0, 5000) : ''}`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 540000, true);
       addJobTokens(channel, estTokens(cont.text) + (prd ? estTokens(prd.slice(0, 5000)) : 0)); // I8
       if (cont.limited) { await postAs(client, channel, thread_ts, LEAD, '⏳ 이어서 채우다가 한도에 걸렸어. 지금까지 만든 만큼만 올릴게, 리셋되면 "이어서"라고 해줘.'); break; }
     }
@@ -795,7 +805,7 @@ const seen = new Set();
 // 특정 단어 없이도 메시지가 "작업 요청"인지 AI가 판단
 async function classifyIntent(text, ctx) {
   try {
-    const res = await runClaude(`${ctx ? '[최근 대화]\n' + ctx + '\n\n' : ''}다음 메시지의 의도를 판단해서 JSON만 출력해라. 설명 금지.\n메시지: ${JSON.stringify(text)}\n\n형식: {"action": "work"|"report"|"debate"|"chat", "task": "할 일/주제/볼 것을 한 문장", "newProject": true|false, "repo": "sponono|wewantpeace|myungjak|new 중 해당", "name": "newProject일 때만, 이 프로젝트를 잘 나타내는 영문 짧은 레포이름(소문자와 하이픈만, 예: ramen-shop-game, todo-app). 아니면 빈문자열"}\n기준: 코드를 만들/고치/추가/개선/구현하라면 action=work. 프로젝트의 현황·상태·운영·구조를 조사·보고하라면 action=report. "토론하자/논의하자/토론해줘"처럼 새로운 주제로 팀 토론을 새로 시작하라고 할 때만 action=debate(task=토론 주제). 단 "다른 의견은?", "더 말해봐", "넌 어때", "다른사람들은?" 같은 진행 중 대화의 추가 질문이나 안부·잡담·단순 질문은 action=chat. 너희(이 봇/팀원들) 자신에 대한 질문(누가 뭐 담당하냐, 무슨 모델 쓰냐, 자기소개, 인사, "각자 ~해봐" 같은 멤버 호출)은 프로젝트 보고가 아니라 action=chat. 새로 뭔가(홈페이지/사이트/포트폴리오/앱/게임/툴/서비스 등) 만들거나 개발하라면 거의 다 newProject=true 이고 repo=new. "X 만들고 싶어", "X 게임 만들어줘", "새로 ~ 하나" 같은 건 무조건 newProject=true, repo=new (기존 레포에 작업하는 게 절대 아님). 위원트피스=wewantpeace, 스포노노=sponono, 명작=myungjak. 사용자가 말한 프로젝트가 sponono/wewantpeace/myungjak 중 어느 것도 아니거나 어느 프로젝트인지 불명확하면 repo는 반드시 "unknown"으로 해. 절대 가까운 걸로 추측해서 고르지 마. 이 슬랙 봇(도핑연구소 봇/너희들 자체)을 고치라면 repo="bot".`, 'haiku');
+    const res = await runClaude(`${ctx ? '[최근 대화]\n' + ctx + '\n\n' : ''}다음 메시지의 의도를 판단해서 JSON만 출력해라. 설명 금지.\n메시지: ${JSON.stringify(text)}\n\n형식: {"action": "work"|"report"|"debate"|"chat", "task": "할 일/주제/볼 것을 한 문장", "newProject": true|false, "repo": "sponono|wewantpeace|myungjak|new 중 해당", "name": "newProject일 때만, 이 프로젝트를 잘 나타내는 영문 짧은 레포이름(소문자와 하이픈만, 예: ramen-shop-game, todo-app). 아니면 빈문자열"}\n기준: 코드를 만들/고치/추가/개선/구현하라면 action=work. 프로젝트의 현황·상태·운영·구조를 조사·보고하라면 action=report. "토론하자/논의하자/토론해줘"처럼 새로운 주제로 팀 토론을 새로 시작하라고 할 때만 action=debate(task=토론 주제). 단 "다른 의견은?", "더 말해봐", "넌 어때", "다른사람들은?" 같은 진행 중 대화의 추가 질문이나 안부·잡담·단순 질문은 action=chat. 너희(이 봇/팀원들) 자신에 대한 질문(누가 뭐 담당하냐, 무슨 모델 쓰냐, 자기소개, 인사, "각자 ~해봐" 같은 멤버 호출)은 프로젝트 보고가 아니라 action=chat. 새로 뭔가(홈페이지/사이트/포트폴리오/앱/게임/툴/서비스 등) 만들거나 개발하라면 거의 다 newProject=true 이고 repo=new. "X 만들고 싶어", "X 게임 만들어줘", "새로 ~ 하나" 같은 건 무조건 newProject=true, repo=new (기존 레포에 작업하는 게 절대 아님). 위원트피스=wewantpeace, 스포노노=sponono, 명작=myungjak. 사용자가 말한 프로젝트가 sponono/wewantpeace/myungjak 중 어느 것도 아니거나 어느 프로젝트인지 불명확하면 repo는 반드시 "unknown"으로 해. 절대 가까운 걸로 추측해서 고르지 마. 이 슬랙 봇(도핑연구소 봇/너희들 자체)을 고치라면 repo="bot".`, MODEL.FAST);
     const mm = (res.text || '').match(/\{[\s\S]*\}/);
     return mm ? JSON.parse(mm[0]) : { action: 'chat' };
   } catch { return { action: 'chat' }; }
@@ -828,7 +838,7 @@ async function runReport(client, channel, thread_ts, reporter, repo, task) {
     const cl = await sh(`rm -rf ${dir} && git clone --depth 1 https://x-access-token:${GITHUB_TOKEN}@github.com/${repo}.git ${dir} && chmod -R 777 ${dir}`);
     if (cl.code !== 0) { await postAs(client, channel, thread_ts, reporter, `${mention(channel)}${repo} 레포를 못 찾았어ㅠ (이름 확인 필요)\n${(cl.err || '').slice(0, 200)}`); return; }
     const GROUND = '\n\n[사실 근거 규칙 — 엄격] 레포 코드/파일로 직접 확인되는 것만 사실로 말해라. 배포 여부, 앱스토어·플레이스토어 제출/승인 여부, 실제 유저 수, 매출, 광고 활성화 여부 같은 외부·운영 상태는 코드만으론 절대 알 수 없다. 코드에 준비/설정이 있어도 "제출됨/출시됨/활성화됨"이라고 단정하지 마. 그런 건 "코드엔 준비돼 있는데 실제 제출/활성화 여부는 확인 안 됨"으로 표시해라. 지어내면 안 된다.';
-    const res = await runClaude(`이 저장소를 실제로 열어보고, 사용자의 요청 "${task}"에 직접 답해라. 단순 현황 나열이 아니라, 레포에서 확인한 사실을 근거로 실제 답·제안·전략을 내라. 코드는 읽기만 해. 레포에 없는 시장·경쟁사·트렌드·벤치마크는 웹서치(WebSearch)로 찾아서 근거로 써도 돼.${GROUND}${rulesCtx(channel)}${recallFacts(repo, task)}\n\n역할별로 각자 그 요청에 대한 자기 분야의 답/제안을 줘. 각 줄 "역할: 답/제안" 형식(관련된 역할만, PM/리서처/UX/아키텍트/보안/마케터). 질문 분야의 담당이 메인으로 구체적인 안을 내고(예: 마케팅 질문이면 마케터가 채널·메시지·실행안까지), 나머지는 거들어. 한 역할당 2~4줄.${PLAIN}`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000);
+    const res = await runClaude(`이 저장소를 실제로 열어보고, 사용자의 요청 "${task}"에 직접 답해라. 단순 현황 나열이 아니라, 레포에서 확인한 사실을 근거로 실제 답·제안·전략을 내라. 코드는 읽기만 해. 레포에 없는 시장·경쟁사·트렌드·벤치마크는 웹서치(WebSearch)로 찾아서 근거로 써도 돼.${GROUND}${rulesCtx(channel)}${recallFacts(repo, task)}\n\n역할별로 각자 그 요청에 대한 자기 분야의 답/제안을 줘. 각 줄 "역할: 답/제안" 형식(관련된 역할만, PM/리서처/UX/아키텍트/보안/마케터). 질문 분야의 담당이 메인으로 구체적인 안을 내고(예: 마케팅 질문이면 마케터가 채널·메시지·실행안까지), 나머지는 거들어. 한 역할당 2~4줄.${PLAIN}`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 540000);
     if (res.limited) { await postAs(client, channel, thread_ts, reporter, `${mention(channel)}⏳ 조사 중에 클로드 사용량 한도에 걸렸어. 리셋되면 다시 봐줄게.`); return; }
     const n = await distributeReport(client, channel, thread_ts, res.text);
     if (!n) await postAs(client, channel, thread_ts, reporter, (res.text || '(내용 없음)').trim().slice(0, 3000));
@@ -1034,7 +1044,7 @@ function recallFacts(key, taskText) {
 async function extractFacts(key, contextText, source) { // 작업/대화(신뢰소스: 봇이 코드/실행으로 확인한 결과)에서 durable 사실 0~3개 뽑아 저장
   if (!key) return;
   try {
-    const r = await runClaude(`다음 작업/대화에서 "앞으로도 계속 유효할 durable 사실"만 0~3개 뽑아 한 줄씩 출력(없으면 빈 출력). 일회성·진행상황·인사는 빼고, 프로젝트 컨벤션·기술결정·구조·사용자 선호처럼 다음에 또 쓸 것만. 각 줄 12~40자, 군더더기·번호·마크다운 없이.\n\n${String(contextText || '').slice(0, 2500)}`, 'haiku');
+    const r = await runClaude(`다음 작업/대화에서 "앞으로도 계속 유효할 durable 사실"만 0~3개 뽑아 한 줄씩 출력(없으면 빈 출력). 일회성·진행상황·인사는 빼고, 프로젝트 컨벤션·기술결정·구조·사용자 선호처럼 다음에 또 쓸 것만. 각 줄 12~40자, 군더더기·번호·마크다운 없이.\n\n${String(contextText || '').slice(0, 2500)}`, MODEL.FAST);
     for (const line of (r.text || '').split('\n').map(s => s.replace(/^[-*\d.\s]+/, '').trim()).filter(Boolean).slice(0, 3)) addFact(key, line, source || 'work');
   } catch {}
 }
@@ -1161,7 +1171,7 @@ function launchWork(client, channel, thread_ts, repo, task, newProject, forcePR,
 // 작업(신규 제작이든 기존 수정이든) 시작 전, 정말 방향이 갈리는 중요한 결정이 있으면 사용자에게 먼저 물어봄 (없으면 그냥 진행)
 async function planQuestions(task, newProject) {
   try {
-    const r = await runClaude(`${newProject ? '새 프로젝트' : '기존 프로젝트 수정/작업'} 요청: ${JSON.stringify(task)}\n\n이걸 ${newProject ? '만들기' : '작업하기'} 전에 사용자한테 꼭 확인해야 할 중요한 결정이 있으면 1~3개만 질문으로 뽑아. 정말 방향이 크게 갈려서 잘못 정하면 다시 해야 하는 것만(예: 핵심 컨셉/타겟, 꼭 필요한 기능 범위, 톤·스타일, 플랫폼, 어떤 방식으로 구현할지 갈리는 선택). 요청에 이미 답이 있거나 사소하면 절대 묻지 마(빈 배열).\n\n[중요·반드시 지켜] 오직 위 요청 텍스트만 보고 판단해라. 파일시스템·현재 디렉토리·주변 코드를 들여다보지 마라(거기 뭐가 있든 무관). 그리고 다음은 절대 묻지 마라: 어떤 프로젝트/레포인지, 파일·폴더 경로, 현재 코드가 뭔지, 어디에 있는지 — 그건 시스템이 이미 정했고 너가 물을 게 아니다. 질문은 반드시 한국어로 자연스럽게(영어 금지). JSON만 출력: {"questions":["한국어 질문","..."]}`, 'haiku');
+    const r = await runClaude(`${newProject ? '새 프로젝트' : '기존 프로젝트 수정/작업'} 요청: ${JSON.stringify(task)}\n\n이걸 ${newProject ? '만들기' : '작업하기'} 전에 사용자한테 꼭 확인해야 할 중요한 결정이 있으면 1~3개만 질문으로 뽑아. 정말 방향이 크게 갈려서 잘못 정하면 다시 해야 하는 것만(예: 핵심 컨셉/타겟, 꼭 필요한 기능 범위, 톤·스타일, 플랫폼, 어떤 방식으로 구현할지 갈리는 선택). 요청에 이미 답이 있거나 사소하면 절대 묻지 마(빈 배열).\n\n[중요·반드시 지켜] 오직 위 요청 텍스트만 보고 판단해라. 파일시스템·현재 디렉토리·주변 코드를 들여다보지 마라(거기 뭐가 있든 무관). 그리고 다음은 절대 묻지 마라: 어떤 프로젝트/레포인지, 파일·폴더 경로, 현재 코드가 뭔지, 어디에 있는지 — 그건 시스템이 이미 정했고 너가 물을 게 아니다. 질문은 반드시 한국어로 자연스럽게(영어 금지). JSON만 출력: {"questions":["한국어 질문","..."]}`, MODEL.FAST);
     const m = (r.text || '').match(/\{[\s\S]*\}/);
     const o = m ? JSON.parse(m[0]) : {};
     return Array.isArray(o.questions) ? o.questions.filter(q => typeof q === 'string' && q.trim()).slice(0, 3) : [];
@@ -1170,7 +1180,7 @@ async function planQuestions(task, newProject) {
 // R4: 입력 가드레일 — 무거운 작업 파이프라인 돌리기 전 haiku로 싸게 사전심사. 파괴적·악의적·범위밖이면 차단. 실패하면 막지 않음(가용성 우선). OpenAI guardrails 패턴.
 async function guardrailCheck(task) {
   try {
-    const r = await runClaude(`코드 에이전트가 다음 작업을 실행하기 전 빠른 안전·범위 심사. JSON만.\n요청: ${JSON.stringify(String(task).slice(0, 600))}\n\n{"verdict":"proceed|refuse","reason":"refuse면 왜인지 한 문장"}\n기준: refuse = 명백히 파괴적(레포/데이터/DB 삭제·드롭, 시크릿·자격증명 탈취·유출, 대량파괴)·악의적·코드/조사/배포와 전혀 무관(봇 범위 밖). 그 외 코드 만들기·고치기·기능추가·조사·배포·마케팅은 전부 proceed. 애매하면 proceed(막는 건 명백할 때만).`, 'haiku');
+    const r = await runClaude(`코드 에이전트가 다음 작업을 실행하기 전 빠른 안전·범위 심사. JSON만.\n요청: ${JSON.stringify(String(task).slice(0, 600))}\n\n{"verdict":"proceed|refuse","reason":"refuse면 왜인지 한 문장"}\n기준: refuse = 명백히 파괴적(레포/데이터/DB 삭제·드롭, 시크릿·자격증명 탈취·유출, 대량파괴)·악의적·코드/조사/배포와 전혀 무관(봇 범위 밖). 그 외 코드 만들기·고치기·기능추가·조사·배포·마케팅은 전부 proceed. 애매하면 proceed(막는 건 명백할 때만).`, MODEL.FAST);
     const m = (r.text || '').match(/\{[\s\S]*\}/);
     const o = m ? JSON.parse(m[0]) : { verdict: 'proceed' };
     return o.verdict === 'refuse' ? o : { verdict: 'proceed' };
@@ -1179,7 +1189,7 @@ async function guardrailCheck(task) {
 // #2(리서치 최고레버리지): 의도-행동 일치 체크 — 위험·비가역 행동 직전, 별도 LLM이 "사용자가 말한 것"과 "내가 하려는 행동"이 맞는지만 판정. 정규식이 못 잡는 의도 오해(스펙 속 시각 등)를 일반적으로 잡음. 모델 확신도가 아니라 *불일치* 신호로 트리거(과신 회피). 실패 시 진행(가용성).
 async function intentActionCheck(message, actionDesc) {
   try {
-    const r = await runClaude(`사용자 메시지와 내가 막 실행하려는 행동이 일치하는지만 판정해. JSON만, 설명 금지.\n사용자: ${JSON.stringify(String(message).slice(0, 400))}\n내가 하려는 행동: ${JSON.stringify(String(actionDesc).slice(0, 200))}\n\n{"verdict":"MATCH|MISMATCH|UNSURE","ask":"MISMATCH나 UNSURE면 사용자에게 물을 한 줄(두 해석을 가르는 질문), MATCH면 빈 문자열"}\n기준: 행동이 사용자가 진짜 원한 것과 정확히 맞으면 MATCH. 어긋나거나(예: 일회성 요청을 반복 스케줄로, 기존 프로젝트 수정을 새 프로젝트 생성으로) 두 해석이 갈리면 MISMATCH/UNSURE. 메시지에 든 시각·날짜가 '스케줄 지시'인지 '기능 스펙'인지 특히 주의.`, 'haiku');
+    const r = await runClaude(`사용자 메시지와 내가 막 실행하려는 행동이 일치하는지만 판정해. JSON만, 설명 금지.\n사용자: ${JSON.stringify(String(message).slice(0, 400))}\n내가 하려는 행동: ${JSON.stringify(String(actionDesc).slice(0, 200))}\n\n{"verdict":"MATCH|MISMATCH|UNSURE","ask":"MISMATCH나 UNSURE면 사용자에게 물을 한 줄(두 해석을 가르는 질문), MATCH면 빈 문자열"}\n기준: 행동이 사용자가 진짜 원한 것과 정확히 맞으면 MATCH. 어긋나거나(예: 일회성 요청을 반복 스케줄로, 기존 프로젝트 수정을 새 프로젝트 생성으로) 두 해석이 갈리면 MISMATCH/UNSURE. 메시지에 든 시각·날짜가 '스케줄 지시'인지 '기능 스펙'인지 특히 주의.`, MODEL.FAST);
     const m = (r.text || '').match(/\{[\s\S]*\}/);
     const o = m ? JSON.parse(m[0]) : { verdict: 'MATCH' };
     return ['MATCH', 'MISMATCH', 'UNSURE'].includes(o.verdict) ? o : { verdict: 'MATCH' };
@@ -1207,7 +1217,7 @@ async function startWork(client, channel, thread_ts, repo, task, newProject, for
   }
   // R5b: 승인모드 + 신규제작이면 만들기 전 계획을 보여주고 승인받음 (Devin "실행 전 플랜 편집"). 평소(승인모드 off)엔 바로 진행 — 마찰 최소.
   if (newProject && settings.approval[channel]) {
-    const pl = await runClaude(`다음 새 프로젝트를 만들기 전, 핵심 계획만 6~8줄로 짧게: 뭘 만들지 한 줄·핵심기능 3~5개·기술스택·주요 화면. 군더더기·마크다운 없이.\n요청: ${JSON.stringify(task)}`, 'sonnet');
+    const pl = await runClaude(`다음 새 프로젝트를 만들기 전, 핵심 계획만 6~8줄로 짧게: 뭘 만들지 한 줄·핵심기능 3~5개·기술스택·주요 화면. 군더더기·마크다운 없이.\n요청: ${JSON.stringify(task)}`, MODEL.TEAM);
     pendingPlan[channel] = { repo, task, newProject, forcePR, projName, at: Date.now() };
     await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}📐 만들기 전 계획이야:\n${(pl.text || task).trim().slice(0, 1500)}\n\n이대로면 "진행", 바꿀 거 있으면 "수정: ~", 접으려면 "넘어가".`);
     await postButtons(channel, thread_ts, [{ text: '▶️ 진행', id: 'plan_go', style: 'primary' }, { text: '넘어가', id: 'plan_skip' }]); // L3
