@@ -329,14 +329,17 @@ function ghGet(path) {
 const GH_OWNER = 'nameofkk';
 const byName = (frag) => TEAM.find(p => p.name.includes(frag));
 // 기획에 의견 내는 빌더들 (PM·리서처·UX·아키텍트·보안·마케터). 반론자 안다연은 이들 뒤에 따로 반박 턴.
-function planTeam() { return ['김채원', '아이유', '정소민', '윈터', '우정잉', '영듀'].map(byName).filter(Boolean); }
+// I5: 적응형 기획 — 작업 규모에 따라 기획 참여 페르소나 수 조절(작은 건 핵심 3명, 큰 건 풀 6명). 멀티에이전트 토큰 ~15배 비용을 규모에 맞게.
+function planTeam(scope) { const core = ['김채원', '윈터', '정소민']; const full = ['김채원', '아이유', '정소민', '윈터', '우정잉', '영듀']; return (scope === 'core' ? core : full).map(byName).filter(Boolean); }
+function scopeOf(task) { const big = /실시간|서버|백엔드|결제|구독|멀티|플랫폼|소셜|데이터베이스|\bdb\b|인증|소켓|\bapi\b|대시보드|관리자|게임|커머스|쇼핑|예약|채팅/i.test(task) || (task || '').length > 120; return big ? 'full' : 'core'; }
 
 // 제작 전 라이브 기획 핑퐁 — 팀이 구어체로 PRD를 만들고, 팀장이 완성도 98% 될 때까지 반복해서 끌어올림.
 // 반환: 완성된 PRD 문서(문자열). 한도/중단이면 null (호출측이 제작 중단).
 async function runPRD(client, channel, thread_ts, task) {
   const TARGET = parseInt(process.env.PRD_TARGET || '98', 10);
-  const MAX = parseInt(process.env.PRD_MAX_ROUNDS || '3', 10);
-  await postAs(client, channel, thread_ts, LEAD, `오 좋다. "${task}" 이거 바로 코드 안 짜고 기획부터 제대로 잡자. PRD 만들어서 완성도 ${TARGET}% 될 때까지 핑퐁 돌릴게.`);
+  const scope = scopeOf(task); // I5: 규모 추정
+  const MAX = parseInt(process.env.PRD_MAX_ROUNDS || (scope === 'core' ? '1' : '3'), 10); // 작은 건 1라운드, 큰 건 3
+  await postAs(client, channel, thread_ts, LEAD, `오 좋다. "${task}" 이거 바로 코드 안 짜고 기획부터 잡자.${scope === 'core' ? ' (간단해 보여서 핵심만 빠르게)' : ` PRD 완성도 ${TARGET}% 될 때까지 핑퐁 돌릴게.`}`);
   let convo = `[만들 것]\n${task}\n`, prd = '', score = 0, limited = false;
   const devil = byName('안다연');
   for (let round = 1; round <= MAX; round++) {
@@ -344,7 +347,7 @@ async function runPRD(client, channel, thread_ts, task) {
     const fb = drainFeedback(channel); // 사용자가 중간에 끼어든 수정요청 반영
     if (fb) { convo += `\n[사용자가 중간에 준 수정/지시 — 반드시 이대로 PRD를 고쳐라]\n${fb}\n`; await postAs(client, channel, thread_ts, LEAD, `사용자가 중간에 "${fb.replace(/\n/g, ' ').slice(0, 50)}" 줬어, 이거 반영해서 다시 잡을게.`); }
     await postAs(client, channel, thread_ts, LEAD, round === 1 ? '먼저 각자 자기 파트부터 던져봐.' : `${round}라운드. 지금 PRD에서 부족한 부분이랑 방금 사용자 피드백 반영해서 보강하자.`);
-    for (const p of planTeam()) {
+    for (const p of planTeam(scope)) {
       bumpWork(channel); // PRD 핑퐁 도는 동안 생존신호(외부 스피너가 덮지만 이중 보강)
       if (workCancel[channel]) return null;
       const guide = round === 1 ? '네 담당 관점에서 이걸 어떻게 만들지 핵심 2~3개 구체적으로.' : '지금 PRD에서 네 영역에 빠졌거나 약한 부분만 콕 집어 보강해. 반복 말고 새로 더할 것만.';
@@ -526,13 +529,18 @@ async function runCritic(client, channel, thread_ts, dir, task, prd) {
   const sec = byName('우정잉') || LEAD;
   for (let attempt = 1; attempt <= 2; attempt++) {
     bumpWork(channel);
-    const c = await runClaude(`너는 깐깐한 심사자(critic)다. 이 저장소가 아래 요청을 "실제로" 충족했는지 코드를 직접 열어 판정해라. 후하게 주지 말고 코드 근거로.\n\n요청: "${task}"\n\n체크: 1) 요청한 걸 실제 구현했나(빈 껍데기·플레이스홀더·로렘입숨·TODO 주석은 미충족) 2) 빌드/타입 깨진 데 없나 3) 명백한 버그·보안구멍 없나${prd ? ' 4) PRD 핵심기능 반영했나' : ''}\n\n첫 줄에 반드시 "PASS" 또는 "FAIL" 한 단어. FAIL이면 다음 줄부터 무엇이 미충족이고 무엇을 고쳐야 하는지 구체적으로(파일·증상). 마크다운 금지.`, 'sonnet', dir, WORK_PERMISSION_MODE, 300000);
+    // I2: critic을 실행 신호에 그라운딩 — 자기 의견 말고 실제 빌드 결과를 ground truth로. (자기선호/장황 편향·reflection악화 완화)
+    const hasBuild = (await sh(`test -f ${dir}/package.json && grep -q '"build"' ${dir}/package.json && echo y || echo n`, dir)).out.includes('y');
+    let buildSignal = '(빌드 스크립트 없음 — 정적/단순 프로젝트)';
+    if (hasBuild) { const bd = await sh('npm run build 2>&1 | tail -25', dir); buildSignal = (bd.code === 0 ? '✅ npm run build 통과' : '❌ npm run build 실패:\n' + (bd.out || '').slice(-1200)); }
+    const c = await runClaude(`너는 깐깐한 심사자(critic)다. 의견이 아니라 아래 [실제 빌드 결과]와 코드를 근거로만 판정해라. 후하게 주지 마.\n\n요청: "${task}"\n\n[실제 빌드 결과 — 이게 1차 ground truth]\n${buildSignal}\n\n루브릭(각 0~1, 코드 근거로):\n- 요청충족: 요청한 걸 실제 구현(빈껍데기·플레이스홀더·TODO=0)\n- 빌드: 위 빌드 결과 기준(실패면 0)\n- 정합성: 명백한 버그·미연결·깨진 import 없음\n- 보안: 하드코딩 시크릿·주입 구멍 없음${prd ? '\n- PRD반영: PRD 핵심기능 구현' : ''}\n\n첫 줄에 반드시 "PASS"(평균 ≥0.7 그리고 빌드=1) 또는 "FAIL". 다음 줄에 각 항목 점수, 그 다음 FAIL이면 무엇을·어느 파일을 고쳐야 하는지. 마크다운 금지.`, 'sonnet', dir, WORK_PERMISSION_MODE, 300000);
     const verdict = (c.text || '').trim();
     if (c.limited || /^\s*PASS/i.test(verdict)) { jobUpdate(channel, { critic: 'PASS' }); return true; }
-    await postAs(client, channel, thread_ts, sec, `🔎 심사에서 걸렸어. 고치고 갈게:\n${verdict.slice(0, 500)}`);
+    await postAs(client, channel, thread_ts, sec, `🔎 심사에서 걸렸어(빌드결과 기반). 고치고 갈게:\n${verdict.slice(0, 500)}`);
     jobUpdate(channel, { critic: 'FAIL→수정', note: verdict.replace(/\n/g, ' ').slice(0, 150) });
     if (attempt >= 2) return false; // 두 번째도 FAIL이면 더 안 돌리고 정직하게 미충족 보고(아래 호출측)
-    const fix = await runClaude(`심사자가 이 저장소를 보고 다음을 지적했어. 지적대로 실제로 고쳐라(추측 말고 코드 직접 수정). 빌드 통과 유지.\n\n[지적]\n${verdict.slice(0, 2000)}\n\n원래 요청: "${task}"`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000, true);
+    const fix = await runClaude(`심사자가 [실제 빌드 결과]와 코드를 근거로 다음을 지적했어. 지적대로 실제로 고쳐라(추측 말고 코드 직접 수정). 빌드 통과 유지.\n\n[지적]\n${verdict.slice(0, 2000)}\n\n원래 요청: "${task}"`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000, true);
+    addJobTokens(channel, estTokens(c.text) + estTokens(fix.text)); // I8
     if (fix.limited) return false;
   }
   return false;
