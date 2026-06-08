@@ -123,6 +123,47 @@ async function postAs(defaultClient, channel, thread_ts, persona, text) {
     recordMsg(channel, persona.name, text);
   } catch (e) { /* not_in_channel 등 → 채널에 초대 안 된 봇은 조용히 패스 */ }
 }
+// 타이핑 느낌 — 슬랙 네이티브 "작성 중" 표시는 봇이 못 쓰니(RTM 폐기) "💬 입력 중…" 임시 메시지를 올리고 점을 1초마다 순환시켜(로딩 스피너 연출) 답 나오면 그 자리에 교체. 별도 토큰(진짜 멤버) 직원만 깔끔; 아니면 폴백으로 그냥 게시.
+const TYPING_FRAMES = ['💬 입력 중', '💬 입력 중 ·', '💬 입력 중 · ·', '💬 입력 중 · · ·'];
+async function replyTyping(client, channel, thread_ts, persona, gen) {
+  const wc = clientFor(persona); let ts = null, timer = null;
+  if (wc) {
+    try { const r = await wc.chat.postMessage({ channel, thread_ts, text: TYPING_FRAMES[0] }); ts = r && r.ts; } catch {}
+    if (ts) { let i = 0; timer = setInterval(() => { i = (i + 1) % TYPING_FRAMES.length; wc.chat.update({ channel, ts, text: TYPING_FRAMES[i] }).catch(() => {}); }, 1000); } // 1초마다 점 순환 = 실시간 작성 연출
+  }
+  let res; try { res = await gen(); } catch { res = {}; }
+  if (timer) clearInterval(timer);
+  const text = scrubOutput((((res && res.text) || '') + '').trim()) || '…';
+  if (wc && ts) { try { await wc.chat.update({ channel, ts, text }); recordMsg(channel, persona.name, text); return res; } catch {} }
+  await postAs(client, channel, thread_ts, persona, text); // 폴백(임시메시지 실패/임퍼소네이션)
+  return res;
+}
+// 명령어 메뉴 — 자연어 명령들을 카테고리로 정리. "명령어"/"도움말" 텍스트 또는 (등록 시) /도핑 슬래시로 호출.
+function commandMenuText() {
+  return [
+    '🧪 *도핑연구소 명령어* (자연어로 그냥 말해도 돼)',
+    '',
+    '🛠️ *작업·제작*',
+    '• `홀덤게임 만들어줘` — 새 프로젝트 (기획→제작→QA→배포)',
+    '• `스포노노 다크모드 추가해줘` — 기존 레포 수정',
+    '• `이어서` / `중단` — 작업 이어가기/멈추기',
+    '• `X 토론하자` — 팀 토론(기획 핑퐁)',
+    '',
+    '🔭 *운영·모니터링*',
+    '• `헬스체크` · `서비스 목록` · `서비스 등록 <레포> <url>`',
+    '• `운영 브리핑` — 종합 진단 · `운영 리포트` — 사용량/성공률',
+    '',
+    '🤖 *자율(오토파일럿)*',
+    '• `오토파일럿 켜` / `끄` / `상태` — 위험도별 자동실행',
+    '• `개선 제안` — 운영 개선 · `자기개선` — 봇 자체 개선',
+    '',
+    '🧠 *기억·학습·도구*',
+    '• `기억 목록` · `스킬 목록` · `MCP 목록` / `MCP 추천` / `MCP 리로드`',
+    '',
+    '📋 *조회*',
+    '• `작업현황` · `스케줄 목록` · `결정 로그` · `내 아이디`',
+  ].join('\n');
+}
 
 let claudeRunning = 0; const claudeQueue = [];
 let draining = false; // Q4: graceful shutdown 중이면 새 작업 안 받음
@@ -369,7 +410,9 @@ async function proposeOrAuto(client, channel, repo, items, headerLine) {
   } else if (autoNow.length) { gated.push(...autoNow); } // 이미 작업중이면 게이트로
   if (gated.length) {
     pendingDispatch[channel] = { repo, items: gated, at: Date.now() };
-    await postAs(client, channel, undefined, LEAD, `🔒 고위험이라 승인 유지(자기수정·프로드·파괴적): ${gated.map(x => x.task.slice(0, 36)).join(' / ')}\n"실행"하면 착수, "넘어가"로 패스.`);
+    const glabel = k => k === 'investigate' ? '조사' : k === 'build' ? '코드수정' : '사람만';
+    const glist = gated.map((x, i) => `${i + 1}. [${glabel(x.kind)}] ${x.task}`).join('\n');
+    await postAs(client, channel, undefined, LEAD, `🔒 이건 고위험이라 승인 받을게 (자기수정·프로드·파괴적):\n${glist}\n\n"실행"하면 착수, "넘어가"로 패스.`);
     await postButtons(channel, undefined, [{ text: '▶️ 실행', id: 'dispatch_run', style: 'primary' }, { text: '넘어가', id: 'dispatch_skip' }]);
   }
 }
@@ -1494,6 +1537,8 @@ async function handle(event, client) {
   }
   recordMsg(channel, '사용자', raw);
   if (event.user) lastRequester[channel] = event.user; // 완료 시 이 사람을 @멘션
+  // 명령어 메뉴
+  if (/^(명령어|도움말|메뉴|help|커맨드|commands?|\?|？|뭐\s*할\s*수\s*있어|뭐\s*시킬)/i.test(raw)) { await postAs(client, channel, event.thread_ts, LEAD, commandMenuText()); return; }
   // 내 슬랙 멤버ID 알려주기 (OWNER_USER_ID 설정용 등) — 봇이 받은 event.user가 곧 그 사람의 U… 멤버ID
   if (/^(내\s*(아이디|id)|my\s*id|멤버\s*id|member\s*id|whoami)\s*\??$/i.test(raw)) {
     await postAs(client, channel, event.thread_ts, LEAD, `${mention(channel)}네 슬랙 멤버 ID는 \`${event.user || '(못 읽음)'}\` 야. (OWNER_USER_ID에 이 값을 넣으면 드리프트 알림 DM이 너한테 와)`);
@@ -1989,15 +2034,13 @@ async function handle(event, client) {
     }
     const targeted = pickPersona(event.text || '');
     if (targeted) {
-      const res = await runClaude(`${targeted.prompt}${STYLE}${SELF}${UNTRUSTED_PREAMBLE}${rulesCtx(channel)}${workStatusCtx(channel)}\n\n[최근 대화]\n${ctx}\n\n[방금 들은 말]\n${wrapUntrusted(raw)}\n\n위 맥락을 보고 너답게 대답해. 백그라운드 작업 진행상황은 [작업 상태]에 있는 사실만 말하고, 진행률이나 완료를 절대 지어내지 마. 그리고 넌 지금 잡담 중이라 레포 코드를 직접 안 봤어 — 프로젝트의 코드·기능·상태를 아는 척 지어내지 마. 잘 모르면 "그건 조사 한 번 돌려봐야 정확해"라고 솔직히 말해.`, targeted.model);
-      await postAs(client, channel, thread_ts, targeted, (res.text || '').trim().slice(0, 3000));
+      await replyTyping(client, channel, thread_ts, targeted, async () => { const res = await runClaude(`${targeted.prompt}${STYLE}${SELF}${UNTRUSTED_PREAMBLE}${rulesCtx(channel)}${workStatusCtx(channel)}\n\n[최근 대화]\n${ctx}\n\n[방금 들은 말]\n${wrapUntrusted(raw)}\n\n위 맥락을 보고 너답게 대답해. 백그라운드 작업 진행상황은 [작업 상태]에 있는 사실만 말하고, 진행률이나 완료를 절대 지어내지 마. 그리고 넌 지금 잡담 중이라 레포 코드를 직접 안 봤어 — 프로젝트의 코드·기능·상태를 아는 척 지어내지 마. 잘 모르면 "그건 조사 한 번 돌려봐야 정확해"라고 솔직히 말해.`, targeted.model); return { ...res, text: (res.text || '').trim().slice(0, 3000) }; });
     } else {
       // 아무도 안 부른 일반 메시지 → 랜덤하게 1~3명이 답장 + 일부 이모지
       const responders = pickRandom(ALL, 1 + Math.floor(Math.random() * 3));
       for (const p of responders) {
-        const r2 = await runClaude(`${p.prompt}${STYLE}${SELF}${UNTRUSTED_PREAMBLE}${rulesCtx(channel)}${workStatusCtx(channel)}\n\n[최근 대화]\n${ctx}\n\n[방금 들은 말]\n${wrapUntrusted(raw)}\n\n위 맥락 보고 너답게 짧게 한마디 해. 작업 진행상황은 [작업 상태] 사실만 말하고 지어내지 마. 레포 코드를 직접 안 본 상태니 프로젝트 내용을 아는 척 지어내지 말고, 모르면 조사 돌려보자고 해.`, p.model);
-        await postAs(client, channel, thread_ts, p, (r2.text || '').trim().slice(0, 1500));
-        if (r2.ok === false) break; // 한도/타임아웃이면 1명만 말하고 도배 방지
+        const r2 = await replyTyping(client, channel, thread_ts, p, async () => { const res = await runClaude(`${p.prompt}${STYLE}${SELF}${UNTRUSTED_PREAMBLE}${rulesCtx(channel)}${workStatusCtx(channel)}\n\n[최근 대화]\n${ctx}\n\n[방금 들은 말]\n${wrapUntrusted(raw)}\n\n위 맥락 보고 너답게 짧게 한마디 해. 작업 진행상황은 [작업 상태] 사실만 말하고 지어내지 마. 레포 코드를 직접 안 본 상태니 프로젝트 내용을 아는 척 지어내지 말고, 모르면 조사 돌려보자고 해.`, p.model); return { ...res, text: (res.text || '').trim().slice(0, 1500) }; });
+        if (r2 && r2.ok === false) break; // 한도/타임아웃이면 1명만 말하고 도배 방지
       }
       casualLayer(event, client, responders, { noComment: true }).catch(() => {});
     }
@@ -2010,6 +2053,8 @@ async function handle(event, client) {
 
 app.event('message', async ({ event, client }) => { await handle(event, client); });
 app.event('app_mention', async ({ event, client }) => { await handle(event, client); });
+// 슬래시 명령(노션식 / 자동완성) — Slack 앱설정에 /도핑 슬래시 등록해야(👤) 슬랙이 자동완성 메뉴에 띄움. 등록 전엔 안 떠도 무해.
+app.command(/^\/(도핑|도핑연구소|dope|doping)$/, async ({ ack, respond }) => { try { await ack(); await respond({ response_type: 'ephemeral', text: commandMenuText() }); } catch (e) { try { console.log('[cmd] err', String(e).slice(0, 80)); } catch (_) {} } });
 // L4: App Home 탭 — 봇 홈을 열면 작업·스케줄·판단기록·기억을 한눈에 보는 읽기전용 운영 대시보드(채널 명령 "작업현황" 등과 같은 데이터). Home 탭은 Slack 앱설정에서 켜야(👤) 동작하고, 안 켜져 있으면 조용히 패스.
 function homeSchedTime(s) { if (s.ms) return `${Math.round(s.ms / 60000)}분마다`; const h = s.hour || 0, m = s.minute || 0; const ap = h < 12 ? '오전' : '오후'; const h12 = (h % 12) === 0 ? 12 : h % 12; return `매일 ${ap} ${h12}시${m ? ' ' + m + '분' : ''}`; }
 function buildHomeBlocks() {
