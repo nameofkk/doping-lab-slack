@@ -1116,6 +1116,18 @@ function registerService(repo, url, channel) {
   persistServices();
 }
 function svcList(channel) { return Object.values(services).filter(s => !channel || s.channel === channel); }
+// A1: 서비스 추세 한 줄 — 연속다운 / 지연 상승 감지(링버퍼 history 기반)
+function svcTrend(s) {
+  if ((s.failStreak || 0) >= 2) return `⚠️${s.failStreak}연속다운`;
+  const ups = (s.history || []).filter(h => h.up && h.ms != null);
+  if (ups.length >= 6) {
+    const recent = ups.slice(-3), prior = ups.slice(-6, -3);
+    const avg = a => Math.round(a.reduce((x, h) => x + h.ms, 0) / a.length);
+    const rA = avg(recent), pA = avg(prior);
+    if (rA > pA * 1.5 && rA > 800) return `📈지연↑(${pA}→${rA}ms)`;
+  }
+  return '';
+}
 // 운영 헬스체크 — 각 라이브 서비스 curl로 상태 확인 → 우정잉(QA/SRE)이 보고, 다운이면 윈터가 알림
 async function checkServices(client, channel, announce = true, onlyAlert = false) {
   const sre = byName('윈터') || LEAD; // 운영·헬스체크 = 인프라
@@ -1124,17 +1136,34 @@ async function checkServices(client, channel, announce = true, onlyAlert = false
   const lines = [];
   for (const s of list) {
     const r = await sh(`curl -s -o /dev/null -w "%{http_code} %{time_total}s" --max-time 15 '${String(s.url).replace(/'/g, '')}' 2>/dev/null || echo "000"`);
-    const out = (r.out || '').trim(); const up = /^2\d\d|^3\d\d/.test(out);
+    const out = (r.out || '').trim();
+    const m = out.match(/^(\d{3})\s+([\d.]+)s?/); // A1: 상태코드 + 응답지연(s) 파싱
+    const code = m ? m[1] : '000'; const ms = m ? Math.round(parseFloat(m[2]) * 1000) : null;
+    const up = /^2\d\d|^3\d\d/.test(code);
     const wasUp = s.lastStatus !== 'down';
     s.lastStatus = up ? 'up' : 'down'; s.lastCheck = Date.now(); s.wasUp = wasUp;
-    lines.push(`${up ? '🟢' : '🔴'} ${s.repo} · ${s.url} (${out || 'no response'})`);
+    s.failStreak = up ? 0 : ((s.failStreak || 0) + 1); // A1: 연속 실패수
+    s.history = (s.history || []).concat([{ at: Date.now(), code, ms, up }]).slice(-20); // A1: 링버퍼(최근 20회)
+    // A2: 인시던트 메모리 — 다운 시작/복구 전이를 facts에 기록(다음 다운 때 과거 플레이북 회상)
+    if (wasUp && !up) { s.downSince = s.downSince || Date.now(); s.downCode = code; } // 새로 다운
+    else if (!wasUp && up && s.downSince) { // 복구
+      const dur = Math.max(1, Math.round((Date.now() - s.downSince) / 60000));
+      try { addFact('svc:' + s.repo, `인시던트: HTTP ${s.downCode || '?'}로 약 ${dur}분 다운 후 복구`, 'incident'); } catch (_) {}
+      try { log('warn', 'incident-recovered', { repo: s.repo, code: s.downCode, downMin: dur }); } catch (_) {}
+      s.downSince = null; s.downCode = null;
+    }
+    const tr = svcTrend(s);
+    lines.push(`${up ? '🟢' : '🔴'} ${s.repo} · ${s.url} (${code}${ms != null ? ', ' + ms + 'ms' : ', no response'})${tr ? ' ' + tr : ''}`);
   }
   persistServices();
   const down = list.filter(s => s.lastStatus === 'down');
   // onlyAlert(시간별 감시)면 새로 죽은 게 있을 때만 알림, 평소엔 조용
   if (onlyAlert) {
     const newlyDown = down.filter(s => s.wasUp);
-    if (newlyDown.length) await postAs(client, channel, undefined, byName('윈터') || LEAD, `🔴 방금 다운 감지: ${newlyDown.map(s => s.repo).join(', ')}. 라이브가 죽었어, 확인할게.`);
+    if (newlyDown.length) {
+      const past = newlyDown.map(s => { const h = recallFacts('svc:' + s.repo, '인시던트 다운 복구'); return h ? `\n   ↳ ${s.repo} 과거 이력:${h.replace(/\n+/g, ' ').slice(0, 300)}` : ''; }).join('');
+      await postAs(client, channel, undefined, byName('윈터') || LEAD, `🔴 방금 다운 감지: ${newlyDown.map(s => s.repo).join(', ')}. 라이브가 죽었어, 확인할게.${past}`);
+    }
     return;
   }
   await postAs(client, channel, undefined, sre, '서비스 헬스체크 결과\n' + lines.join('\n'));
@@ -1754,6 +1783,12 @@ function buildHomeBlocks() {
   if (recent.length) B.push({ type: 'section', text: { type: 'mrkdwn', text: `*최근 끝난 작업*\n` + recent.map(jline).join('\n').slice(0, 2900) } });
   B.push({ type: 'divider' });
   B.push({ type: 'section', text: { type: 'mrkdwn', text: `*⏰ 예약 스케줄* (${schedules.length})\n` + (schedules.length ? schedules.map(s => `• *#${s.id}* ${homeSchedTime(s)} — ${String(s.label || s.task || '').slice(0, 50)} (${s.action === 'work' ? '작업' : '리포트'})`).join('\n').slice(0, 2900) : '_등록된 스케줄 없음_') } });
+  B.push({ type: 'divider' });
+  // A1: 라이브 서비스 상태(메트릭 추세)
+  const svcs = Object.values(services).filter(s => s.url);
+  const sIcon = s => s.lastStatus === 'down' ? '🔴' : '🟢';
+  const sLine = s => { const last = (s.history || [])[s.history.length - 1]; const ms = last && last.ms != null ? `${last.ms}ms` : '—'; const tr = svcTrend(s); return `${sIcon(s)} ${s.repo} · ${s.lastStatus || '?'} (${ms})${tr ? ' ' + tr : ''}`; };
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*🩺 라이브 서비스* (${svcs.length})\n` + (svcs.length ? svcs.map(sLine).join('\n').slice(0, 2900) : '_등록된 서비스 없음_') } });
   B.push({ type: 'divider' });
   const ds = decisions.slice(-8).reverse();
   B.push({ type: 'section', text: { type: 'mrkdwn', text: `*🧾 최근 판단 기록*\n` + (ds.length ? ds.map(d => `• [${d.kind}] ${String(d.detail || '').slice(0, 80)} _(${ago(d.at)})_`).join('\n').slice(0, 2900) : '_아직 없음_') } });
