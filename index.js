@@ -487,6 +487,22 @@ async function checkAppGaps(dir) {
   } catch {}
   return gaps;
 }
+// R3: Critic — PR/완료 전, 별도 claude가 "요청을 실제로 충족했나" 엄격 심사. FAIL이면 지적대로 1회 고치고 재심사. 빈껍데기·미충족을 거짓완료로 넘기는 것 방지(Devin Critic + evaluator-optimizer).
+async function runCritic(client, channel, thread_ts, dir, task, prd) {
+  const sec = byName('우정잉') || LEAD;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    bumpWork(channel);
+    const c = await runClaude(`너는 깐깐한 심사자(critic)다. 이 저장소가 아래 요청을 "실제로" 충족했는지 코드를 직접 열어 판정해라. 후하게 주지 말고 코드 근거로.\n\n요청: "${task}"\n\n체크: 1) 요청한 걸 실제 구현했나(빈 껍데기·플레이스홀더·로렘입숨·TODO 주석은 미충족) 2) 빌드/타입 깨진 데 없나 3) 명백한 버그·보안구멍 없나${prd ? ' 4) PRD 핵심기능 반영했나' : ''}\n\n첫 줄에 반드시 "PASS" 또는 "FAIL" 한 단어. FAIL이면 다음 줄부터 무엇이 미충족이고 무엇을 고쳐야 하는지 구체적으로(파일·증상). 마크다운 금지.`, 'sonnet', dir, WORK_PERMISSION_MODE, 300000);
+    const verdict = (c.text || '').trim();
+    if (c.limited || /^\s*PASS/i.test(verdict)) { jobUpdate(channel, { critic: 'PASS' }); return true; }
+    await postAs(client, channel, thread_ts, sec, `🔎 심사에서 걸렸어. 고치고 갈게:\n${verdict.slice(0, 500)}`);
+    jobUpdate(channel, { critic: 'FAIL→수정', note: verdict.replace(/\n/g, ' ').slice(0, 150) });
+    if (attempt >= 2) return false; // 두 번째도 FAIL이면 더 안 돌리고 정직하게 미충족 보고(아래 호출측)
+    const fix = await runClaude(`심사자가 이 저장소를 보고 다음을 지적했어. 지적대로 실제로 고쳐라(추측 말고 코드 직접 수정). 빌드 통과 유지.\n\n[지적]\n${verdict.slice(0, 2000)}\n\n원래 요청: "${task}"`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000, true);
+    if (fix.limited) return false;
+  }
+  return false;
+}
 // 제작 후 실제 빌드 검증 — npm 설치+빌드를 진짜로 돌려서 통과/실패를 정직하게 보고. 깨지면 1회 수정 시도.
 async function verifyBuild(client, channel, thread_ts, dir, repo, pushRef = WORK_BASE) {
   const has = await sh('test -f package.json && grep -q \'"build"\' package.json && echo yes || echo no', dir);
@@ -575,6 +591,9 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
       if (cont.limited) { await postAs(client, channel, thread_ts, LEAD, '⏳ 이어서 채우다가 한도에 걸렸어. 지금까지 만든 만큼만 올릴게, 리셋되면 "이어서"라고 해줘.'); break; }
     }
   }
+  // R3: PR/완료 전 critic 심사 (신규·UI 작업만 — 작은 수정엔 과함). FAIL이면 runCritic이 1회 고치고 재심사.
+  let criticPass = true;
+  if ((newProject || uiish) && !workCancel[channel]) { prog.phase('요청대로 됐는지 심사하는 중'); criticPass = await runCritic(client, channel, thread_ts, dir, task, prd); }
   await sh('git add -A', dir);
   const repoUrl = `https://github.com/${repo}`;
   const chk = await sh('git diff --cached --quiet; echo $?', dir);
@@ -584,8 +603,8 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   await sh(`git commit -m "도핑연구소: ${cmsg}"`, dir);
   prog.phase('빌드 되나 돌려보고 라이브로 띄우는 중');
   const finalGaps = (newProject || uiish) ? await checkAppGaps(dir) : []; // 최종 빈구멍 — "다 끝냈어 상용수준" 거짓완료 방지
-  const incomplete = finalGaps.length > 0;
-  const doneHead = incomplete ? `⚠️ 초안은 올렸는데 아직 미완성이야 — ${finalGaps.join(', ')}. 이대로는 상용 아니고, 더 채워야 진짜 동작해. ("이어서"라고 하면 계속 채울게)` : '다 끝냈어!';
+  const incomplete = finalGaps.length > 0 || !criticPass; // R3: 심사 미통과도 미완성으로
+  const doneHead = incomplete ? `⚠️ 초안은 올렸는데 아직 미완성이야 — ${finalGaps.length ? finalGaps.join(', ') : '심사에서 일부 미충족(위 지적 확인)'}. 이대로는 상용 아니고, 더 채워야 진짜 동작해. ("이어서"라고 하면 계속 채울게)` : '다 끝냈어! (심사 통과)';
   let mainErr = '';
   if (!forcePR) {
     const pushMain = await sh(`git push origin HEAD:${WORK_BASE}`, dir);
