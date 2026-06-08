@@ -1379,12 +1379,21 @@ function bizChange(repo, key) {
   return ` ← ${period} 대비 ${sign}${d.toLocaleString()}${pct !== null ? `(${sign}${pct}%)` : ''}${big ? ` [특이: ${d > 0 ? '급증' : '급감'}]` : ''}`;
 }
 function bizScorecard(repo) {
-  const m = bizLatest(repo) || {};
-  return BIZ_SCORECARD.map(g => g.cat + '\n' + g.items.map(it => {
-    const k = it.keys.find(kk => typeof m[kk] === 'number');
-    if (k != null) { const u = (BIZ_LABELS[k] && BIZ_LABELS[k].unit) || ''; return `  - ${it.ko}: ${m[k].toLocaleString()}${u}${bizChange(repo, k)}`; }
-    return `  - ${it.ko}: 미연결${it.how ? ` (${it.how})` : ''}`;
-  }).join('\n')).join('\n');
+  const m = bizLatest(repo) || {}; const short = s => s.replace(/\s*\(.*?\)\s*/g, '').trim();
+  const stageLines = []; const gaps = [];
+  for (const g of BIZ_SCORECARD) {
+    const got = [];
+    for (const it of g.items) {
+      const k = it.keys.find(kk => typeof m[kk] === 'number');
+      if (k != null) { const u = (BIZ_LABELS[k] && BIZ_LABELS[k].unit) || ''; got.push(`${short(it.ko)} ${m[k].toLocaleString()}${u}${bizChange(repo, k)}`); }
+      else gaps.push(short(it.ko));
+    }
+    const cat = g.cat.replace(/[\[\]]/g, '');
+    if (got.length) stageLines.push(`${cat}  ${got.join('  ·  ')}`);
+  }
+  let out = stageLines.join('\n') || '(아직 연결된 지표 없음)';
+  if (gaps.length) out += `\n측정 필요: ${[...new Set(gaps)].join(', ')}`;
+  return out;
 }
 // 지표별 추세(직전 스냅샷 대비 증감) 한 줄
 function bizTrendLines(repo) {
@@ -1423,11 +1432,12 @@ async function runBizBriefing(client, channel, manual = false) {
       const metricsTxt = Object.entries(m).map(([k, v]) => `${(BIZ_LABELS[k] ? BIZ_LABELS[k].ko : k)}: ${v}${tr[k] ? ' ' + tr[k] : ''}`).join('\n');
       const name = rp.split('/').pop();
       const prod = BIZ_PRODUCT[rp] ? `\n[이 서비스가 뭐냐]\n${BIZ_PRODUCT[rp]}` : '';
-      const r = await runClaude(`너는 도핑연구소 사업 책임자(PM/그로스)다. 아래는 "${name}" 서비스 하나의 실제 사업 지표(직전 대비 추세 포함)다. 다른 서비스랑 섞지 말고 이 서비스만 분석해라.${prod}${UNTRUSTED_PREAMBLE}\n[${name} 지표]\n${wrapUntrusted(metricsTxt)}\n\n${BIZ_RUBRIC}\n\n친근한 한국어 반말로(절대 마크다운·별표(*)·#·이모지·영어약어남발 금지, 쉬운 말, 그냥 문장으로). 구성: 1)지금 상태(AARRR 단계별, 있는 데이터만) 2)눈에 띄는 변화·특이사항(전일/전주/전달 대비 변동 크면 왜 중요한지 설명) 3)측정 갭(중요한데 안 보이는 지표+어떻게 계측) 4)지금 하면 효과 클 개선 1~3개(각각 어떤 지표 올리려는지 타겟). 데이터에 없는 수치는 절대 지어내지 마.`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 180000);
-      const text = deMd((r.text || '').trim()) || '(이 서비스 브리핑 생성 실패 — 데이터부족/한도)';
+      const gen = async () => { const r = await runClaude(`너는 도핑연구소 사업 책임자(PM/그로스)다. 아래는 "${name}" 서비스 하나의 실제 사업 지표(직전 대비 추세 포함)다. 다른 서비스랑 섞지 말고 이 서비스만 분석해라.${prod}${UNTRUSTED_PREAMBLE}\n[${name} 지표]\n${wrapUntrusted(metricsTxt)}\n\n${BIZ_RUBRIC}\n\n친근한 한국어 반말로(절대 마크다운·별표(*)·#·이모지·영어약어남발 금지, 쉬운 말, 그냥 문장으로). 구성: 1)지금 상태(AARRR 단계별, 있는 데이터만) 2)눈에 띄는 변화·특이사항(전일/전주/전달 대비 변동 크면 왜 중요한지 설명) 3)측정 갭(중요한데 안 보이는 지표+어떻게 계측) 4)지금 하면 효과 클 개선 1~3개(각각 어떤 지표 올리려는지 타겟). 데이터에 없는 수치는 절대 지어내지 마.`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 180000); const t = deMd((r.text || '').trim()) || '(이 서비스 브리핑 생성 실패 — 데이터부족/한도)'; return { ok: r.ok !== false, text: t }; };
       log('info', 'biz-briefing', { manual, repo: rp });
-      if (channel) await postAs(client, channel, undefined, byName('김채원') || LEAD, `사업 브리핑 — ${name}\n${text}`);
-      if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: `사업 브리핑 — ${name}\n${scrubOutput(text)}` }).catch(() => {});
+      let text;
+      if (channel) { const res = await replyTyping(client, channel, undefined, byName('김채원') || LEAD, async () => { const g = await gen(); return { ...g, text: `사업 브리핑 — ${name}\n${g.text}` }; }); text = (res && res.text) || ''; }
+      else { const g = await gen(); text = `사업 브리핑 — ${name}\n${g.text}`; }
+      if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(text) }).catch(() => {});
     }
     if (!any && manual) await postAs(client, channel, undefined, LEAD, '지금 사업 수치를 못 받았어(서비스 stats URL/인증 확인). "사업 지표"로 점검해줘.');
   } catch (e) { try { log('error', 'biz-briefing-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
@@ -1985,9 +1995,12 @@ async function handle(event, client) {
       const m = raw.match(/^사업\s*지표\s*(\S+)/); const targetRepo = m && m[1] ? (extractRepo(m[1]) && !extractRepo(m[1]).startsWith('alias:') ? extractRepo(m[1]) : resolveRepo(m[1])) : null;
       const repos = targetRepo ? [targetRepo] : Object.keys(bizData);
       if (!repos.length) { await postAs(client, channel, thread_ts, LEAD, '아직 등록된 사업 메트릭 소스가 없어. "사업 메트릭 등록 <레포> <stats_url>"로 올려줘. (wewantpeace는 기본 시드돼 있어 — "사업 지표"로 바로 확인)'); return; }
-      const lines = [];
-      for (const rp of repos) { await bizFetch(rp); lines.push(`■ ${rp.split('/').pop()}\n` + bizScorecard(rp)); }
-      await postAs(client, channel, thread_ts, byName('김채원') || LEAD, '사업 스코어카드 — 봐야 할 지표 전체 (값=연결됨 / 미연결=연결법 표시, 실데이터·추정0)\n변동률은 직전 기록 대비(주기에 맞춰 전일/전주/전달), [특이] 표시는 큰 변동. 자세한 설명은 "사업 브리핑".\n\n' + lines.join('\n\n')); return;
+      await replyTyping(client, channel, thread_ts, byName('김채원') || LEAD, async () => {
+        const lines = [];
+        for (const rp of repos) { await bizFetch(rp); lines.push(`■ ${rp.split('/').pop()}\n` + bizScorecard(rp)); }
+        return { ok: true, text: '사업 스코어카드 (값=실데이터, 변동률은 직전 대비, [특이]=큰 변동. 설명은 "사업 브리핑")\n\n' + lines.join('\n\n') };
+      });
+      return;
     }
     // A2: 사업 브리핑 (실수치 → AARRR 루브릭 해석 + 측정갭 + 개선안)
     if (/(사업\s*브리핑|비즈니스\s*브리핑|사업\s*분석|사업\s*진단)/i.test(raw)) {
