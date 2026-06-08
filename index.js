@@ -279,12 +279,7 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
     const items = await extractActionItems(synth.text);
     const doable = items.filter(x => x.kind !== 'human');
     if (doable.length) {
-      pendingDispatch[channel] = { repo, items, at: Date.now() };
-      const label = k => k === 'investigate' ? '조사' : k === 'build' ? '코드수정' : '사람만';
-      const itemRisk = x => x.kind === 'investigate' ? 'low' : x.kind === 'human' ? 'low' : riskTier(x.task); // I4: 조사=읽기전용 저위험, 코드수정은 내용따라
-      const fmt = items.map((x, i) => `${i + 1}. ${riskIcon(itemRisk(x))} [${label(x.kind)}] ${x.who ? x.who + ' — ' : ''}${x.task}`).join('\n');
-      await postAs(client, channel, thread_ts, LEAD, `위 결론에서 실제로 착수 가능한 액션 뽑았어 (🟢저위험 🟡보통 🔴고위험):\n${fmt}\n\n"실행"이라고 하면 조사·코드수정 항목을 내가 바로 돌릴게(조사는 읽기전용, 코드수정은 PR로 올려서 네가 머지). 골라서 "실행 1,3"도 돼. 안 할 거면 "넘어가". (사람만 가능한 건 빼고 돌려)`);
-      await postButtons(channel, thread_ts, [{ text: '▶️ 전부 실행', id: 'dispatch_run', style: 'primary' }, { text: '넘어가', id: 'dispatch_skip' }]); // L3
+      await proposeOrAuto(client, channel, repo, items, '위 결론에서 착수 가능한 액션 뽑았어 (🟢저위험 🟡보통 🔴고위험)');
     }
   }
 }
@@ -332,6 +327,51 @@ async function dispatchActionItems(client, channel, thread_ts, repo, items) {
     await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}액션아이템 실행 끝. 조사 결과·PR 위에서 확인해줘.`);
   } catch (e) { await postAs(client, channel, thread_ts, LEAD, '실행 중 오류: ' + String(e).slice(0, 200)); }
   finally { activeWork[channel] = null; }
+}
+// ── 오토파일럿: 위험도별 자율 다이얼 ──
+const PROD_REPOS = ['nameofkk/sponono', 'nameofkk/wewantpeace', 'nameofkk/myungjak'];
+const SELF_REPO = 'nameofkk/doping-lab-slack';
+// AP2: 액션아이템의 자율 티어 — auto(읽기전용 자동) / auto-build(비프로드 코드 자동) / gate(자기수정·프로드 승인유지) / block(파괴적)
+function apTier(kind, repo, task) {
+  if (isDestructive(task)) return 'block';
+  if (kind === 'investigate') return 'auto';
+  if (kind === 'build') { if (repo === SELF_REPO || PROD_REPOS.includes(repo)) return 'gate'; return 'auto-build'; }
+  return 'gate';
+}
+// 제안을 오토파일럿 상태에 따라 자동실행 또는 게이트. OFF면 기존처럼 버튼 게이트.
+const AP_BUILD_CAP = parseInt(process.env.AP_BUILD_CAP || '3', 10); // autopilot 자동 빌드 일일 상한(폭주·비용 방지)
+let apBuildDay = null, apBuildCount = 0;
+async function proposeOrAuto(client, channel, repo, items, headerLine) {
+  const label = k => k === 'investigate' ? '조사' : k === 'build' ? '코드수정' : '사람만';
+  const fmt = items.map((x, i) => `${i + 1}. ${riskIcon(x.kind === 'investigate' ? 'low' : x.kind === 'human' ? 'low' : riskTier(x.task))} [${label(x.kind)}] ${x.task}`).join('\n');
+  if (!settings.autopilot || !settings.autopilot[channel]) { // 오토파일럿 OFF → 기존 게이트
+    pendingDispatch[channel] = { repo, items, at: Date.now() };
+    await postAs(client, channel, undefined, LEAD, `${headerLine}\n${fmt}\n\n"실행" 하거나 버튼 누르면 착수. 안 할 거면 "넘어가".`);
+    await postButtons(channel, undefined, [{ text: '▶️ 실행', id: 'dispatch_run', style: 'primary' }, { text: '넘어가', id: 'dispatch_skip' }]);
+    return;
+  }
+  // 오토파일럿 ON → 티어 분기
+  const n = kstNow(); if (apBuildDay !== n.day) { apBuildDay = n.day; apBuildCount = 0; }
+  const tiered = items.map(x => ({ x, t: apTier(x.kind, repo, x.task) }));
+  const autoInv = tiered.filter(z => z.t === 'auto').map(z => z.x);
+  let autoBuild = tiered.filter(z => z.t === 'auto-build').map(z => z.x);
+  const gated = tiered.filter(z => z.t === 'gate' || z.t === 'block').map(z => z.x);
+  // 일일 빌드 상한 초과분은 게이트로 전환(폭주 방지)
+  if (autoBuild.length && apBuildCount + autoBuild.length > AP_BUILD_CAP) { const room = Math.max(0, AP_BUILD_CAP - apBuildCount); gated.push(...autoBuild.slice(room)); autoBuild = autoBuild.slice(0, room); }
+  await postAs(client, channel, undefined, LEAD, `🛸 오토파일럿: ${headerLine}\n${fmt}`);
+  const autoNow = autoInv.concat(autoBuild);
+  if (autoNow.length && !activeWork[channel]) {
+    apBuildCount += autoBuild.length;
+    logDecision(channel, 'autopilot-run', `자동실행 ${autoNow.length}건(조사 ${autoInv.length}·코드 ${autoBuild.length}) ${repo}`);
+    log('info', 'autopilot-run', { repo, inv: autoInv.length, build: autoBuild.length });
+    if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: `🛸 오토파일럿 자동실행(${repo.split('/').pop()}): ${autoNow.map(x => x.task.slice(0, 40)).join(' / ')}` }).catch(() => {});
+    dispatchActionItems(client, channel, undefined, repo, autoNow).catch(() => {}); // build는 비프로드라 PR로 올라감(머지는 사람) — 코드 자동수정의 안전판
+  } else if (autoNow.length) { gated.push(...autoNow); } // 이미 작업중이면 게이트로
+  if (gated.length) {
+    pendingDispatch[channel] = { repo, items: gated, at: Date.now() };
+    await postAs(client, channel, undefined, LEAD, `🔒 고위험이라 승인 유지(자기수정·프로드·파괴적): ${gated.map(x => x.task.slice(0, 36)).join(' / ')}\n"실행"하면 착수, "넘어가"로 패스.`);
+    await postButtons(channel, undefined, [{ text: '▶️ 실행', id: 'dispatch_run', style: 'primary' }, { text: '넘어가', id: 'dispatch_skip' }]);
+  }
 }
 // 명확한 "중단/취소 명령"일 때만 true (문장 속에 '중단','스톱' 단어가 섞인 일반 요청은 제외 — "중단했던 거 이어서", "스톱워치 추가" 등 오작동 방지)
 // I3: 입력 정규화 — 가드레일 우회용 비가시/zero-width 문자 제거 + 유니코드 정규화 (이모지/비가시문자 밀반입이 프로덕션 가드 최대 100% 우회한다는 보고 대응)
@@ -1049,8 +1089,8 @@ function rulesCtx(channel) { const r = rules[channel] || []; return r.length ? `
 
 // ── 설정(권한/승인) + 태스크보드 (영구) ──
 const SET_FILE = process.env.SETTINGS_FILE || '/data/settings.json';
-let settings = { commanders: [], approval: {} };
-function loadSettings() { try { if (fs.existsSync(SET_FILE)) settings = JSON.parse(fs.readFileSync(SET_FILE, 'utf8')) || settings; } catch {} settings.commanders = settings.commanders || []; settings.approval = settings.approval || {}; }
+let settings = { commanders: [], approval: {}, autopilot: {} };
+function loadSettings() { try { if (fs.existsSync(SET_FILE)) settings = JSON.parse(fs.readFileSync(SET_FILE, 'utf8')) || settings; } catch {} settings.commanders = settings.commanders || []; settings.approval = settings.approval || {}; settings.autopilot = settings.autopilot || {}; }
 function persistSettings() { try { fs.writeFileSync(SET_FILE, JSON.stringify(settings)); } catch {} }
 function canCommand(user) { return !settings.commanders.length || settings.commanders.includes(user); }
 const TASK_FILE = process.env.TASKS_FILE || '/data/tasks.json';
@@ -1273,12 +1313,9 @@ async function runImprovementProposal(client, channel, manual = false) {
     const items = (obj.items || []).filter(x => x && x.task && ['investigate', 'build'].includes(x.kind)).slice(0, 3);
     if (!items.length) { if (manual) await postAs(client, channel, undefined, LEAD, '운영 데이터 훑어봤는데 지금 당장 착수할 개선거리는 딱히 안 보여. 깨끗해.'); return; }
     const repo = resolveRepo(obj.repo || 'bot');
-    pendingDispatch[channel] = { repo, items, at: Date.now() };
     logDecision(channel, 'improve-proposal', `${obj.focus || ''} (${repo})`);
     log('info', 'improve-proposal', { manual, repo, focus: (obj.focus || '').slice(0, 60), n: items.length });
-    const fmt = items.map((x, i) => `${i + 1}. ${riskIcon(x.kind === 'investigate' ? 'low' : riskTier(x.task))} [${x.kind === 'investigate' ? '조사' : '코드수정'}] ${x.task}`).join('\n');
-    await postAs(client, channel, undefined, LEAD, `💡 능동 개선 제안 (${manual ? '수동' : '주간 자동'})\n초점: ${obj.focus || ''}\n대상: ${repo}\n${fmt}\n\n"실행" 하거나 버튼 누르면 착수해(조사=읽기전용, 코드수정=PR로 네가 머지). 안 할 거면 "넘어가".`);
-    await postButtons(channel, undefined, [{ text: '▶️ 실행', id: 'dispatch_run', style: 'primary' }, { text: '넘어가', id: 'dispatch_skip' }]);
+    await proposeOrAuto(client, channel, repo, items, `💡 능동 개선 제안 (${manual ? '수동' : '주간 자동'}) · 초점: ${obj.focus || ''} · 대상: ${repo.split('/').pop()}`);
   } catch (e) { try { log('error', 'improve-proposal-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
 }
 
@@ -1296,12 +1333,10 @@ async function runSelfImproveScan(client, channel, manual = false) {
     const m = (r.text || '').match(/\{[\s\S]*\}/); if (!m) return; let obj; try { obj = JSON.parse(m[0]); } catch { return; }
     const items = (obj.items || []).filter(x => x && x.task && ['investigate', 'build'].includes(x.kind)).slice(0, 3);
     if (!items.length) { if (manual) await postAs(client, channel, undefined, LEAD, '내 코드 훑어봤는데 지금 당장 고칠 자체 개선거리는 안 보여. 깨끗해.'); return; }
-    pendingDispatch[channel] = { repo: SELF_HEAL_REPO, items, at: Date.now() };
     logDecision(channel, 'self-improve-proposal', `${obj.focus || ''}`);
     log('info', 'self-improve-proposal', { manual, focus: (obj.focus || '').slice(0, 60), n: items.length });
-    const fmt = items.map((x, i) => `${i + 1}. ${riskIcon(x.kind === 'investigate' ? 'low' : 'med')} [${x.kind === 'investigate' ? '조사' : '코드수정'}] ${x.task}`).join('\n');
-    await postAs(client, channel, undefined, LEAD, `🛠️ 자기개선 제안 (${manual ? '수동' : '주간 자동'}) — 내 코드(index.js)\n초점: ${obj.focus || ''}\n${fmt}\n\n"실행"하면 착수해(조사=읽기, 코드수정=PR로 올림). 머지·배포는 네가 — Q1 eval 게이트 통과해야 나가니 안전해. 안 할 거면 "넘어가".`);
-    await postButtons(channel, undefined, [{ text: '▶️ 실행', id: 'dispatch_run', style: 'primary' }, { text: '넘어가', id: 'dispatch_skip' }]);
+    // self(bot) repo라 코드수정은 apTier에서 항상 gate(자가브릭 방지) — 조사만 자동, 머지·배포는 사람+Q1 eval
+    await proposeOrAuto(client, channel, SELF_HEAL_REPO, items, `🛠️ 자기개선 제안 (${manual ? '수동' : '주간 자동'}) — 내 코드(index.js) · 초점: ${obj.focus || ''}`);
   } catch (e) { try { log('error', 'self-improve-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
 }
 
@@ -1596,6 +1631,10 @@ async function handle(event, client) {
     // 승인모드
     if (/승인\s*모드\s*(켜|on|온)/i.test(raw)) { settings.approval[channel] = true; persistSettings(); await postAs(client, channel, thread_ts, LEAD, '승인모드 켰어. 앞으로 코드작업은 main에 바로 안 넣고 PR로 올릴게 (네가 머지하면 반영).'); return; }
     if (/승인\s*모드\s*(꺼|off|오프)/i.test(raw)) { delete settings.approval[channel]; persistSettings(); await postAs(client, channel, thread_ts, LEAD, '승인모드 껐어. main에 바로 반영할게.'); return; }
+    // 오토파일럿 — 위험도별 자율 다이얼 (제안을 자동실행, 단 자기수정·프로드 코드변경은 항상 게이트 유지)
+    if (/^(오토\s?파일럿|autopilot|자동\s?운전|자율\s?모드)\s*(켜|on|온|시작|활성)/i.test(raw) && canCommand(event.user)) { settings.autopilot[channel] = true; persistSettings(); logDecision(channel, 'autopilot-on', '오토파일럿 ON'); await postAs(client, channel, thread_ts, LEAD, '🛸 오토파일럿 켰어.\n• 🟢 모니터·조사(읽기)·비프로드 코드 제안 → 자동 착수(승인 불필요)\n• 🔴 내 코드 수정·프로드(sponono/wewantpeace) 변경·배포 → 여전히 승인 받음(안전선)\n• ⛔ 파괴적·계정/키 = 차단/사람\n급할 땐 "오토파일럿 꺼"로 즉시 정지.'); return; }
+    if (/^(오토\s?파일럿|autopilot|자동\s?운전|자율\s?모드)\s*(꺼|off|오프|정지|중지|stop|비활성)/i.test(raw)) { delete settings.autopilot[channel]; persistSettings(); logDecision(channel, 'autopilot-off', '오토파일럿 OFF'); await postAs(client, channel, thread_ts, LEAD, '🛸 오토파일럿 껐어. 이제 모든 실행은 다시 네 승인(버튼/"실행")을 받을게.'); return; }
+    if (/^(오토\s?파일럿|autopilot|자율\s?모드)\s*(상태|어때|뭐|status|\?)?\s*$/i.test(raw)) { const on = !!(settings.autopilot && settings.autopilot[channel]); const recent = decisions.filter(d => d.channel === channel && /^autopilot-run$/.test(d.kind)).slice(-5); await postAs(client, channel, thread_ts, LEAD, `🛸 오토파일럿: ${on ? 'ON' : 'OFF'}\n${on ? '무위험·비프로드는 자동, 자기수정·프로드는 게이트 유지.' : '"오토파일럿 켜"로 자율 실행 활성화.'}${recent.length ? '\n\n[최근 자동실행]\n' + recent.map(d => `· ${d.detail}`).join('\n') : ''}`); return; }
     // 태스크보드
     let tm;
     if ((tm = raw.match(/^태스크\s*추가\s*[:：]?\s*([\s\S]+)/))) { const t = addTask(channel, tm[1].trim(), event.user); await postAs(client, channel, thread_ts, LEAD, `📌 태스크 추가 (#${t.id}): ${t.text}`); return; }
