@@ -1298,13 +1298,13 @@ function registerBizSource(repo, url, name, authHeader) {
 function flattenNums(obj, prefix, out) { for (const k of Object.keys(obj || {})) { const v = obj[k]; const key = prefix ? prefix + '.' + k : k; if (typeof v === 'number' && isFinite(v)) out[key] = v; else if (v && typeof v === 'object' && !Array.isArray(v)) flattenNums(v, key, out); } return out; }
 async function bizFetch(repo) {
   const b = bizData[repo]; if (!b || !b.sources.length) return null;
-  const metrics = {};
+  const metrics = { ...(bizLatest(repo) || {}) }; // 직전 값에서 시작 → 이번에 실패/한도걸린 소스는 마지막 값 보존(표시 누락 방지)
   for (const src of b.sources) {
     try {
       const hdr = src.authHeader ? `-H ${JSON.stringify(src.authHeader)}` : '';
       const r = await sh(`curl -s --max-time 15 ${hdr} '${String(src.url).replace(/'/g, '')}'`);
       let j = null; try { j = JSON.parse((r.out || '').trim()); } catch {}
-      if (j && typeof j === 'object') flattenNums(j, src.name, metrics);
+      if (j && typeof j === 'object') flattenNums(j, src.name, metrics); // 성공한 소스만 덮어씀
     } catch {}
   }
   if (!Object.keys(metrics).length) return null;
@@ -1318,6 +1318,23 @@ async function bizFetch(repo) {
   return metrics;
 }
 function bizLatest(repo) { const b = bizData[repo]; const h = b && b.history && b.history[b.history.length - 1]; return h ? h.metrics : null; }
+// 친한국어 라벨 — 원시 키를 사람이 바로 이해하는 말로. 모르는 키는 깔끔히 폴백.
+const BIZ_LABELS = {
+  'newsletter.subscriber_count': { ko: '뉴스레터 구독자', unit: '명', e: '📧' },
+  'platform.total_events': { ko: '누적 활동(전체 이벤트)', unit: '건', e: '📊' },
+  'platform.events_24h': { ko: '최근 24시간 활동', unit: '건', e: '🔥' },
+  'platform.active_clusters': { ko: '활성 이슈(진행 중 분쟁)', unit: '개', e: '🌍' },
+  'platform.monitored_countries': { ko: '모니터링 국가', unit: '개국', e: '🗺️' },
+  'platform.new_clusters_7d': { ko: '최근 7일 새 이슈', unit: '개', e: '🆕' },
+  'stats.total_blocks': { ko: '누적 차단(스포일러)', unit: '건', e: '🛡️' },
+  'stats.today.block_count': { ko: '오늘 차단', unit: '건', e: '🛡️' },
+};
+function bizLabel(key, value) {
+  const v = typeof value === 'number' ? value.toLocaleString() : value;
+  const L = BIZ_LABELS[key];
+  if (L) return `${L.e || '·'} ${L.ko}: *${v}${L.unit || ''}*`;
+  return `· ${key.split('.').pop().replace(/_/g, ' ')}: *${v}*`; // 모르는 키 폴백
+}
 // 운영 헬스체크 — 각 라이브 서비스 curl로 상태 확인 → 우정잉(QA/SRE)이 보고, 다운이면 윈터가 알림
 async function checkServices(client, channel, announce = true, onlyAlert = false) {
   const sre = byName('윈터') || LEAD; // 운영·헬스체크 = 인프라
@@ -1872,8 +1889,8 @@ async function handle(event, client) {
       const repos = targetRepo ? [targetRepo] : Object.keys(bizData);
       if (!repos.length) { await postAs(client, channel, thread_ts, LEAD, '아직 등록된 사업 메트릭 소스가 없어. "사업 메트릭 등록 <레포> <stats_url>"로 올려줘. (wewantpeace는 기본 시드돼 있어 — "사업 지표"로 바로 확인)'); return; }
       const lines = [];
-      for (const rp of repos) { const got = await bizFetch(rp); const cur = got || bizLatest(rp); lines.push(`*${rp.split('/').pop()}*\n` + (cur ? Object.entries(cur).map(([k, v]) => `· ${k}: ${typeof v === 'number' ? v.toLocaleString() : v}`).join('\n') : '_(수치 못 받음 — URL/인증 확인)_')); }
-      await postAs(client, channel, thread_ts, byName('김채원') || LEAD, '📈 사업 지표 (실데이터)\n' + lines.join('\n\n')); return;
+      for (const rp of repos) { const got = await bizFetch(rp); const cur = got || bizLatest(rp); lines.push(`*${rp.split('/').pop()}*\n` + (cur ? Object.entries(cur).map(([k, v]) => bizLabel(k, v)).join('\n') : '_아직 수치를 못 받았어 (URL/인증 확인 — "사업 메트릭 등록"으로 소스 점검)_')); }
+      await postAs(client, channel, thread_ts, byName('김채원') || LEAD, '📈 사업 지표 (실데이터, 지어낸 거 아님)\n' + lines.join('\n\n')); return;
     }
     // 사용량/번레이트 (오늘 Claude 호출·토큰·한도걸림)
     if (/(사용량|번레이트|토큰.*얼마|클로드.*사용|usage)/.test(raw) && !/운영|리포트|report/.test(raw)) {
