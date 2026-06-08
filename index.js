@@ -1282,6 +1282,29 @@ async function runImprovementProposal(client, channel, manual = false) {
   } catch (e) { try { log('error', 'improve-proposal-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
 }
 
+// B4: 능동 자기개선 루프 — 봇 자신의 운영 신호(자체 판단·실패·반복 마찰)를 스캔해 "내 코드(index.js) 개선" 제안. selfHeal(에러 반응)의 능동 버전. 실행은 승인 게이트 + 코드수정=PR(머지·배포는 사람, Q1 eval 통과해야 나감). 주1회 + "자기개선" 수동.
+let selfImproveAt = 0;
+async function runSelfImproveScan(client, channel, manual = false) {
+  if (!manual && Date.now() - selfImproveAt < 6 * 86400000) return; // 주1회
+  selfImproveAt = Date.now();
+  if (!channel || activeWork[channel] || pendingDispatch[channel]) return;
+  try {
+    const selfDec = decisions.slice(-50).filter(d => /self|heal|injection|drift|breaker|route|schedule-|iac|noop/i.test(d.kind)).slice(-20).map(d => `[${d.kind}] ${String(d.detail || '').slice(0, 50)}`);
+    const recentFails = Object.values(jobs).filter(j => j.status === 'failed' && Date.now() - (j.createdAt || 0) < 14 * 86400000).slice(-6).map(j => `${j.type}:${j.error ? String(j.error).slice(0, 50) : (j.title || '').slice(0, 40)}`);
+    const ctx = `[봇 자체 관련 최근 판단(반복 많을수록 마찰)]\n${selfDec.join('\n') || '없음'}\n\n[최근 실패]\n${recentFails.join('\n') || '없음'}`;
+    const r = await runClaude(`너는 이 슬랙 봇(도핑연구소)의 자체 품질 책임자다. 아래는 봇 자신의 최근 운영 신호야. 여기서 "봇 코드(index.js)를 개선하면 좋을 것" 1~3개를 구체적으로 뽑아라. 기술부채·반복 마찰(같은 판단 반복)·안정성·관측성 관점. 데이터 근거로만, 지어내지 마.${UNTRUSTED_PREAMBLE}\n${wrapUntrusted(ctx)}\n\nJSON만: {"focus":"한 줄","items":[{"who":"담당","task":"index.js에서 뭘 어떻게 고칠지 구체적으로","kind":"investigate|build"}]}. items 최대 3개. 개선거리 없으면 빈 배열.`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 150000);
+    const m = (r.text || '').match(/\{[\s\S]*\}/); if (!m) return; let obj; try { obj = JSON.parse(m[0]); } catch { return; }
+    const items = (obj.items || []).filter(x => x && x.task && ['investigate', 'build'].includes(x.kind)).slice(0, 3);
+    if (!items.length) { if (manual) await postAs(client, channel, undefined, LEAD, '내 코드 훑어봤는데 지금 당장 고칠 자체 개선거리는 안 보여. 깨끗해.'); return; }
+    pendingDispatch[channel] = { repo: SELF_HEAL_REPO, items, at: Date.now() };
+    logDecision(channel, 'self-improve-proposal', `${obj.focus || ''}`);
+    log('info', 'self-improve-proposal', { manual, focus: (obj.focus || '').slice(0, 60), n: items.length });
+    const fmt = items.map((x, i) => `${i + 1}. ${riskIcon(x.kind === 'investigate' ? 'low' : 'med')} [${x.kind === 'investigate' ? '조사' : '코드수정'}] ${x.task}`).join('\n');
+    await postAs(client, channel, undefined, LEAD, `🛠️ 자기개선 제안 (${manual ? '수동' : '주간 자동'}) — 내 코드(index.js)\n초점: ${obj.focus || ''}\n${fmt}\n\n"실행"하면 착수해(조사=읽기, 코드수정=PR로 올림). 머지·배포는 네가 — Q1 eval 게이트 통과해야 나가니 안전해. 안 할 거면 "넘어가".`);
+    await postButtons(channel, undefined, [{ text: '▶️ 실행', id: 'dispatch_run', style: 'primary' }, { text: '넘어가', id: 'dispatch_skip' }]);
+  } catch (e) { try { log('error', 'self-improve-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
+}
+
 // 제작 끝나고 핸드오프 — 에이전트가 끝낸 것(✅)과 사람만 할 수 있는 것(☐ 체크리스트)을 구분해서 보고
 async function handoffChecklist(client, channel, thread_ts, repo, task) {
   const t = task || '';
@@ -1732,9 +1755,15 @@ async function handle(event, client) {
       return;
     }
     // A4: 능동 개선 제안 (운영 데이터 → 게이트된 액션아이템). 수동 트리거.
-    if (/(개선\s*제안|개선\s*아이디어|개선거리|뭐\s*개선|improve\s*proposal)/i.test(raw)) {
+    if (/(개선\s*제안|개선\s*아이디어|개선거리|뭐\s*개선|improve\s*proposal)/i.test(raw) && !/자기|self|내\s*코드|봇\s*자체/.test(raw)) {
       if (await guardBusy(client, channel, thread_ts)) return;
       runImprovementProposal(client, channel, true).catch(() => {});
+      return;
+    }
+    // B4: 능동 자기개선 스캔 (봇 자체 코드 → 게이트). 수동 트리거.
+    if (/(자기\s*개선|자가\s*개선|self\s*improve|내\s*코드\s*개선|봇\s*개선|자체\s*개선)/i.test(raw)) {
+      if (await guardBusy(client, channel, thread_ts)) return;
+      runSelfImproveScan(client, channel, true).catch(() => {});
       return;
     }
     // 의존성 업데이트 → 안전하게 올리고 빌드 확인 후 PR
@@ -2051,6 +2080,8 @@ async function postButtons(channel, thread_ts, buttons) {
       runOpsBriefing(botClient, briefCh, false).catch(() => {});
       // A4: 주1회(월요일) 능동 개선 제안 — 게이트로 발의
       if (n.dow === 1 && briefCh) runImprovementProposal(botClient, briefCh, false).catch(() => {});
+      // B4: 주1회(수요일) 능동 자기개선 스캔 — 봇 자체 코드 개선 발의(게이트)
+      if (n.dow === 3 && briefCh) runSelfImproveScan(botClient, briefCh, false).catch(() => {});
     }
     // A4: 능동 강화 — 악화(2연속 다운+) 서비스는 시간 기다리지 말고 다음 틱에 즉시 재확인(빠른 복구·다운 감지)
     if (n.m % 5 === 0) {
