@@ -134,8 +134,9 @@ async function replyTyping(client, channel, thread_ts, persona, gen) {
   let res; try { res = await gen(); } catch { res = {}; }
   if (timer) clearInterval(timer);
   const text = scrubOutput((((res && res.text) || '') + '').trim()) || '…';
-  if (wc && ts) { try { await wc.chat.update({ channel, ts, text }); recordMsg(channel, persona.name, text); return res; } catch {} }
-  await postAs(client, channel, thread_ts, persona, text); // 폴백(임시메시지 실패/임퍼소네이션)
+  // 스피너를 update로 교체하면 "(편집됨)"이 남아 → 스피너 삭제하고 답변은 새 메시지로 게시(편집 흔적 없음)
+  if (wc && ts) { try { await wc.chat.delete({ channel, ts }); } catch {} }
+  await postAs(client, channel, thread_ts, persona, text);
   return res;
 }
 // 명령어 메뉴 — 자연어 명령들을 카테고리로 정리. "명령어"/"도움말" 텍스트 또는 (등록 시) /도핑 슬래시로 호출.
