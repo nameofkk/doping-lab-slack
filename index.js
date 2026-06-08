@@ -209,6 +209,7 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
   const structDigest = structured.length ? `\n\n[구조화된 핵심 주장 — 이걸 1차 입력으로 종합해라]\n${structured.map(s => `- ${s.who}: ${s.tag}`).join('\n')}` : '';
   const synth = await runClaude(`${LEAD.prompt}${STYLE}${rulesCtx(channel)}${structDigest}\n\n[토론 전문(참고)]\n${transcript.slice(-3500)}\n\n위 구조화된 핵심 주장을 1차 근거로, 전문은 보조로 종합해. 의견 갈린 지점 짚고, 가장 설득력 있는 쪽으로 최적 결론. 단순 요약 말고 결정과 다음 액션까지. 특히 '미해결'로 표시된 건 액션아이템 후보로 챙겨.${HONEST}`, LEAD.model);
   await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}📋 결론\n` + (synth.text || '').trim().slice(0, 2800));
+  extractFacts(repo || channel, `[토론: ${idea}]\n${(synth.text || '').slice(0, 1800)}`).catch(() => {}); // R7: 토론 결론에서 결정·사실 저장
   // 결론의 액션아이템을 뽑아서 "승인하면 실제로 착수"하게 제시 (자동 실행 X — 사용자 승인 게이트). 레포 있을 때만(코드로 할 게 있어야 함).
   if (repo && synth.text && synth.ok !== false) {
     const items = await extractActionItems(synth.text);
@@ -577,7 +578,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   // UI/화면 관련이거나 신규 프로젝트일 때만 디자인 규칙 적용 (백엔드·봇 자가수정 등엔 노이즈라 빼)
   const uiish = newProject || /ui|화면|디자인|프론트|컴포넌트|페이지|버튼|css|스타일|레이아웃|frontend|react|html|랜딩|사이트|홈페이지|게임/i.test(task);
   const fbBuild = drainFeedback(channel); // 제작 직전 들어온 사용자 수정요청도 반영
-  const res = await runClaude(`${intro}${rulesCtx(channel)}${PLAIN}${uiish ? DESIGN_RULE : ''}${newProject ? LAUNCH_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}${fbBuild ? '\n\n[사용자가 추가로 준 지시 — 반드시 반영]\n' + fbBuild : ''}\n\n요청: ${task}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000, true);
+  const res = await runClaude(`${intro}${rulesCtx(channel)}${repo ? recallFacts(repo, task) : ''}${PLAIN}${uiish ? DESIGN_RULE : ''}${newProject ? LAUNCH_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}${fbBuild ? '\n\n[사용자가 추가로 준 지시 — 반드시 반영]\n' + fbBuild : ''}\n\n요청: ${task}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000, true);
   if (res.limited) { jobUpdate(channel, { status: 'limited' }); await postAs(client, channel, thread_ts, LEAD, '⏳ 제작 중에 클로드 사용량 한도에 걸렸어. 지금까지 만든 건 안 올렸어, 한도 리셋되면 이어서 만들게.'); return; }
   // 연속완성 패스(R2: Task/Progress 원장 + 재계획) — 신규 풀빌드/화면작업은 한 번에 안 끝나고 스캐폴딩만 남기 쉬움. 갭이 줄어드는지(진척) 추적해서, 직전 패스가 진척이 없었으면(스톨) 같은 방식 반복 말고 접근을 바꿔 재계획. 진행기록은 job 원장에 남김.
   if ((newProject || uiish || (feedback[channel] || []).length) && !res.limited) {
@@ -619,6 +620,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
       if (!n) await postAs(client, channel, thread_ts, LEAD, (res.text || '').trim().slice(0, 1500));
       await verifyBuild(client, channel, thread_ts, dir, repo);
       jobUpdate(channel, { status: incomplete ? 'awaiting-approval' : 'done', artifacts: [repoUrl], note: incomplete ? '미완성(이어서 필요)' : undefined });
+      extractFacts(repo, `[작업] ${task}\n[한 일] ${(res.text || '').slice(0, 1500)}`).catch(() => {}); // R7: 이 작업에서 기억할 사실 저장
       await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}${doneHead} ${repoUrl} (${WORK_BASE}에 반영)\n코드 브라우저로 보려면: https://github.dev/${repo}\n빌드·라이브·스크린샷은 위에 확인해줘. (코드 파일로 받고 싶으면 "코드 줘"라고 해)`);
       if (newProject && !incomplete) await handoffChecklist(client, channel, thread_ts, repo, task); // 미완성이면 "상용 오픈 체크리스트" 안 띄움(거짓 신호 방지)
       return;
@@ -747,7 +749,7 @@ async function runReport(client, channel, thread_ts, reporter, repo, task) {
     const cl = await sh(`rm -rf ${dir} && git clone --depth 1 https://x-access-token:${GITHUB_TOKEN}@github.com/${repo}.git ${dir} && chmod -R 777 ${dir}`);
     if (cl.code !== 0) { await postAs(client, channel, thread_ts, reporter, `${mention(channel)}${repo} 레포를 못 찾았어ㅠ (이름 확인 필요)\n${(cl.err || '').slice(0, 200)}`); return; }
     const GROUND = '\n\n[사실 근거 규칙 — 엄격] 레포 코드/파일로 직접 확인되는 것만 사실로 말해라. 배포 여부, 앱스토어·플레이스토어 제출/승인 여부, 실제 유저 수, 매출, 광고 활성화 여부 같은 외부·운영 상태는 코드만으론 절대 알 수 없다. 코드에 준비/설정이 있어도 "제출됨/출시됨/활성화됨"이라고 단정하지 마. 그런 건 "코드엔 준비돼 있는데 실제 제출/활성화 여부는 확인 안 됨"으로 표시해라. 지어내면 안 된다.';
-    const res = await runClaude(`이 저장소를 실제로 열어보고, 사용자의 요청 "${task}"에 직접 답해라. 단순 현황 나열이 아니라, 레포에서 확인한 사실을 근거로 실제 답·제안·전략을 내라. 코드는 읽기만 해. 레포에 없는 시장·경쟁사·트렌드·벤치마크는 웹서치(WebSearch)로 찾아서 근거로 써도 돼.${GROUND}${rulesCtx(channel)}\n\n역할별로 각자 그 요청에 대한 자기 분야의 답/제안을 줘. 각 줄 "역할: 답/제안" 형식(관련된 역할만, PM/리서처/UX/아키텍트/보안/마케터). 질문 분야의 담당이 메인으로 구체적인 안을 내고(예: 마케팅 질문이면 마케터가 채널·메시지·실행안까지), 나머지는 거들어. 한 역할당 2~4줄.${PLAIN}`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000);
+    const res = await runClaude(`이 저장소를 실제로 열어보고, 사용자의 요청 "${task}"에 직접 답해라. 단순 현황 나열이 아니라, 레포에서 확인한 사실을 근거로 실제 답·제안·전략을 내라. 코드는 읽기만 해. 레포에 없는 시장·경쟁사·트렌드·벤치마크는 웹서치(WebSearch)로 찾아서 근거로 써도 돼.${GROUND}${rulesCtx(channel)}${recallFacts(repo, task)}\n\n역할별로 각자 그 요청에 대한 자기 분야의 답/제안을 줘. 각 줄 "역할: 답/제안" 형식(관련된 역할만, PM/리서처/UX/아키텍트/보안/마케터). 질문 분야의 담당이 메인으로 구체적인 안을 내고(예: 마케팅 질문이면 마케터가 채널·메시지·실행안까지), 나머지는 거들어. 한 역할당 2~4줄.${PLAIN}`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000);
     if (res.limited) { await postAs(client, channel, thread_ts, reporter, `${mention(channel)}⏳ 조사 중에 클로드 사용량 한도에 걸렸어. 리셋되면 다시 봐줄게.`); return; }
     const n = await distributeReport(client, channel, thread_ts, res.text);
     if (!n) await postAs(client, channel, thread_ts, reporter, (res.text || '(내용 없음)').trim().slice(0, 3000));
@@ -762,6 +764,7 @@ async function runReport(client, channel, thread_ts, reporter, repo, task) {
     const synth = await runClaude(`${LEAD.prompt}${PLAIN}${rulesCtx(channel)}\n\n[사용자 질문]\n${task}\n\n[팀 의견]\n${(res.text || '').slice(0, 2500)}\n\n[안다연 반론]\n${devilText.slice(0, 1200)}\n\n위를 다 검토해서 "최종안"으로 종합·보완해라. 의견 충돌은 네가 정리하고, 우선순위(1·2·3)를 매기고, 코드로 확인 안 된 가정은 빼거나 "확인 필요"로 표시해라. 바로 실행 가능한 구체적 액션으로 끝내. 마크다운 금지.`, LEAD.model, WORKDIR, CLAUDE_PERMISSION_MODE, 180000);
     if (synth.text && synth.ok !== false) await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}📌 최종안 (팀 의견+반론 종합)\n${synth.text.trim().slice(0, 2500)}`);
     else await postAs(client, channel, thread_ts, reporter, `${mention(channel)}다 정리했어, 위에 봐줘!`);
+    extractFacts(repo, `[조사] ${task}\n${(synth.text || res.text || '').slice(0, 1800)}`).catch(() => {}); // R7: 조사에서 확인된 사실 저장
   } finally { await prog.done(); }
 }
 
@@ -894,6 +897,20 @@ function jobBoard(channel) {
   const icon = { running: '🔵', 'awaiting-approval': '🟡', done: '✅', failed: '❌', interrupted: '⚠️', limited: '⏳', cancelled: '⏹️', planning: '📝' };
   const fmt = j => { const m = Math.round((j.updatedAt - j.createdAt) / 60000); const led = j.ledger && j.ledger.progress && j.ledger.progress.length ? '\n   📝 ' + j.ledger.progress[j.ledger.progress.length - 1] : ''; return `${icon[j.status] || '•'} #${j.id} [${j.status}] ${j.type} · ${j.title}${j.repo ? ' (' + j.repo.split('/').pop() + ')' : ''}${m ? ' ·' + m + '분' : ''}${led}${j.artifacts && j.artifacts.length ? '\n   ↳ ' + j.artifacts.join(' ') : ''}`; };
   return '📋 작업 현황 (최근 12개)\n' + mine.map(fmt).join('\n');
+}
+// ── R7: 장기 메모리(mem0식) — 레포별 durable 사실(컨벤션·결정·선호)을 추출·저장하고 작업 시작 시 주입. 무한 슬라이딩 윈도우 한계 극복. (벡터 대신 레포키+키워드 회상 — 인프라 0) ──
+const FACTS_FILE = process.env.FACTS_FILE || '/data/facts.json';
+let facts = {}; // facts[repoOrChannel] = [{text, at}]
+function loadFacts() { try { if (fs.existsSync(FACTS_FILE)) facts = JSON.parse(fs.readFileSync(FACTS_FILE, 'utf8')) || {}; } catch { facts = {}; } }
+function persistFacts() { try { fs.writeFileSync(FACTS_FILE, JSON.stringify(facts)); } catch {} }
+function addFact(key, text) { const t = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 220); if (!t || t.length < 6) return; const arr = (facts[key] = facts[key] || []); if (arr.some(f => f.text === t)) return; arr.push({ text: t, at: Date.now() }); if (arr.length > 40) facts[key] = arr.slice(-40); persistFacts(); } // 레포당 40개 캡, 중복 방지
+function recallFacts(key, taskText) { const arr = facts[key] || []; if (!arr.length) return ''; const words = String(taskText || '').toLowerCase().match(/[a-z가-힣0-9]{2,}/g) || []; const scored = arr.map(f => ({ f, s: words.filter(w => f.text.toLowerCase().includes(w)).length })); const rel = scored.filter(x => x.s > 0).sort((a, b) => b.s - a.s).slice(0, 6).map(x => x.f); const use = rel.length ? rel : arr.slice(-5); return '\n\n[이 프로젝트에 대해 전에 확인·결정된 것(기억) — 참고하되 코드와 다르면 코드 우선]\n' + use.map(f => '- ' + f.text).join('\n'); }
+async function extractFacts(key, contextText) { // 작업/대화 끝나고 durable 사실 0~3개 뽑아 저장
+  if (!key) return;
+  try {
+    const r = await runClaude(`다음 작업/대화에서 "앞으로도 계속 유효할 durable 사실"만 0~3개 뽑아 한 줄씩 출력(없으면 빈 출력). 일회성·진행상황·인사는 빼고, 프로젝트 컨벤션·기술결정·구조·사용자 선호처럼 다음에 또 쓸 것만. 각 줄 12~40자, 군더더기·번호·마크다운 없이.\n\n${String(contextText || '').slice(0, 2500)}`, 'haiku');
+    for (const line of (r.text || '').split('\n').map(s => s.replace(/^[-*\d.\s]+/, '').trim()).filter(Boolean).slice(0, 3)) addFact(key, line);
+  } catch {}
 }
 
 // 채널이 마지막으로 다룬 레포 (재배포에도 살아남게 영구저장 → "어느 레포?" 무한반복 방지)
@@ -1182,6 +1199,8 @@ async function handle(event, client) {
     if (/^태스크\s*(목록|보드|리스트)/.test(raw)) { const l = tasks[channel] || []; await postAs(client, channel, thread_ts, LEAD, l.length ? '📋 할 일 보드:\n' + l.map(t => `#${t.id} [${t.done ? '완료' : '진행'}] ${t.text}`).join('\n') : '등록된 태스크가 없어.'); return; }
     // R1: 봇 작업 현황 보드 (자동 추적 — 지금 뭐 돌고 있는지, 뭐 끝났는지, 재시작에 끊긴 건 뭔지)
     if ((/^(작업\s*현황|진행\s*상황|작업\s*보드|작업\s*목록|작업\s*리스트|jobs?|지금\s*뭐\s*(하|돌)|뭐\s*(하는\s*중|돌아가))/i.test(raw) || /^(작업|진행)\s*(어때|있어|중이야)/.test(raw)) && !/(만들|짜줘|짜봐|추가|구현|개발|보고서|작성)/.test(raw)) { await postAs(client, channel, thread_ts, LEAD, jobBoard(channel)); return; }
+    // R7: 저장된 장기 기억 조회 ("기억 목록" / "스포노노 기억")
+    if ((/(^|\s)(기억|메모리)(\s*(목록|리스트|보여줘?|뭐\s*있어|있어\??|봐줘?|확인))?\s*[?？]?\s*$/.test(raw) || /^뭐\s*기억/.test(raw)) && !/(기억해|해줘|하지\s?마|지워|삭제|넣어)/.test(raw)) { const key = extractRepo(raw) || lastRepo[channel] || channel; const arr = facts[key] || facts[channel] || []; await postAs(client, channel, thread_ts, LEAD, arr.length ? `🧠 ${key.split('/').pop()}에 대해 기억하는 것:\n` + arr.slice(-15).map(f => '- ' + f.text).join('\n') : '아직 이 프로젝트에 대해 따로 기억해둔 게 없어. 작업·조사·토론하면 쌓여.'); return; }
     if ((tm = raw.match(/^태스크\s*완료\s*(\d+)/))) { const t = (tasks[channel] || []).find(x => x.id === parseInt(tm[1])); if (t) { t.done = true; persistTasks(); await postAs(client, channel, thread_ts, LEAD, `#${tm[1]} 완료 처리했어.`); } else await postAs(client, channel, thread_ts, LEAD, '그 태스크 못 찾겠어.'); return; }
     if ((tm = raw.match(/^태스크\s*삭제\s*(\d+)/))) { tasks[channel] = (tasks[channel] || []).filter(x => x.id !== parseInt(tm[1])); persistTasks(); await postAs(client, channel, thread_ts, LEAD, `#${tm[1]} 삭제했어.`); return; }
     // 배포 — 특정/직전 레포를 Railway에 다시 올림 (단, 고치고/만들고 같은 작업 의도가 있으면 여기서 안 잡고 작업으로 보냄)
@@ -1472,7 +1491,7 @@ app.event('app_mention', async ({ event, client }) => { await handle(event, clie
   loadMemory();
   loadRules();
   loadSettings();
-  loadTasks(); loadJobs();
+  loadTasks(); loadJobs(); loadFacts();
   loadLastRepo();
   loadServices();
   loadPending();
