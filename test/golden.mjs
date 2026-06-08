@@ -44,5 +44,14 @@ const mktGen = raw => /마케팅\s*(자료|플랜|콘텐츠|캠페인|카피|에
 ok(mktGen('스포노노 마케팅 자료 만들어줘'), '마케팅 생성');
 ok(!mktGen('스포노노 마케팅 어떻게할까'), '마케팅 어떻게→생성 아님(보고)');
 
+// I5 적응형 기획 규모 추정
+function scopeOf(task) { const big = /실시간|서버|백엔드|결제|구독|멀티|플랫폼|소셜|데이터베이스|\bdb\b|인증|소켓|\bapi\b|대시보드|관리자|게임|커머스|쇼핑|예약|채팅/i.test(task) || (task || '').length > 120; return big ? 'full' : 'core'; }
+ok(scopeOf('포트폴리오 사이트') === 'core', '#I5 간단→core(3명1라운드)');
+ok(scopeOf('실시간 멀티 소셜 게임') === 'full', '#I5 복잡→full(6명3라운드)');
+// I6 기억 명령(레포 앞붙음) — 한글 회귀
+const memCmd = raw => (/(^|\s)(기억|메모리)(\s*(목록|리스트|보여줘?|뭐\s*있어|있어\??|봐줘?|확인))?\s*[?？]?\s*$/.test(raw) || /^뭐\s*기억/.test(raw)) && !/(기억해|해줘|하지\s?마|지워|삭제|넣어)/.test(raw);
+ok(memCmd('스포노노 기억') && memCmd('기억 목록'), '#R7 기억 조회(레포앞붙음)');
+ok(!memCmd('이거 기억해줘'), '#R7 기억해줘는 조회 아님');
+
 console.log(fail ? '\n❌ 골드셋 실패 ' + fail : '\n✅ 골드셋 전부 통과');
 process.exit(fail ? 1 : 0);

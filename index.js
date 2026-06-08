@@ -517,6 +517,15 @@ async function qaGate(client, channel, thread_ts, dir) {
 }
 
 // 앱 빈구멍 탐지 — 빌드는 통과해도 실제 사용자 화면/핵심이 비어있는 "껍데기"를 잡아냄 (빈 Next 앱도 build는 통과하므로 build 성공≠완성)
+// I8: repo-map (Aider식) — 파일 덤프 대신 압축 구조 인덱스를 모델에 먹여 그라운딩↑(할루시↓)·탐색 토큰↓
+async function repoMap(dir) {
+  try {
+    const r = await sh(`cd ${dir} && find . -type f \\( -name '*.ts' -o -name '*.tsx' -o -name '*.js' -o -name '*.jsx' -o -name '*.py' -o -name '*.go' -o -name '*.json' -o -name '*.md' -o -name '*.css' -o -name '*.html' -o -name '*.prisma' \\) -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/.next/*' -not -path '*/dist*/*' -not -path '*/build/*' | sort | head -70`, dir);
+    const tree = (r.out || '').trim();
+    if (!tree) return '';
+    return `\n\n[레포 구조 맵 — 어디에 뭐가 있는지. 이걸로 빠르게 파악하고 필요한 파일만 열어라]\n${tree}`;
+  } catch { return ''; }
+}
 async function checkAppGaps(dir) {
   const gaps = [];
   try {
@@ -622,7 +631,8 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   // UI/화면 관련이거나 신규 프로젝트일 때만 디자인 규칙 적용 (백엔드·봇 자가수정 등엔 노이즈라 빼)
   const uiish = newProject || /ui|화면|디자인|프론트|컴포넌트|페이지|버튼|css|스타일|레이아웃|frontend|react|html|랜딩|사이트|홈페이지|게임/i.test(task);
   const fbBuild = drainFeedback(channel); // 제작 직전 들어온 사용자 수정요청도 반영
-  const res = await runClaude(`${intro}${rulesCtx(channel)}${repo ? recallFacts(repo, task) : ''}${PLAIN}${uiish ? DESIGN_RULE : ''}${newProject ? LAUNCH_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}${fbBuild ? '\n\n[사용자가 추가로 준 지시 — 반드시 반영]\n' + fbBuild : ''}\n\n요청: ${task}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000, true);
+  const rmap = !newProject ? await repoMap(dir) : ''; // I8: 기존 레포는 구조 맵으로 그라운딩(신규는 빈 레포라 생략)
+  const res = await runClaude(`${intro}${rulesCtx(channel)}${repo ? recallFacts(repo, task) : ''}${rmap}${PLAIN}${uiish ? DESIGN_RULE : ''}${newProject ? LAUNCH_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}${fbBuild ? '\n\n[사용자가 추가로 준 지시 — 반드시 반영]\n' + fbBuild : ''}\n\n요청: ${task}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000, true);
   if (res.limited) { jobUpdate(channel, { status: 'limited' }); await postAs(client, channel, thread_ts, LEAD, '⏳ 제작 중에 클로드 사용량 한도에 걸렸어. 지금까지 만든 건 안 올렸어, 한도 리셋되면 이어서 만들게.'); return; }
   jobUpdate(channel, { stage: '코드생성' }); // R9: 진행 단계 체크포인트(재시작 알림용)
   addJobTokens(channel, estTokens(res.text) + estTokens(task) + (prd ? estTokens(prd) : 0)); // I8: 비용 추적
@@ -692,7 +702,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   jobUpdate(channel, { status: 'awaiting-approval', artifacts: [url], note: 'PR 머지 대기' });
   await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}${doneHead} ${forcePR ? '승인모드라 PR로 올렸어 (머지하면 반영).' : 'PR로 올렸어.'}\nPR: ${url}\n코드 브라우저로 보려면: https://github.dev/${repo}`);
   if (newProject && !incomplete) await handoffChecklist(client, channel, thread_ts, repo, task);
-  } finally { await prog.done(); }
+  } finally { await prog.done(); try { await sh(`rm -rf ${dir}`); } catch {} } // I7: 작업 후 임시 작업디렉토리 정리(디스크 보호·격리)
 }
 
 const ALL = TEAM.concat(LEAD);
@@ -817,7 +827,7 @@ async function runReport(client, channel, thread_ts, reporter, repo, task) {
     if (synth.text && synth.ok !== false) await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}📌 최종안 (팀 의견+반론 종합)\n${synth.text.trim().slice(0, 2500)}`);
     else await postAs(client, channel, thread_ts, reporter, `${mention(channel)}다 정리했어, 위에 봐줘!`);
     extractFacts(repo, `[조사] ${task}\n${(synth.text || res.text || '').slice(0, 1800)}`, '조사').catch(() => {}); // R7: 조사에서 확인된 사실 저장
-  } finally { await prog.done(); }
+  } finally { await prog.done(); try { await sh(`rm -rf ${dir}`); } catch {} } // I7: 임시 디렉토리 정리
 }
 
 // ── 주기 스케줄 (영구 저장) ──
