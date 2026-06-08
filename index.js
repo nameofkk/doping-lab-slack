@@ -411,10 +411,10 @@ function dispatchButtons(n) {
   b.push({ text: '넘어가', id: 'dispatch_skip' });
   return b;
 }
-async function proposeOrAuto(client, channel, repo, items, headerLine) {
+async function proposeOrAuto(client, channel, repo, items, headerLine, opts) {
   const label = k => k === 'investigate' ? '조사' : k === 'build' ? '코드수정' : '사람만';
   const fmt = items.map((x, i) => `${i + 1}. [${label(x.kind)}] ${x.task}`).join('\n');
-  if (!settings.autopilot || !settings.autopilot[channel]) { // 오토파일럿 OFF → 기존 게이트
+  if ((opts && opts.forceGate) || !settings.autopilot || !settings.autopilot[channel]) { // 강제게이트(사업/그로스) 또는 오토파일럿 OFF → 전부 승인 받음
     pendingDispatch[channel] = { repo, items, at: Date.now() };
     await postAs(client, channel, undefined, LEAD, `${headerLine}\n${fmt}\n\n전부 하려면 "실행"(또는 버튼), 골라서 "실행 1,3"도 돼. 안 할 거면 "넘어가".`);
     await postButtons(channel, undefined, dispatchButtons(items.length));
@@ -1034,12 +1034,12 @@ async function runReport(client, channel, thread_ts, reporter, repo, task) {
     // 반론자 안다연 — 위 의견들 검토해서 약점/리스크/근거 약한 부분 반박 (특히 코드로 확인 안 된 걸 사실처럼 말한 거)
     const devil = byName('안다연'); let devilText = '';
     if (devil && !workCancel[channel]) {
-      const dr = await runClaude(`${devil.prompt}${STYLE}${rulesCtx(channel)}\n\n[사용자 질문]\n${task}\n\n[팀이 낸 의견들]\n${(res.text || '').slice(0, 2500)}\n\n반론자로서 이 의견들의 약점·리스크·빠뜨린 점·근거 약한 부분을 콕 집어 반박하고, 각 지적마다 보완책 한 줄씩. 특히 코드로 확인 안 된 걸 사실처럼 단정한 게 있으면 반드시 짚어줘. 편하게, 마크다운 금지.`, devil.model, WORKDIR, CLAUDE_PERMISSION_MODE, 150000);
+      const dr = await runClaude(`${devil.prompt}${STYLE}${rulesCtx(channel)}\n\n[사용자 질문]\n${task}\n\n[팀이 낸 의견들]\n${(res.text || '').slice(0, 2500)}\n\n반론자로서 이 의견들의 약점·리스크·빠뜨린 점·근거 약한 부분을 콕 집어 반박하고, 각 지적마다 보완책 한 줄씩. 특히 코드로 확인 안 된 걸 사실처럼 단정한 게 있으면 반드시 짚어줘. 너는 지금 이 레포 디렉토리 안에 있으니 실제 파일을 열어보고 검증해라. 편하게, 마크다운 금지.`, devil.model, dir, CLAUDE_PERMISSION_MODE, 150000);
       if (dr.text && dr.ok !== false && !dr.limited) { devilText = dr.text.trim(); await postAs(client, channel, thread_ts, devil, devilText.slice(0, 1200)); }
     }
     // 팀장 한로로 — 의견들 + 반론 다 검토해서 최종 실행안으로 종합·보완 (그냥 의견 나열로 끝내지 않게)
     if (workCancel[channel]) { delete workCancel[channel]; return; } // 중단 요청 시 종합 안 함
-    const synth = await runClaude(`${LEAD.prompt}${PLAIN}${rulesCtx(channel)}\n\n[사용자 질문]\n${task}\n\n[팀 의견]\n${(res.text || '').slice(0, 2500)}\n\n[안다연 반론]\n${devilText.slice(0, 1200)}\n\n위를 다 검토해서 "최종안"으로 종합·보완해라. 의견 충돌은 네가 정리하고, 우선순위(1·2·3)를 매기고, 코드로 확인 안 된 가정은 빼거나 "확인 필요"로 표시해라. 바로 실행 가능한 구체적 액션으로 끝내. 마크다운 금지.`, LEAD.model, WORKDIR, CLAUDE_PERMISSION_MODE, 180000);
+    const synth = await runClaude(`${LEAD.prompt}${PLAIN}${rulesCtx(channel)}\n\n[사용자 질문]\n${task}\n\n[팀 의견]\n${(res.text || '').slice(0, 2500)}\n\n[안다연 반론]\n${devilText.slice(0, 1200)}\n\n위를 다 검토해서 "최종안"으로 종합·보완해라. 의견 충돌은 네가 정리하고, 우선순위(1·2·3)를 매기고, 코드로 확인 안 된 가정은 빼거나 "확인 필요"로 표시해라. 바로 실행 가능한 구체적 액션으로 끝내. 마크다운 금지.`, LEAD.model, dir, CLAUDE_PERMISSION_MODE, 180000);
     if (synth.text && synth.ok !== false) await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}📌 최종안 (팀 의견+반론 종합)\n${synth.text.trim().slice(0, 2500)}`);
     else await postAs(client, channel, thread_ts, reporter, `${mention(channel)}다 정리했어, 위에 봐줘!`);
     extractFacts(repo, `[조사] ${task}\n${(synth.text || res.text || '').slice(0, 1800)}`, '조사').catch(() => {}); // R7: 조사에서 확인된 사실 저장
@@ -1511,7 +1511,7 @@ async function runBizGrowth(client, channel, manual = false) {
     }
     if (!allItems.length) { stopTyping(channel); if (manual) await postAs(client, channel, undefined, byName('김채원') || LEAD, '지금 데이터로 뽑을 그로스 실험이 마땅찮아. 측정 갭부터 메우자("사업 브리핑" 참고).'); return; }
     log('info', 'biz-growth', { n: allItems.length });
-    await proposeOrAuto(client, channel, allItems[0].repo, allItems, '그로스 실험 제안 (승인하면 착수, "실행 1,3"으로 골라도 됨. 효과는 다음 측정에서 baseline 대비 비교)'); // 한 제안으로 — 아이템별 repo
+    await proposeOrAuto(client, channel, allItems[0].repo, allItems, '그로스 실험 제안 (승인하면 착수, "실행 1,3"으로 골라도 됨. 효과는 다음 측정에서 baseline 대비 비교)', { forceGate: true }); // 사업/그로스는 조사도 자동 안 함 — 전부 네 승인
   } catch (e) { try { stopTyping(channel); log('error', 'biz-growth-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
 }
 
@@ -1535,7 +1535,7 @@ async function runDeptLoop(client, channel, deptKey, manual = false) {
     const prose = deMd(raw.replace(/```[\s\S]*?```/g, '').replace(/\{[\s\S]*"proposals"[\s\S]*\}/, '').trim()) || '(검토 생성 실패 — 데이터부족/한도)';
     log('info', 'dept-loop', { dept: deptKey, manual });
     await postAs(client, channel, undefined, byName(d.persona) || LEAD, `${d.name} 검토\n${prose.slice(0, 2600)}`); // postAs가 스피너 정리
-    if (jm) { try { const obj = JSON.parse(jm[0]); const items = (obj.proposals || []).filter(p => p && p.task && ['investigate', 'build'].includes(p.kind)).slice(0, 3).map(p => ({ who: d.name, repo: resolveRepo(p.repo || 'bot'), task: `${p.task}${p.target ? ` (타겟: ${p.target})` : ''}`, kind: p.kind })); if (items.length) await proposeOrAuto(client, channel, items[0].repo, items, `${d.name} 개선 제안`); } catch (_) {} }
+    if (jm) { try { const obj = JSON.parse(jm[0]); const items = (obj.proposals || []).filter(p => p && p.task && ['investigate', 'build'].includes(p.kind)).slice(0, 3).map(p => ({ who: d.name, repo: resolveRepo(p.repo || 'bot'), task: `${p.task}${p.target ? ` (타겟: ${p.target})` : ''}`, kind: p.kind })); if (items.length) await proposeOrAuto(client, channel, items[0].repo, items, `${d.name} 개선 제안`, { forceGate: true }); } catch (_) {} }
   } catch (e) { try { stopTyping(channel); log('error', 'dept-loop-err', { dept: deptKey, e: String(e).slice(0, 120) }); } catch (_) {} }
 }
 // 운영 헬스체크 — 각 라이브 서비스 curl로 상태 확인 → 우정잉(QA/SRE)이 보고, 다운이면 윈터가 알림
