@@ -1290,6 +1290,9 @@ function seedBizDefaults() {
   if (process.env.BOT_STATS_KEY) {
     const b = bizData[wwp];
     if (!b.sources.find(s => s.name === 'admin')) { b.sources.push({ name: 'admin', url: 'https://api.wewantpeace.live/admin/bot-stats', authHeader: 'X-Bot-Key: ' + process.env.BOT_STATS_KEY }); persistBiz(); }
+    const sp = 'nameofkk/sponono';
+    if (!bizData[sp]) bizData[sp] = { repo: sp, sources: [], history: [] };
+    if (!bizData[sp].sources.find(s => s.name === 'admin')) { bizData[sp].sources.push({ name: 'admin', url: 'https://sponono-api-production.up.railway.app/api/v1/stats/bot', authHeader: 'X-Bot-Key: ' + process.env.BOT_STATS_KEY }); persistBiz(); } // api.sponono.com DNS 미설정→Railway URL
   }
 }
 function registerBizSource(repo, url, name, authHeader) {
@@ -1343,6 +1346,8 @@ const BIZ_LABELS = {
   'admin.crisis_countries': { ko: '위기 국가', unit: '개국', e: '🚨' },
   'admin.push_tokens': { ko: '푸시 알림 대상', unit: '명', e: '🔔' },
   'admin.pending_reports': { ko: '미처리 신고', unit: '건', e: '⚠️' },
+  'admin.premium_users': { ko: '프리미엄 회원(유료)', unit: '명', e: '💳' },
+  'admin.total_blocks': { ko: '누적 차단(스포일러)', unit: '건', e: '🛡️' },
 };
 function bizLabel(key, value) {
   const v = typeof value === 'number' ? value.toLocaleString() : value;
@@ -1357,9 +1362,9 @@ const BIZ_SCORECARD = [
   { cat: '[획득]', items: [{ ko: '총 회원수', keys: ['admin.total_users'], how: 'admin 토큰 연결' }, { ko: '오늘 신규가입', keys: ['admin.new_today'], how: 'admin 토큰' }] },
   { cat: '[활성화]', items: [{ ko: '활성화율(가입→첫 핵심행동)', keys: [], how: '가입·첫핵심행동 이벤트 계측' }, { ko: '푸시 알림 대상', keys: ['admin.push_tokens'], how: 'admin 토큰' }] },
   { cat: '[리텐션]', items: [{ ko: '오늘 활성유저(DAU)', keys: ['admin.dau'], how: 'admin 토큰' }, { ko: 'D1/D7 리텐션', keys: [], how: '재방문 이벤트 계측' }, { ko: '최근 24시간 활동', keys: ['platform.events_24h', 'admin.events_today'], how: '' }] },
-  { cat: '[수익]', items: [{ ko: '활성 구독자(유료)', keys: ['admin.subscribers'], how: 'admin 토큰' }, { ko: '이번달 매출', keys: ['admin.monthly_revenue'], how: 'admin 토큰' }, { ko: '무료→유료 전환율', keys: [], how: '결제·가입 이벤트 계측' }, { ko: 'LTV / LTV:CAC', keys: [], how: '매출+이탈+획득비 계측' }] },
+  { cat: '[수익]', items: [{ ko: '유료 회원(구독/프리미엄)', keys: ['admin.subscribers', 'admin.premium_users'], how: 'admin 연결' }, { ko: '이번달 매출', keys: ['admin.monthly_revenue'], how: 'admin 연결' }, { ko: '무료→유료 전환율', keys: [], how: '결제·가입 이벤트 계측' }, { ko: 'LTV / LTV:CAC', keys: [], how: '매출+이탈+획득비 계측' }] },
   { cat: '[추천]', items: [{ ko: '뉴스레터 구독자', keys: ['newsletter.subscriber_count'], how: '' }, { ko: '공유·바이럴', keys: [], how: '공유 이벤트 계측' }] },
-  { cat: '[노스스타]', items: [{ ko: '전달 가치(누적 이벤트/차단)', keys: ['platform.total_events', 'stats.total_blocks'], how: '' }, { ko: '활성 이슈/위기국가', keys: ['platform.active_clusters', 'admin.crisis_countries'], how: '' }] },
+  { cat: '[노스스타]', items: [{ ko: '전달 가치(누적 이벤트/차단)', keys: ['platform.total_events', 'stats.total_blocks', 'admin.total_blocks'], how: '' }, { ko: '활성 이슈/위기국가', keys: ['platform.active_clusters', 'admin.crisis_countries'], how: '' }] },
 ];
 // YYYYMMDD 두 날짜 간 일수
 function daysBetweenDay(a, b) { const p = d => new Date(Math.floor(d / 10000), Math.floor(d / 100) % 100 - 1, d % 100); return Math.round((p(b) - p(a)) / 86400000); }
