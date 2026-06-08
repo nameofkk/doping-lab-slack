@@ -1517,7 +1517,7 @@ async function runBizGrowth(client, channel, manual = false) {
 
 // ── Phase B: 부서별 운영 루프 — 각 부서가 실데이터를 자기 관점으로 검토→진단+개선 제안(게이트). 4개가 같은 골격이라 제네릭. 페르소나=부서장. ──
 const DEPTS = {
-  cx: { name: '고객(CX)', persona: '우정잉', role: '고객 경험(CX) 책임자', prompt: '앱스토어·크롬웹스토어·플레이스토어의 우리 앱 리뷰와 평점을 웹서치로 찾아보고(예: "sponono chrome extension review", "wewantpeace app review"), 반복되는 불만·요청을 테마별로 정리해 제품 개선을 제안. 리뷰가 안 잡히면 "리뷰 수집/피드백 채널부터 만들자"를 제안.' },
+  cx: { name: '고객(CX)', persona: '우정잉', role: '고객 경험(CX) 책임자', prompt: '우리 앱 리뷰·평점·사용자 피드백을 보고 반복 불만·요청을 테마별로 정리해 제품 개선을 제안. [중요] 정확한 스토어 URL이 안 주어졌으면 리뷰 수·평점·업데이트 날짜를 절대 단정하지 마라. 웹서치는 동명의 엉뚱한 앱을 물어오기 쉬우니, 우리 앱이 맞다는 확신이 없으면 그 수치를 쓰지 말고 "정확한 스토어 URL을 주면 제대로 분석한다"고 솔직히 말해라. 리뷰가 확실히 안 잡히면 "인앱 리뷰 유도·피드백 채널부터 만들자"를 제안.' },
   marketing: { name: '마케팅', persona: '영듀', role: '마케팅/그로스(획득) 책임자', prompt: '획득(신규유입) 관점에서 콘텐츠·SEO·GEO(ChatGPT·Claude 같은 AI검색이 우리를 인용하게 구조화)·SNS 전략을 제안. 핵심 키워드·경쟁 포지셔닝은 웹서치로. 실제 발행 계정이 필요한 건 사람만 가능하다고 표시.' },
   finance: { name: '재무(CFO)', persona: '윈터', role: '재무(CFO)', prompt: '수익(매출·유료 구독자)과 비용(우리 봇 운영 토큰비용 등) 신호로 번레이트·런웨이·유닛이코노믹스(LTV:CAC·전환율·이탈) 관점에서 진단하고, 비용 이상치·수익 개선을 제안. 데이터 없으면 추정 말고 "이 재무지표부터 잡자"로.' },
   market: { name: '시장·경쟁', persona: '아이유', role: '시장·경쟁 인텔리전스 책임자', prompt: '경쟁사 동향·시장 트렌드·신규 위협을 웹서치로 조사해(예: 스포일러 차단 앱 경쟁사, 분쟁 추적 서비스 경쟁사), 우리한테 주는 시사점과 대응을 제안.' },
@@ -1529,13 +1529,14 @@ async function runDeptLoop(client, channel, deptKey, manual = false) {
     const svcCtx = Object.keys(bizData).map(rp => `[${rp.split('/').pop()}]\n${bizScorecard(rp)}${BIZ_PRODUCT[rp] ? '\n제품: ' + BIZ_PRODUCT[rp] : ''}`).join('\n\n') || '(등록된 서비스 없음)';
     const days = [...usageHist, usageStat].filter(x => x && x.day).slice(-7); const tot = days.reduce((a, x) => a + (x.outTokens || 0), 0);
     const finCtx = deptKey === 'finance' ? `\n[우리 봇 운영비용 신호] 최근 ${days.length}일 출력토큰 ~${Math.round(tot / 1000)}k(클로드 사용비 비례)` : '';
-    const out = await runClaude(`너는 도핑연구소 ${d.role}다. 우리가 운영하는 서비스들을 ${d.name} 관점에서 검토해라.\n${d.prompt}${UNTRUSTED_PREAMBLE}\n[서비스 현황]\n${wrapUntrusted(svcCtx)}${finCtx}\n\n친한국어 반말로(마크다운·별표·#·이모지 금지, 쉬운 말). 먼저 진단 3~6줄. 그 다음 줄에 액션을 JSON으로만: {"proposals":[{"repo":"sponono|wewantpeace|bot","task":"구체적으로 뭘 할지 한 문장","kind":"investigate|build","target":"올리려는 지표/기대효과"}]} (최대 3개, 데이터·웹서치 근거로. 발행계정·결제 등 사람만 가능한 건 빼고).`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 220000, true);
+    const dp = byName(d.persona); const pp = dp ? dp.prompt : '';
+    const out = await runClaude(`${pp}\n너는 지금 ${d.role} 역할로 우리가 운영하는 서비스들을 ${d.name} 관점에서 검토한다.${STYLE}\n${d.prompt}${UNTRUSTED_PREAMBLE}\n[서비스 현황]\n${wrapUntrusted(svcCtx)}${finCtx}\n\n먼저 진단 3~6줄(반말, 메타서술·지문 금지 — "진단하겠다" 같은 말 말고 바로 본론). 그 다음 줄에 액션을 JSON으로만: {"proposals":[{"repo":"sponono|wewantpeace|bot","task":"구체적으로 뭘 할지 한 문장","kind":"investigate|build","target":"올리려는 지표/기대효과"}]} (최대 3개, 데이터·웹서치 근거로. 발행계정·결제 등 사람만 가능한 건 빼고).`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 220000, true);
     const raw = out.text || '';
     const jm = raw.match(/\{[\s\S]*"proposals"[\s\S]*\}/);
     const prose = deMd(raw.replace(/```[\s\S]*?```/g, '').replace(/\{[\s\S]*"proposals"[\s\S]*\}/, '').trim()) || '(검토 생성 실패 — 데이터부족/한도)';
     log('info', 'dept-loop', { dept: deptKey, manual });
     await postAs(client, channel, undefined, byName(d.persona) || LEAD, `${d.name} 검토\n${prose.slice(0, 2600)}`); // postAs가 스피너 정리
-    if (jm) { try { const obj = JSON.parse(jm[0]); const items = (obj.proposals || []).filter(p => p && p.task && ['investigate', 'build'].includes(p.kind)).slice(0, 3).map(p => ({ who: d.name, repo: resolveRepo(p.repo || 'bot'), task: `${p.task}${p.target ? ` (타겟: ${p.target})` : ''}`, kind: p.kind })); if (items.length) await proposeOrAuto(client, channel, items[0].repo, items, `${d.name} 개선 제안`, { forceGate: true }); } catch (_) {} }
+    if (jm) { try { const obj = JSON.parse(jm[0]); const items = (obj.proposals || []).filter(p => p && p.task && ['investigate', 'build'].includes(p.kind)).slice(0, 3).map(p => { const rr = resolveRepo(p.repo || 'bot'); const nm = rr === SELF_REPO ? '봇' : rr.split('/').pop(); return { who: d.name, repo: rr, task: `[${nm}] ${p.task}${p.target ? ` (타겟: ${p.target})` : ''}`, kind: p.kind }; }); if (items.length) await proposeOrAuto(client, channel, items[0].repo, items, `${d.name} 개선 제안`, { forceGate: true }); } catch (_) {} }
   } catch (e) { try { stopTyping(channel); log('error', 'dept-loop-err', { dept: deptKey, e: String(e).slice(0, 120) }); } catch (_) {} }
 }
 // 운영 헬스체크 — 각 라이브 서비스 curl로 상태 확인 → 우정잉(QA/SRE)이 보고, 다운이면 윈터가 알림
