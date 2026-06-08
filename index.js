@@ -168,6 +168,7 @@ function commandMenuText() {
     '• `사업 지표` — 실수치 스코어카드 · `사업 브리핑` — AARRR 해석·측정갭',
     '• `그로스 제안` — 타겟지표+가설 실험 발의 · `실험 현황` — 효과측정',
     '• 부서 검토: `고객 검토`(리뷰) · `마케팅 검토` · `재무 검토` · `경쟁 동향`',
+    '• `경영회의` — 부서 제안 수렴→집중 과제 결정 · `목표`/`목표 등록` — OKR',
     '',
     '🤖 *자율(오토파일럿)*',
     '• `오토파일럿 켜` / `끄` / `상태` — 위험도별 자동실행',
@@ -1580,10 +1581,10 @@ const DEPTS = {
   finance: { name: '재무(CFO)', persona: '윈터', role: '재무(CFO)', prompt: '수익(매출·유료 구독자)과 비용(우리 봇 운영 토큰비용 등) 신호로 번레이트·런웨이·유닛이코노믹스(LTV:CAC·전환율·이탈) 관점에서 진단하고, 비용 이상치·수익 개선을 제안. 데이터 없으면 추정 말고 "이 재무지표부터 잡자"로.' },
   market: { name: '시장·경쟁', persona: '아이유', role: '시장·경쟁 인텔리전스 책임자', prompt: '경쟁사 동향·시장 트렌드·신규 위협을 웹서치로 조사해(예: 스포일러 차단 앱 경쟁사, 분쟁 추적 서비스 경쟁사), 우리한테 주는 시사점과 대응을 제안.' },
 };
-async function runDeptLoop(client, channel, deptKey, manual = false) {
-  const d = DEPTS[deptKey]; if (!d || !channel) return;
+async function runDeptLoop(client, channel, deptKey, manual = false, collect = false) {
+  const d = DEPTS[deptKey]; if (!d || !channel) return null;
   try {
-    startTyping(channel);
+    if (!collect) startTyping(channel);
     let svcCtx = Object.keys(bizData).map(rp => `[${rp.split('/').pop()}]\n${bizScorecard(rp)}${BIZ_PRODUCT[rp] ? '\n제품: ' + BIZ_PRODUCT[rp] : ''}`).join('\n\n') || '(등록된 서비스 없음)';
     if (deptKey === 'cx') { // 인앱 피드백(진짜 사용자 의견) + 정확한 스토어 URL 주입
       for (const rp of Object.keys(bizData)) { const fb = await bizFeedback(rp); if (fb && fb.recent.length) svcCtx += `\n\n[${rp.split('/').pop()} 인앱 피드백 ${fb.total}건 중 최근]\n` + fb.recent.slice(0, 20).map(f => `- (${f.category || ''}) ${f.message}`).join('\n'); const sr = await storeReviews(rp); if (sr) svcCtx += `\n${sr}`; }
@@ -1595,10 +1596,58 @@ async function runDeptLoop(client, channel, deptKey, manual = false) {
     const raw = out.text || '';
     const jm = raw.match(/\{[\s\S]*"proposals"[\s\S]*\}/);
     const prose = deMd(raw.replace(/```[\s\S]*?```/g, '').replace(/\{[\s\S]*"proposals"[\s\S]*\}/, '').trim()) || '(검토 생성 실패 — 데이터부족/한도)';
+    let items = [];
+    if (jm) { try { const obj = JSON.parse(jm[0]); items = (obj.proposals || []).filter(p => p && p.task && ['investigate', 'build'].includes(p.kind)).slice(0, 3).map(p => { const rr = resolveRepo(p.repo || 'bot'); const nm = rr === SELF_REPO ? '봇' : rr.split('/').pop(); return { who: d.name, repo: rr, task: `[${nm}] ${p.task}${p.target ? ` (타겟: ${p.target})` : ''}`, kind: p.kind }; }); } catch (_) {} }
+    if (collect) return { dept: deptKey, name: d.name, prose, items }; // 경영회의용 — 개별 발의 안 하고 모음
     log('info', 'dept-loop', { dept: deptKey, manual });
     await postAs(client, channel, undefined, byName(d.persona) || LEAD, `${d.name} 검토\n${prose.slice(0, 2600)}`); // postAs가 스피너 정리
-    if (jm) { try { const obj = JSON.parse(jm[0]); const items = (obj.proposals || []).filter(p => p && p.task && ['investigate', 'build'].includes(p.kind)).slice(0, 3).map(p => { const rr = resolveRepo(p.repo || 'bot'); const nm = rr === SELF_REPO ? '봇' : rr.split('/').pop(); return { who: d.name, repo: rr, task: `[${nm}] ${p.task}${p.target ? ` (타겟: ${p.target})` : ''}`, kind: p.kind }; }); if (items.length) await proposeOrAuto(client, channel, items[0].repo, items, `${d.name} 개선 제안`, { forceGate: true }); } catch (_) {} }
-  } catch (e) { try { stopTyping(channel); log('error', 'dept-loop-err', { dept: deptKey, e: String(e).slice(0, 120) }); } catch (_) {} }
+    if (items.length) await proposeOrAuto(client, channel, items[0].repo, items, `${d.name} 개선 제안`, { forceGate: true });
+    return { dept: deptKey, name: d.name, prose, items };
+  } catch (e) { try { if (!collect) stopTyping(channel); log('error', 'dept-loop-err', { dept: deptKey, e: String(e).slice(0, 120) }); } catch (_) {} return null; }
+}
+// ── Phase C: 전략 경영회의 — 부서 제안 수렴 → CEO(한로로) 우선순위 + Critic(안다연) 반박 → 게이트 발의 + 주간 다이제스트 + OKR. 회사의 "이사회". ──
+const GOALS_FILE = process.env.GOALS_FILE || '/data/goals.json';
+let goals = [];
+try { goals = JSON.parse(fs.readFileSync(GOALS_FILE, 'utf8')) || []; } catch { goals = []; }
+function persistGoals() { try { fs.writeFileSync(GOALS_FILE, JSON.stringify(goals.slice(-50))); } catch (_) {} }
+function addGoal(repo, text) { const g = { id: goals.reduce((m, x) => Math.max(m, x.id || 0), 0) + 1, repo: resolveRepo(repo || 'bot'), text: String(text || '').slice(0, 200), createdAt: Date.now() }; goals.push(g); persistGoals(); return g; }
+let boardAt = 0;
+async function runBoardMeeting(client, channel, manual = false) {
+  if (!channel) return;
+  if (!manual && Date.now() - boardAt < 6 * 86400000) return; // 자동은 주1회
+  boardAt = Date.now();
+  try {
+    await postAs(client, channel, undefined, LEAD, '경영회의 시작 — 각 부서 검토부터 모을게(고객·재무·마케팅·시장). 한 번에 도니까 좀 걸려.');
+    startTyping(channel);
+    const depts = ['cx', 'finance', 'marketing', 'market']; const collected = [];
+    for (const dk of depts) { try { const r = await runDeptLoop(client, channel, dk, false, true); if (r && (r.items.length || r.prose)) collected.push(r); } catch (_) {} }
+    const allItems = collected.flatMap(c => c.items || []);
+    if (!allItems.length) { stopTyping(channel); await postAs(client, channel, undefined, LEAD, '이번 회의는 부서들이 실행할 제안을 못 냈어(데이터 부족/한도). 지표부터 더 쌓이면 다시 하자.'); return; }
+    const scoreCtx = Object.keys(bizData).map(rp => `[${rp.split('/').pop()}]\n${bizScorecard(rp)}`).join('\n\n') || '(지표 없음)';
+    const goalCtx = goals.length ? goals.map(g => `- [${g.repo.split('/').pop()}] ${g.text}`).join('\n') : '(설정된 목표 없음 — "목표 등록"으로 추가 가능)';
+    const expCtx = Object.keys(bizData).flatMap(rp => measureExperiments(rp)).slice(-8).map(e => `#${e.id} [${e.repo.split('/').pop()}] ${e.focus} (${e.status})`).join('\n') || '(진행 실험 없음)';
+    const deptCtx = collected.map(c => `<<${c.name}>>\n진단: ${(c.prose || '').slice(0, 450)}\n제안: ${(c.items || []).map(x => `${x.task}[${x.kind}]`).join(' / ') || '없음'}`).join('\n\n');
+    const agenda = `[서비스 지표]\n${scoreCtx}\n\n[분기 목표]\n${goalCtx}\n\n[진행 중 실험]\n${expCtx}\n\n[부서별 진단·제안]\n${deptCtx}`;
+    // CEO(한로로) 우선순위
+    const ceoOut = await runClaude(`너는 도핑연구소 CEO(한로로)다. 아래는 이번 주 경영회의 안건 — 서비스 지표, 분기 목표, 진행 실험, 각 부서장 진단·제안이다.${STYLE}${UNTRUSTED_PREAMBLE}\n${wrapUntrusted(agenda)}\n\n부서 제안이 많지만 이번 주에 진짜 집중할 1~3개만 골라라. 기준: 서비스 고도화·수익 기여가 크고 지금 데이터가 급하다고 말하는 것. 먼저 회의록 요약 4~7줄(반말, 왜 이걸 골랐는지 지표 근거로, 안 고른 건 왜 미뤘는지 한마디). 그 다음 줄에 JSON으로만: {"focus":[{"repo":"sponono|wewantpeace|bot","task":"한 문장","kind":"investigate|build","target":"올릴 지표","why":"한줄 근거"}]}`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 200000);
+    const craw = ceoOut.text || ''; const cjm = craw.match(/\{[\s\S]*"focus"[\s\S]*\}/);
+    const digest = deMd(craw.replace(/```[\s\S]*?```/g, '').replace(/\{[\s\S]*"focus"[\s\S]*\}/, '').trim()) || '(회의록 생성 실패)';
+    let focus = [];
+    if (cjm) { try { focus = (JSON.parse(cjm[0]).focus || []).filter(f => f && f.task && ['investigate', 'build'].includes(f.kind)).slice(0, 3); } catch (_) {} }
+    await postAs(client, channel, undefined, byName('한로로') || LEAD, `경영회의 회의록\n${digest.slice(0, 2400)}`); // 스피너 정리
+    if (!focus.length) { await postAs(client, channel, undefined, LEAD, '이번 주 집중 과제로 묶을 만큼 확실한 게 없어서 발의는 보류할게. 부서 제안들은 위 회의록 참고.'); return; }
+    const focusText = focus.map((f, i) => `${i + 1}. [${f.repo}] ${f.task} (타겟: ${f.target || '?'} / 근거: ${f.why || '?'})`).join('\n');
+    // Critic(안다연) 반박
+    const critOut = await runClaude(`너는 도핑연구소 반론자(안다연)다. CEO가 이번 주 집중 과제로 아래를 골랐다. 각각 리스크·근거부족·놓친 점을 날카롭게 따지고, 정말 1순위가 맞는지 반박해라. 통과시킬 건 통과, 빼야 할 건 분명히 빼라고. 짧게 반말 3~6줄, 지문·메타서술 금지.${STYLE}${UNTRUSTED_PREAMBLE}\n[CEO가 고른 이번 주 집중]\n${wrapUntrusted(focusText)}\n\n[참고 지표]\n${wrapUntrusted(scoreCtx)}`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 150000);
+    const critTxt = deMd((critOut.text || '').replace(/```[\s\S]*?```/g, '').trim());
+    if (critTxt) await postAs(client, channel, undefined, byName('안다연') || LEAD, `반론 검증 (안다연)\n${critTxt.slice(0, 1500)}`);
+    log('info', 'board-meeting', { focus: focus.length, depts: collected.length });
+    logDecision(channel, 'board-meeting', `이번 주 집중 ${focus.length}건: ${focus.map(f => f.task.slice(0, 40)).join(' / ')}`);
+    // 게이트 발의(전략 결정 = 프로드 다수 → 강제 게이트)
+    const items = focus.map(f => { const rr = resolveRepo(f.repo || 'bot'); const nm = rr === SELF_REPO ? '봇' : rr.split('/').pop(); return { who: '경영회의', repo: rr, task: `[${nm}] ${f.task}${f.target ? ` (타겟: ${f.target})` : ''}`, kind: f.kind }; });
+    await proposeOrAuto(client, channel, items[0].repo, items, '경영회의 결정 — 이번 주 집중 과제', { forceGate: true });
+    if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: `주간 경영회의 다이제스트\n${digest.slice(0, 1200)}\n\n이번 주 집중:\n${focusText}` }).catch(() => {});
+  } catch (e) { try { stopTyping(channel); log('error', 'board-meeting-err', { e: String(e).slice(0, 150) }); await postAs(client, channel, undefined, LEAD, '경영회의 중 오류가 났어: ' + String(e).slice(0, 200)); } catch (_) {} }
 }
 // 운영 헬스체크 — 각 라이브 서비스 curl로 상태 확인 → 우정잉(QA/SRE)이 보고, 다운이면 윈터가 알림
 async function checkServices(client, channel, announce = true, onlyAlert = false) {
@@ -2182,6 +2231,23 @@ async function handle(event, client) {
       else if (/(경쟁\s*동향|경쟁사|시장\s*분석|시장\s*동향|경쟁\s*검토|트렌드\s*조사)/i.test(raw)) dk = 'market';
       if (dk) { if (await guardBusy(client, channel, thread_ts)) return; runDeptLoop(client, channel, dk, true).catch(() => {}); return; }
     }
+    // Phase C: 전략 경영회의 — 부서 제안 수렴 → CEO 우선순위 + Critic 반박 → 게이트 발의
+    if (/(경영\s*회의|이사회|전략\s*회의|주간\s*회의|board\s*meeting|위클리\s*리뷰)/i.test(raw)) {
+      if (await guardBusy(client, channel, thread_ts)) return;
+      activeWork[channel] = { task: '경영회의', started: Date.now() };
+      runBoardMeeting(client, channel, true).catch(() => {}).finally(() => { activeWork[channel] = null; });
+      return;
+    }
+    // OKR/목표 — 등록(목표 등록 <서비스> <내용>) / 조회. Korean 뒤 \b 회피.
+    if (/목표\s*(등록|추가|설정)|okr\s*(등록|추가|설정)/i.test(raw)) {
+      const m = raw.match(/(?:목표|okr)\s*(?:등록|추가|설정)\s+(\S+)\s+([\s\S]+)/i);
+      if (m) { const g = addGoal(m[1], m[2].trim()); await postAs(client, channel, thread_ts, LEAD, `목표 추가됨 #${g.id} [${g.repo.split('/').pop()}] ${g.text}`); return; }
+      await postAs(client, channel, thread_ts, LEAD, '형식: 목표 등록 <서비스> <목표내용>. 예) 목표 등록 wewantpeace 이번 분기 유료 구독 30명'); return;
+    }
+    if (/^\s*(목표|okr)\s*$/i.test(raw) || /목표\s*(조회|목록|현황)|okr\s*(조회|목록|현황)/i.test(raw)) {
+      if (!goals.length) { await postAs(client, channel, thread_ts, LEAD, '아직 설정된 목표(OKR)가 없어. "목표 등록 <서비스> <내용>"으로 추가해줘. 경영회의가 이 목표 기준으로 우선순위를 정해.'); return; }
+      await postAs(client, channel, thread_ts, LEAD, '분기 목표(OKR)\n' + goals.map(g => `#${g.id} [${g.repo.split('/').pop()}] ${g.text}`).join('\n')); return;
+    }
     if (/(실험\s*현황|실험\s*목록|그로스\s*현황|실험\s*상태)/i.test(raw)) {
       const all = Object.keys(bizData).flatMap(rp => measureExperiments(rp)).slice(-12);
       if (!all.length) { await postAs(client, channel, thread_ts, byName('김채원') || LEAD, '아직 진행 중인 그로스 실험이 없어. "그로스 제안"으로 시작하면, 각 실험에 타겟지표·가설이 붙고 다음 측정에서 효과를 비교해줄게.'); return; }
@@ -2545,6 +2611,8 @@ async function postButtons(channel, thread_ts, buttons) {
       if (n.dow === 3 && briefCh) runSelfImproveScan(botClient, briefCh, false).catch(() => {});
       // A3: 주1회(화요일) 그로스 실험 제안 — 사업 데이터 기반(게이트)
       if (n.dow === 2 && briefCh) runBizGrowth(botClient, briefCh, false).catch(() => {});
+      // Phase C: 주1회(금요일) 전략 경영회의 — 부서 제안 수렴→집중 과제 결정(게이트)
+      if (n.dow === 5 && briefCh && !activeWork[briefCh]) { activeWork[briefCh] = { task: '경영회의', started: Date.now() }; runBoardMeeting(botClient, briefCh, false).catch(() => {}).finally(() => { activeWork[briefCh] = null; }); }
     }
     // A4: 능동 강화 — 악화(2연속 다운+) 서비스는 시간 기다리지 말고 다음 틱에 즉시 재확인(빠른 복구·다운 감지)
     if (n.m % 5 === 0) {
