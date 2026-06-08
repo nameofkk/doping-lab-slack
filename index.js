@@ -1316,6 +1316,7 @@ function seedBizDefaults() {
   if (process.env.BOT_STATS_KEY) {
     const b = bizData[wwp];
     if (!b.sources.find(s => s.name === 'admin')) { b.sources.push({ name: 'admin', url: 'https://api.wewantpeace.live/admin/bot-stats', authHeader: 'X-Bot-Key: ' + process.env.BOT_STATS_KEY }); persistBiz(); }
+    if (!b.feedbackUrl) { b.feedbackUrl = 'https://api.wewantpeace.live/admin/bot-feedback'; b.feedbackAuth = 'X-Bot-Key: ' + process.env.BOT_STATS_KEY; persistBiz(); } // 인앱 피드백
     const sp = 'nameofkk/sponono';
     if (!bizData[sp]) bizData[sp] = { repo: sp, sources: [], history: [] };
     if (!bizData[sp].sources.find(s => s.name === 'admin')) { bizData[sp].sources.push({ name: 'admin', url: 'https://sponono-api-production.up.railway.app/api/v1/stats/bot', authHeader: 'X-Bot-Key: ' + process.env.BOT_STATS_KEY }); persistBiz(); } // api.sponono.com DNS 미설정→Railway URL
@@ -1352,6 +1353,11 @@ async function bizFetch(repo) {
   return metrics;
 }
 function bizLatest(repo) { const b = bizData[repo]; const h = b && b.history && b.history[b.history.length - 1]; return h ? h.metrics : null; }
+// 인앱 피드백 가져오기(있으면) — CX 부서가 진짜 사용자 의견 분석에 씀
+async function bizFeedback(repo) {
+  const b = bizData[repo]; if (!b || !b.feedbackUrl) return null;
+  try { const hdr = b.feedbackAuth ? `-H ${JSON.stringify(b.feedbackAuth)}` : ''; const r = await sh(`curl -s --max-time 15 ${hdr} '${String(b.feedbackUrl).replace(/'/g, '')}'`); const j = JSON.parse((r.out || '').trim()); return (j && Array.isArray(j.recent)) ? j : null; } catch { return null; }
+}
 // 친한국어 라벨 — 원시 키를 사람이 바로 이해하는 말로. 모르는 키는 깔끔히 폴백.
 const BIZ_LABELS = {
   'newsletter.subscriber_count': { ko: '뉴스레터 구독자', unit: '명', e: '📧' },
@@ -1374,6 +1380,7 @@ const BIZ_LABELS = {
   'admin.pending_reports': { ko: '미처리 신고', unit: '건', e: '⚠️' },
   'admin.premium_users': { ko: '프리미엄 회원(유료)', unit: '명', e: '💳' },
   'admin.total_blocks': { ko: '누적 차단(스포일러)', unit: '건', e: '🛡️' },
+  'admin.feedback_count': { ko: '인앱 피드백', unit: '건', e: '' },
 };
 function bizLabel(key, value) {
   const v = typeof value === 'number' ? value.toLocaleString() : value;
@@ -1389,7 +1396,7 @@ const BIZ_SCORECARD = [
   { cat: '[활성화]', items: [{ ko: '활성화율(가입→첫 핵심행동)', keys: [], how: '가입·첫핵심행동 이벤트 계측' }, { ko: '푸시 알림 대상', keys: ['admin.push_tokens'], how: 'admin 토큰' }] },
   { cat: '[리텐션]', items: [{ ko: '오늘 활성유저(DAU)', keys: ['admin.dau'], how: 'admin 토큰' }, { ko: 'D1/D7 리텐션', keys: [], how: '재방문 이벤트 계측' }, { ko: '최근 24시간 활동', keys: ['platform.events_24h', 'admin.events_today'], how: '' }] },
   { cat: '[수익]', items: [{ ko: '유료 회원(구독/프리미엄)', keys: ['admin.subscribers', 'admin.premium_users'], how: 'admin 연결' }, { ko: '이번달 매출', keys: ['admin.monthly_revenue'], how: 'admin 연결' }, { ko: '무료→유료 전환율', keys: [], how: '결제·가입 이벤트 계측' }, { ko: 'LTV / LTV:CAC', keys: [], how: '매출+이탈+획득비 계측' }] },
-  { cat: '[추천]', items: [{ ko: '뉴스레터 구독자', keys: ['newsletter.subscriber_count'], how: '' }, { ko: '공유·바이럴', keys: [], how: '공유 이벤트 계측' }] },
+  { cat: '[추천·고객의소리]', items: [{ ko: '뉴스레터 구독자', keys: ['newsletter.subscriber_count'], how: '' }, { ko: '인앱 피드백', keys: ['admin.feedback_count'], how: '피드백 수집 연결' }, { ko: '공유·바이럴', keys: [], how: '공유 이벤트 계측' }] },
   { cat: '[노스스타]', items: [{ ko: '전달 가치(누적 이벤트/차단)', keys: ['platform.total_events', 'stats.total_blocks', 'admin.total_blocks'], how: '' }, { ko: '활성 이슈/위기국가', keys: ['platform.active_clusters', 'admin.crisis_countries'], how: '' }] },
 ];
 // YYYYMMDD 두 날짜 간 일수
@@ -1517,7 +1524,7 @@ async function runBizGrowth(client, channel, manual = false) {
 
 // ── Phase B: 부서별 운영 루프 — 각 부서가 실데이터를 자기 관점으로 검토→진단+개선 제안(게이트). 4개가 같은 골격이라 제네릭. 페르소나=부서장. ──
 const DEPTS = {
-  cx: { name: '고객(CX)', persona: '우정잉', role: '고객 경험(CX) 책임자', prompt: '우리 앱 리뷰·평점·사용자 피드백을 보고 반복 불만·요청을 테마별로 정리해 제품 개선을 제안. [중요] 정확한 스토어 URL이 안 주어졌으면 리뷰 수·평점·업데이트 날짜를 절대 단정하지 마라. 웹서치는 동명의 엉뚱한 앱을 물어오기 쉬우니, 우리 앱이 맞다는 확신이 없으면 그 수치를 쓰지 말고 "정확한 스토어 URL을 주면 제대로 분석한다"고 솔직히 말해라. 리뷰가 확실히 안 잡히면 "인앱 리뷰 유도·피드백 채널부터 만들자"를 제안.' },
+  cx: { name: '고객(CX)', persona: '우정잉', role: '고객 경험(CX) 책임자', prompt: '아래 "인앱 피드백"(우리 서비스가 직접 받은 진짜 사용자 의견)이 있으면 그걸 최우선으로 분석해라 — 반복되는 불만·요청·칭찬을 테마별로 묶고 제품 개선을 제안. [중요] 인앱 피드백이 없는 서비스는 외부 스토어 리뷰를 추정하지 마라(웹서치는 동명의 엉뚱한 앱을 물어오기 쉬움). 그런 서비스엔 "인앱 피드백/리뷰 수집부터 심자"를 제안. 외부 스토어 수치는 정확한 URL 없으면 단정 금지.' },
   marketing: { name: '마케팅', persona: '영듀', role: '마케팅/그로스(획득) 책임자', prompt: '획득(신규유입) 관점에서 콘텐츠·SEO·GEO(ChatGPT·Claude 같은 AI검색이 우리를 인용하게 구조화)·SNS 전략을 제안. 핵심 키워드·경쟁 포지셔닝은 웹서치로. 실제 발행 계정이 필요한 건 사람만 가능하다고 표시.' },
   finance: { name: '재무(CFO)', persona: '윈터', role: '재무(CFO)', prompt: '수익(매출·유료 구독자)과 비용(우리 봇 운영 토큰비용 등) 신호로 번레이트·런웨이·유닛이코노믹스(LTV:CAC·전환율·이탈) 관점에서 진단하고, 비용 이상치·수익 개선을 제안. 데이터 없으면 추정 말고 "이 재무지표부터 잡자"로.' },
   market: { name: '시장·경쟁', persona: '아이유', role: '시장·경쟁 인텔리전스 책임자', prompt: '경쟁사 동향·시장 트렌드·신규 위협을 웹서치로 조사해(예: 스포일러 차단 앱 경쟁사, 분쟁 추적 서비스 경쟁사), 우리한테 주는 시사점과 대응을 제안.' },
@@ -1526,7 +1533,10 @@ async function runDeptLoop(client, channel, deptKey, manual = false) {
   const d = DEPTS[deptKey]; if (!d || !channel) return;
   try {
     startTyping(channel);
-    const svcCtx = Object.keys(bizData).map(rp => `[${rp.split('/').pop()}]\n${bizScorecard(rp)}${BIZ_PRODUCT[rp] ? '\n제품: ' + BIZ_PRODUCT[rp] : ''}`).join('\n\n') || '(등록된 서비스 없음)';
+    let svcCtx = Object.keys(bizData).map(rp => `[${rp.split('/').pop()}]\n${bizScorecard(rp)}${BIZ_PRODUCT[rp] ? '\n제품: ' + BIZ_PRODUCT[rp] : ''}`).join('\n\n') || '(등록된 서비스 없음)';
+    if (deptKey === 'cx') { // 인앱 피드백(진짜 사용자 의견) 주입
+      for (const rp of Object.keys(bizData)) { const fb = await bizFeedback(rp); if (fb && fb.recent.length) svcCtx += `\n\n[${rp.split('/').pop()} 인앱 피드백 ${fb.total}건 중 최근]\n` + fb.recent.slice(0, 20).map(f => `- (${f.category || ''}) ${f.message}`).join('\n'); }
+    }
     const days = [...usageHist, usageStat].filter(x => x && x.day).slice(-7); const tot = days.reduce((a, x) => a + (x.outTokens || 0), 0);
     const finCtx = deptKey === 'finance' ? `\n[우리 봇 운영비용 신호] 최근 ${days.length}일 출력토큰 ~${Math.round(tot / 1000)}k(클로드 사용비 비례)` : '';
     const dp = byName(d.persona); const pp = dp ? dp.prompt : '';
