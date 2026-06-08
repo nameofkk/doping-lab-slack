@@ -296,3 +296,9 @@ test specified) 판별해 안 돌림.
 ## R8 MCP 툴 플러그인
 - 구현: buildMcpConfig — 내장 figma(FIGMA_API_KEY) + 사용자 /data/mcp.json의 mcpServers를 병합해 동적 구성. 툴 추가가 index.js 수정이 아니라 설정으로(claude CLI가 MCP 네이티브). 사용자파일 없으면 기존 figma 단독(하위호환). "MCP 목록"으로 연결툴 조회, "MCP 추가"로 설정법 안내(API키는 👤).
 - 검증: 병합/단독/키없음/깨진파일복원/명령 7케이스 전부 통과. node --check 통과. figma만 있을 땐 기존과 동일 동작(저위험).
+
+## R9 durable 실행 (저널 기반 resume — 인프라 0)
+- 배경: Temporal 풀버전은 외부서비스/계정(👤). 대신 인프라 없는 저널 방식.
+- 구현: runWork가 진행 단계(코드생성/빌드·배포)를 job.stage에 체크포인트. 재시작 시 running→interrupted(R1) + 부팅 8초 후 끊긴 작업을 채널당 1건 자동 알림("이어서 #N 하면 이어갈게", 어디까지 갔는지 표시). resumeNotified로 재알림 방지. 실제 이어가기는 R5a("이어서 #N").
+- 한계(명시): /tmp 작업물은 재시작에 소실되므로 resume=재실행(레포 기반 재클론). 진짜 mid-job replay는 Temporal 붙일 때.
+- 검증: 알림 선택 5케이스 전부 통과, node --check 통과.

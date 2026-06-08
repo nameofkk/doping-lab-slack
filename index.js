@@ -596,6 +596,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const fbBuild = drainFeedback(channel); // 제작 직전 들어온 사용자 수정요청도 반영
   const res = await runClaude(`${intro}${rulesCtx(channel)}${repo ? recallFacts(repo, task) : ''}${PLAIN}${uiish ? DESIGN_RULE : ''}${newProject ? LAUNCH_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}${fbBuild ? '\n\n[사용자가 추가로 준 지시 — 반드시 반영]\n' + fbBuild : ''}\n\n요청: ${task}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000, true);
   if (res.limited) { jobUpdate(channel, { status: 'limited' }); await postAs(client, channel, thread_ts, LEAD, '⏳ 제작 중에 클로드 사용량 한도에 걸렸어. 지금까지 만든 건 안 올렸어, 한도 리셋되면 이어서 만들게.'); return; }
+  jobUpdate(channel, { stage: '코드생성' }); // R9: 진행 단계 체크포인트(재시작 알림용)
   // 연속완성 패스(R2: Task/Progress 원장 + 재계획) — 신규 풀빌드/화면작업은 한 번에 안 끝나고 스캐폴딩만 남기 쉬움. 갭이 줄어드는지(진척) 추적해서, 직전 패스가 진척이 없었으면(스톨) 같은 방식 반복 말고 접근을 바꿔 재계획. 진행기록은 job 원장에 남김.
   if ((newProject || uiish || (feedback[channel] || []).length) && !res.limited) {
     let prevGapCount = Infinity; const progress = [];
@@ -624,6 +625,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   if (workCancel[channel]) { delete workCancel[channel]; jobUpdate(channel, { status: 'cancelled' }); await postAs(client, channel, thread_ts, LEAD, '작업 중단했어. main엔 아무것도 안 올렸어.'); return; }
   const cmsg = task.slice(0, 60).replace(/[`$"\\!\r\n;|&<>()]/g, '').trim() || '작업'; // 셸 명령치환/인젝션 방지 (백틱·$·따옴표 등 제거)
   await sh(`git commit -m "도핑연구소: ${cmsg}"`, dir);
+  jobUpdate(channel, { stage: '빌드·배포' }); // R9: 체크포인트
   prog.phase('빌드 되나 돌려보고 라이브로 띄우는 중');
   const finalGaps = (newProject || uiish) ? await checkAppGaps(dir) : []; // 최종 빈구멍 — "다 끝냈어 상용수준" 거짓완료 방지
   const incomplete = finalGaps.length > 0 || !criticPass; // R3: 심사 미통과도 미완성으로
@@ -1551,4 +1553,16 @@ app.event('app_mention', async ({ event, client }) => { await handle(event, clie
   }, 60000);
   const real = TEAM.concat(LEAD).filter(p => process.env[p.tokenEnv]).map(p => p.name);
   console.log(`⚡ 도핑연구소 봇 실행 — 채널 글에 바로 응답 + 이름 부르면 그 직원이 답함\n   별도멤버: ${real.length ? real.join(', ') : '없음'}\n   ROUNDS=${ROUNDS}`);
+  // R9: 재시작으로 끊긴 작업 자동 알림 (저널 기반 resume — Temporal 풀버전 대신 인프라 0). 채널별 1건만, 이어서 #N 제안.
+  setTimeout(() => {
+    try {
+      const interrupted = Object.values(jobs).filter(j => j.status === 'interrupted' && !j.resumeNotified);
+      const seenCh = new Set();
+      for (const j of interrupted.sort((a, b) => b.id - a.id)) {
+        if (seenCh.has(j.channel)) continue; seenCh.add(j.channel);
+        jobUpdateById(j.id, { resumeNotified: true });
+        postAs(botClient, j.channel, undefined, LEAD, `⚠️ 재시작 때문에 작업 #${j.id} "${j.title}"${j.stage ? '(' + j.stage + '까지 갔었어)' : ''}이 중간에 끊겼어. "이어서 #${j.id}" 하면 이어서 할게. ("작업현황"으로 다른 것도 확인)`).catch(() => {});
+      }
+    } catch (e) {}
+  }, 8000);
 })();
