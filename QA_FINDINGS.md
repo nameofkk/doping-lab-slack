@@ -272,3 +272,7 @@ test specified) 판별해 안 돌림.
 ## R3 Critic 단계 (PR/완료 전 엄격 심사)
 - 구현: runCritic — 별도 claude가 요청 충족·빌드·버그/보안·PRD반영을 코드 직접 보고 PASS/FAIL 판정. FAIL이면 지적대로 1회 고치고 재심사(최대 2회). 신규/UI 작업만(작은 수정 제외). 미통과면 완료보고를 정직하게 미완성 표시(거짓완료 방지, 빌드통과 양과 별개로 요청충족 검증).
 - 검증: 판정/루프 6케이스 전부 통과, node --check 통과.
+
+## R4 입력 가드레일 (무거운 작업 전 싸게 사전심사)
+- 구현: guardrailCheck — startWork 진입 시 haiku가 파괴적(레포/DB 삭제, 시크릿 탈취)·악의적·범위밖 요청을 차단. 그 외 코드/조사/배포는 proceed. 실패 시 fail-open(막지 않음, 가용성 우선). OpenAI guardrails 패턴(싼 모델로 비싼 파이프라인 전에 스크리닝).
+- 검증: 판정 파싱 7케이스 전부 통과(refuse만 차단·fail-open·사유전달), node --check 통과.

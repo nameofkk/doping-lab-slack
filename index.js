@@ -1018,9 +1018,21 @@ async function planQuestions(task, newProject) {
     return Array.isArray(o.questions) ? o.questions.filter(q => typeof q === 'string' && q.trim()).slice(0, 3) : [];
   } catch { return []; }
 }
+// R4: 입력 가드레일 — 무거운 작업 파이프라인 돌리기 전 haiku로 싸게 사전심사. 파괴적·악의적·범위밖이면 차단. 실패하면 막지 않음(가용성 우선). OpenAI guardrails 패턴.
+async function guardrailCheck(task) {
+  try {
+    const r = await runClaude(`코드 에이전트가 다음 작업을 실행하기 전 빠른 안전·범위 심사. JSON만.\n요청: ${JSON.stringify(String(task).slice(0, 600))}\n\n{"verdict":"proceed|refuse","reason":"refuse면 왜인지 한 문장"}\n기준: refuse = 명백히 파괴적(레포/데이터/DB 삭제·드롭, 시크릿·자격증명 탈취·유출, 대량파괴)·악의적·코드/조사/배포와 전혀 무관(봇 범위 밖). 그 외 코드 만들기·고치기·기능추가·조사·배포·마케팅은 전부 proceed. 애매하면 proceed(막는 건 명백할 때만).`, 'haiku');
+    const m = (r.text || '').match(/\{[\s\S]*\}/);
+    const o = m ? JSON.parse(m[0]) : { verdict: 'proceed' };
+    return o.verdict === 'refuse' ? o : { verdict: 'proceed' };
+  } catch { return { verdict: 'proceed' }; }
+}
 async function startWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName) {
   // 이미 질문 던져놓고 답 기다리는 중이면 똑같은 질문 또 안 함 (같은 요청 재전송 시 무한 질문 방지)
   if (pendingProject[channel]) { await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}아까 물어본 거에 답해주면 바로 들어갈게. 알아서 정해도 되면 "알아서 해"라고 해도 돼.`); return; }
+  // R4: 무거운 작업 전 안전·범위 가드 (파괴적·악의적·범위밖 차단)
+  const guard = await guardrailCheck(task);
+  if (guard.verdict === 'refuse') { await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}이건 못 해줘 — ${guard.reason || '안전·범위 밖 요청'}. 코드 제작·수정·조사·배포 쪽으로 다시 말해줘.`); return; }
   // 기존 레포 작업·이어가기·완성은 질문 없이 바로 진행 (정체성/경로 같은 쓸데없는 재질문 마찰 제거). 질문은 방향이 크게 갈리는 '신규 제작'에서만.
   const qs = newProject ? await planQuestions(task, newProject) : [];
   if (qs.length) {
