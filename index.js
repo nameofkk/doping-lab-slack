@@ -1286,6 +1286,11 @@ function persistBiz() { try { fs.writeFileSync(BIZ_FILE, JSON.stringify(bizData)
 function seedBizDefaults() {
   const wwp = 'nameofkk/wewantpeace';
   if (!bizData[wwp]) bizData[wwp] = { repo: wwp, sources: [{ name: 'platform', url: 'https://api.wewantpeace.live/public/stats' }, { name: 'newsletter', url: 'https://api.wewantpeace.live/newsletter/stats' }], history: [] };
+  // 봇 전용 admin 출입구(BOT_STATS_KEY env 있으면 자동 연결) — 회원수·DAU·구독자·매출. 키는 env에만, 코드/깃엔 없음.
+  if (process.env.BOT_STATS_KEY) {
+    const b = bizData[wwp];
+    if (!b.sources.find(s => s.name === 'admin')) { b.sources.push({ name: 'admin', url: 'https://api.wewantpeace.live/admin/bot-stats', authHeader: 'X-Bot-Key: ' + process.env.BOT_STATS_KEY }); persistBiz(); }
+  }
 }
 function registerBizSource(repo, url, name, authHeader) {
   if (!repo || !url) return false;
