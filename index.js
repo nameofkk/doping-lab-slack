@@ -1660,6 +1660,31 @@ async function handle(event, client) {
 
 app.event('message', async ({ event, client }) => { await handle(event, client); });
 app.event('app_mention', async ({ event, client }) => { await handle(event, client); });
+// L4: App Home 탭 — 봇 홈을 열면 작업·스케줄·판단기록·기억을 한눈에 보는 읽기전용 운영 대시보드(채널 명령 "작업현황" 등과 같은 데이터). Home 탭은 Slack 앱설정에서 켜야(👤) 동작하고, 안 켜져 있으면 조용히 패스.
+function homeSchedTime(s) { if (s.ms) return `${Math.round(s.ms / 60000)}분마다`; const h = s.hour || 0, m = s.minute || 0; const ap = h < 12 ? '오전' : '오후'; const h12 = (h % 12) === 0 ? 12 : h % 12; return `매일 ${ap} ${h12}시${m ? ' ' + m + '분' : ''}`; }
+function buildHomeBlocks() {
+  const B = []; const ago = at => { const m = Math.round((Date.now() - (at || 0)) / 60000); return m < 60 ? m + '분 전' : Math.round(m / 60) + '시간 전'; };
+  B.push({ type: 'header', text: { type: 'plain_text', text: '🧪 도핑연구소 대시보드', emoji: true } });
+  const icon = { running: '🔵', 'awaiting-approval': '🟡', done: '✅', failed: '❌', interrupted: '⚠️', limited: '⏳', cancelled: '⏹️', planning: '📝' };
+  const js = Object.values(jobs).sort((a, b) => b.id - a.id);
+  const isActive = j => ['running', 'awaiting-approval', 'planning'].includes(j.status);
+  const jline = j => { const m = Math.round(((j.updatedAt || 0) - (j.createdAt || 0)) / 60000); const tok = j.tokens ? ` ·~${Math.round(j.tokens / 1000)}k` : ''; return `${icon[j.status] || '•'} *#${j.id}* ${j.type} · ${String(j.title || '').slice(0, 60)}${j.repo ? ' (' + j.repo.split('/').pop() + ')' : ''}${m ? ' ·' + m + '분' : ''}${tok}`; };
+  const active = js.filter(isActive); const recent = js.filter(j => !isActive(j)).slice(0, 5);
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*🔧 진행 중 작업* (${active.length})\n` + (active.length ? active.map(jline).join('\n') : '_지금 도는 작업 없음_').slice(0, 2900) } });
+  if (recent.length) B.push({ type: 'section', text: { type: 'mrkdwn', text: `*최근 끝난 작업*\n` + recent.map(jline).join('\n').slice(0, 2900) } });
+  B.push({ type: 'divider' });
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*⏰ 예약 스케줄* (${schedules.length})\n` + (schedules.length ? schedules.map(s => `• *#${s.id}* ${homeSchedTime(s)} — ${String(s.label || s.task || '').slice(0, 50)} (${s.action === 'work' ? '작업' : '리포트'})`).join('\n').slice(0, 2900) : '_등록된 스케줄 없음_') } });
+  B.push({ type: 'divider' });
+  const ds = decisions.slice(-8).reverse();
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*🧾 최근 판단 기록*\n` + (ds.length ? ds.map(d => `• [${d.kind}] ${String(d.detail || '').slice(0, 80)} _(${ago(d.at)})_`).join('\n').slice(0, 2900) : '_아직 없음_') } });
+  B.push({ type: 'divider' });
+  const fkeys = Object.keys(facts).filter(k => (facts[k] || []).length);
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*📌 장기 기억*\n` + (fkeys.length ? fkeys.map(k => `*${k}*: ${facts[k].length}개`).join('  ·  ').slice(0, 2900) : '_저장된 기억 없음_') } });
+  B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '채널에서 "작업현황" · "스케줄 목록" · "결정 로그" · "기억 목록" 으로도 볼 수 있어 · 갱신하려면 홈 탭 다시 열기' }] });
+  return B;
+}
+async function publishHome(client, userId) { try { await client.views.publish({ user_id: userId, view: { type: 'home', blocks: buildHomeBlocks() } }); } catch (e) { try { console.log('[home] publish 실패(앱설정에서 Home 탭 켜야 함?):', String(e && e.data && e.data.error || e).slice(0, 120)); } catch (_) {} } }
+app.event('app_home_opened', async ({ event, client }) => { if (event.tab && event.tab !== 'home') return; await publishHome(client, event.user); });
 // L3: Block Kit 버튼 클릭 → 동등한 텍스트 명령을 합성해 handle() 재사용(로직 무리팩터·텍스트 폴백 유지). 메인앱(botClient)이 올린 버튼만 여기로 라우팅됨.
 app.action(/^(dispatch|plan|sched)_/, async ({ ack, body, action }) => {
   await ack();
