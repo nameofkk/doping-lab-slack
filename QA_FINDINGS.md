@@ -292,3 +292,7 @@ test specified) 판별해 안 돌림.
 - 구현: facts 스토어(/data/facts.json, 레포당 40캡·중복방지). extractFacts(haiku)가 작업/조사/토론 끝나고 durable 사실 0~3개 추출·저장. recallFacts(키워드 스코어링)가 작업/조사 시작 시 관련 사실 주입 — 25줄 슬라이딩윈도우 한계 극복(벡터 대신 레포키+키워드, 인프라 0). "기억 목록"/"스포노노 기억"으로 조회.
 - 발견·수정: "스포노노 기억"처럼 레포 앞붙은 형태가 명령 미매칭(기억 맨앞 요구). 레포단어 뒤 기억도 잡게 수정, 저장의도(기억해줘/지워/넣어)는 제외.
 - 검증: addFact 중복/캡, recall 키워드회상, 명령 8케이스 전부 통과. node --check 통과.
+
+## R8 MCP 툴 플러그인
+- 구현: buildMcpConfig — 내장 figma(FIGMA_API_KEY) + 사용자 /data/mcp.json의 mcpServers를 병합해 동적 구성. 툴 추가가 index.js 수정이 아니라 설정으로(claude CLI가 MCP 네이티브). 사용자파일 없으면 기존 figma 단독(하위호환). "MCP 목록"으로 연결툴 조회, "MCP 추가"로 설정법 안내(API키는 👤).
+- 검증: 병합/단독/키없음/깨진파일복원/명령 7케이스 전부 통과. node --check 통과. figma만 있을 땐 기존과 동일 동작(저위험).

@@ -126,6 +126,22 @@ function bumpUsage(j, limited) {
 function claudeAcquire() { return new Promise(res => { if (claudeRunning < MAX_CLAUDE) { claudeRunning++; res(); } else claudeQueue.push(res); }); }
 function claudeRelease() { claudeRunning = Math.max(0, claudeRunning - 1); if (claudeQueue.length) { claudeRunning++; claudeQueue.shift()(); } }
 // 일시적 rate limit(429)면 잠깐 쉬고 재시도 → 진짜 세션 한도일 때만 포기 (88%에서 조기중단 방지)
+// ── R8: MCP 툴 플러그인 — 내장(figma) + 사용자 정의(/data/mcp.json) 서버를 병합해 동적 구성. 툴 추가가 index.js 수정이 아니라 설정으로. claude CLI가 MCP 네이티브 지원.
+const USER_MCP_FILE = process.env.USER_MCP_FILE || '/data/mcp.json';
+let mcpPath = null;
+function buildMcpConfig() {
+  try {
+    const hasUser = fs.existsSync(USER_MCP_FILE);
+    if (!hasUser) { mcpPath = process.env.FIGMA_API_KEY ? '/app/.mcp.json' : null; return; } // 사용자 설정 없으면 기존 figma 단독(검증된 경로)
+    const servers = {};
+    if (process.env.FIGMA_API_KEY) servers.figma = { command: 'figma-developer-mcp', args: ['--stdio'], env: { FIGMA_API_KEY: process.env.FIGMA_API_KEY } };
+    try { const u = JSON.parse(fs.readFileSync(USER_MCP_FILE, 'utf8')); Object.assign(servers, u.mcpServers || u || {}); } catch {}
+    if (!Object.keys(servers).length) { mcpPath = null; return; }
+    fs.writeFileSync('/tmp/mcp-merged.json', JSON.stringify({ mcpServers: servers }), { mode: 0o644 }); // claude는 uid1000으로 읽으니 world-readable
+    mcpPath = '/tmp/mcp-merged.json';
+  } catch { mcpPath = process.env.FIGMA_API_KEY ? '/app/.mcp.json' : null; }
+}
+function mcpServerNames() { try { if (!mcpPath) return []; return Object.keys((JSON.parse(fs.readFileSync(mcpPath, 'utf8')).mcpServers) || {}); } catch { return []; } }
 async function runClaude(prompt, model, cwd = WORKDIR, perm = CLAUDE_PERMISSION_MODE, timeoutMs = 240000, useMcp = false) {
   for (let attempt = 0; attempt < 3; attempt++) {
     const r = await runClaudeOnce(prompt, model, cwd, perm, timeoutMs, useMcp);
@@ -139,7 +155,7 @@ async function runClaudeOnce(prompt, model, cwd = WORKDIR, perm = CLAUDE_PERMISS
   return new Promise(resolve => {
     const args = ['-p', prompt, '--output-format', 'json', '--permission-mode', perm];
     if (model) args.push('--model', model);
-    if (useMcp && process.env.FIGMA_API_KEY) args.push('--mcp-config', '/app/.mcp.json'); // figma MCP는 실제 디자인/제작 호출에만 — 분류·잡담·리포트마다 MCP 서브프로세스 띄우는 오버헤드 제거(타임아웃 감소)
+    if (useMcp && mcpPath) args.push('--mcp-config', mcpPath); // R8: 병합된 MCP 설정(내장+사용자). 실제 제작 호출에만 — 분류·잡담·리포트마다 MCP 서브프로세스 띄우는 오버헤드 제거
     const opts = { cwd, env: { ...process.env, HOME: '/tmp' }, stdio: ['ignore', 'pipe', 'pipe'] };
     try { if (process.getuid && process.getuid() === 0) { opts.uid = 1000; opts.gid = 1000; } } catch (e) {}
     const child = spawn('claude', args, opts);
@@ -1199,6 +1215,9 @@ async function handle(event, client) {
     if (/^태스크\s*(목록|보드|리스트)/.test(raw)) { const l = tasks[channel] || []; await postAs(client, channel, thread_ts, LEAD, l.length ? '📋 할 일 보드:\n' + l.map(t => `#${t.id} [${t.done ? '완료' : '진행'}] ${t.text}`).join('\n') : '등록된 태스크가 없어.'); return; }
     // R1: 봇 작업 현황 보드 (자동 추적 — 지금 뭐 돌고 있는지, 뭐 끝났는지, 재시작에 끊긴 건 뭔지)
     if ((/^(작업\s*현황|진행\s*상황|작업\s*보드|작업\s*목록|작업\s*리스트|jobs?|지금\s*뭐\s*(하|돌)|뭐\s*(하는\s*중|돌아가))/i.test(raw) || /^(작업|진행)\s*(어때|있어|중이야)/.test(raw)) && !/(만들|짜줘|짜봐|추가|구현|개발|보고서|작성)/.test(raw)) { await postAs(client, channel, thread_ts, LEAD, jobBoard(channel)); return; }
+    // R8: MCP 툴 플러그인 조회/안내
+    if (/^(mcp|엠씨피|툴)\s*(목록|리스트|상태|뭐|있어)?/i.test(raw) && !/추가|연결|넣어|등록/.test(raw)) { const ns = mcpServerNames(); await postAs(client, channel, thread_ts, byName('윈터') || LEAD, ns.length ? `🔌 연결된 MCP 툴: ${ns.join(', ')}\n새 툴은 ${USER_MCP_FILE}에 {"mcpServers":{...}} 형식으로 넣고 재시작하면 붙어. API키 필요한 건 너가 넣어줘야 해(👤).` : '아직 연결된 MCP 툴이 없어(figma는 FIGMA_API_KEY 넣으면 자동). 새 툴은 ' + USER_MCP_FILE + '에 mcpServers 설정 넣고 재시작.'); return; }
+    if (/^(mcp|엠씨피|툴)\s*(추가|연결|등록|넣)/i.test(raw)) { await postAs(client, channel, thread_ts, byName('윈터') || LEAD, `MCP 툴 추가는 보통 API키/명령이 필요해서 직접 설정해야 해(👤): ${USER_MCP_FILE} 파일에 {"mcpServers":{"이름":{"command":"...","args":[...],"env":{...}}}} 넣고 봇 재시작하면 제작 작업에서 그 툴을 쓸 수 있어. 지금 연결: ${mcpServerNames().join(', ') || '없음'}.`); return; }
     // R7: 저장된 장기 기억 조회 ("기억 목록" / "스포노노 기억")
     if ((/(^|\s)(기억|메모리)(\s*(목록|리스트|보여줘?|뭐\s*있어|있어\??|봐줘?|확인))?\s*[?？]?\s*$/.test(raw) || /^뭐\s*기억/.test(raw)) && !/(기억해|해줘|하지\s?마|지워|삭제|넣어)/.test(raw)) { const key = extractRepo(raw) || lastRepo[channel] || channel; const arr = facts[key] || facts[channel] || []; await postAs(client, channel, thread_ts, LEAD, arr.length ? `🧠 ${key.split('/').pop()}에 대해 기억하는 것:\n` + arr.slice(-15).map(f => '- ' + f.text).join('\n') : '아직 이 프로젝트에 대해 따로 기억해둔 게 없어. 작업·조사·토론하면 쌓여.'); return; }
     if ((tm = raw.match(/^태스크\s*완료\s*(\d+)/))) { const t = (tasks[channel] || []).find(x => x.id === parseInt(tm[1])); if (t) { t.done = true; persistTasks(); await postAs(client, channel, thread_ts, LEAD, `#${tm[1]} 완료 처리했어.`); } else await postAs(client, channel, thread_ts, LEAD, '그 태스크 못 찾겠어.'); return; }
@@ -1491,7 +1510,7 @@ app.event('app_mention', async ({ event, client }) => { await handle(event, clie
   loadMemory();
   loadRules();
   loadSettings();
-  loadTasks(); loadJobs(); loadFacts();
+  loadTasks(); loadJobs(); loadFacts(); buildMcpConfig();
   loadLastRepo();
   loadServices();
   loadPending();
