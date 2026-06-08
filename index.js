@@ -177,6 +177,14 @@ function addMcpServer(name, config) {
     return true;
   } catch (e) { try { log('error', 'mcp-add-err', { e: String(e).slice(0, 120) }); } catch (_) {} return false; }
 }
+// B3: MCP 화이트리스트 레지스트리 — 검증된 후보만(ServiceNow식). 아무 MCP나 자동설치 금지. 작업 신호에 매칭되면 "제안"만 하고 추가는 승인 게이트.
+const MCP_REGISTRY = [
+  { name: 'postgres', desc: 'Postgres DB 직접 조회/쿼리', triggers: /postgres|postgresql|\bdb\b|데이터베이스|디비|sql\s*쿼리|테이블\s*조회/i, needs: ['POSTGRES_CONNECTION_STRING'], config: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-postgres'], env: { POSTGRES_CONNECTION_STRING: '${POSTGRES_CONNECTION_STRING}' } } },
+  { name: 'github', desc: 'GitHub 이슈·PR·코드검색', triggers: /github\s*(이슈|issue|pr|pull)|이슈\s*(만들|생성|목록)|pull\s*request/i, needs: ['GITHUB_TOKEN'], config: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-github'], env: { GITHUB_PERSONAL_ACCESS_TOKEN: '${GITHUB_TOKEN}' } } },
+  { name: 'sentry', desc: 'Sentry 에러·크래시 조회', triggers: /sentry|에러\s*추적|error\s*tracking|크래시\s*(로그|리포트)|예외\s*모니터/i, needs: ['SENTRY_AUTH_TOKEN'], config: { command: 'npx', args: ['-y', '@sentry/mcp-server'], env: { SENTRY_AUTH_TOKEN: '${SENTRY_AUTH_TOKEN}' } } },
+  { name: 'fetch', desc: '웹페이지 가져와 읽기(키 불필요)', triggers: /웹페이지\s*(가져|읽)|url\s*가져|크롤링|스크랩|페이지\s*긁/i, needs: [], config: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-fetch'] } },
+];
+function suggestMcp(taskText) { const connected = mcpServerNames(); return MCP_REGISTRY.filter(m => m.triggers.test(String(taskText || '')) && !connected.includes(m.name)); }
 // Q4: 서킷브레이커 — claude 연속 실패(N=5) 시 60s 회로 개방. 개방 동안 3×재시도 난타 대신 즉시 강등 응답(장애 증폭 방지).
 let claudeBreaker = { fails: 0, openUntil: 0 };
 function breakerBump(ok) { if (ok) { claudeBreaker.fails = 0; return; } claudeBreaker.fails++; if (claudeBreaker.fails >= 5) { claudeBreaker.openUntil = Date.now() + 60000; claudeBreaker.fails = 0; try { log('warn', 'breaker-open', { target: 'claude', cooldownMs: 60000 }); } catch (_) {} } }
@@ -282,7 +290,16 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
 }
 
 // ── 실제 작업 모드: 레포 클론 → claude 코드 작업 → 브랜치 push → PR → 보고 ──
-let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {}; const pendingPlan = {}; const pendingSchedule = {};
+let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {}; const pendingPlan = {}; const pendingSchedule = {}; const pendingMcp = {};
+// B3: 검증된 MCP 후보를 승인 게이트로 제안(자동설치 금지). 승인 시 config 추가+핫리로드, 키 필요하면 👤 안내.
+async function proposeMcp(client, channel, cand, why) {
+  if (!cand || pendingMcp[channel]) return;
+  pendingMcp[channel] = { cand, at: Date.now() };
+  logDecision(channel, 'mcp-propose', `${cand.name} (${why || ''})`);
+  const needNote = cand.needs && cand.needs.length ? `\n⚠️ 이거 붙이려면 키가 필요해(👤): ${cand.needs.join(', ')} — Railway env에 넣고 "MCP 리로드"하면 작동해.` : '\n키 없이 바로 붙어.';
+  await postAs(client, channel, undefined, byName('윈터') || LEAD, `🔌 이 작업엔 *${cand.name}* MCP(${cand.desc})가 도움될 것 같아.${why ? ' ' + why : ''}\n붙일까? (검증된 화이트리스트 후보야)${needNote}`);
+  await postButtons(channel, undefined, [{ text: `▶️ ${cand.name} 붙이기`, id: 'mcp_add', style: 'primary' }, { text: '넘어가', id: 'mcp_skip' }]);
+}
 function drainFeedback(channel) { const f = (feedback[channel] || []).join('\n'); feedback[channel] = []; return f; } // 작업 중 사용자가 끼어든 수정요청 모아서 반환
 // 토론/회의 결론 → 실제 착수 가능한 액션아이템 추출 (조사/코드수정/사람만 분류). 자동 실행 아님 — 사용자 승인용 목록.
 async function extractActionItems(conclusion) {
@@ -1393,6 +1410,8 @@ async function startWork(client, channel, thread_ts, repo, task, newProject, for
     await postButtons(channel, thread_ts, [{ text: '▶️ 진행', id: 'plan_go', style: 'primary' }, { text: '넘어가', id: 'plan_skip' }]); // L3
     return;
   }
+  // B3: 작업이 검증된 MCP 도구를 필요로 하면 1개만 제안(비차단 — 작업은 그대로 진행). 승인은 별도 게이트.
+  try { const sug = suggestMcp(task); if (sug.length && !pendingMcp[channel]) proposeMcp(client, channel, sug[0], '작업 중 이 툴이 있으면 더 정확해.').catch(() => {}); } catch (_) {}
   launchWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName);
 }
 async function handle(event, client) {
@@ -1436,8 +1455,8 @@ async function handle(event, client) {
     // 중단/취소 — 명확한 중단 명령일 때만 (문장 속 '중단/스톱' 부분일치로 오작동하던 거 수정)
     if (isStopMsg(raw)) {
       // 대기 중인 결정(스케줄/계획/디스패치 확인)이 있으면 "취소/중단/그만"은 전역 중단이 아니라 그 결정 취소로 (버튼 [취소]가 중단 핸들러에 잡히던 버그)
-      if (pendingSchedule[channel] || pendingPlan[channel] || pendingDispatch[channel]) {
-        delete pendingSchedule[channel]; delete pendingPlan[channel]; delete pendingDispatch[channel];
+      if (pendingSchedule[channel] || pendingPlan[channel] || pendingDispatch[channel] || pendingMcp[channel]) {
+        delete pendingSchedule[channel]; delete pendingPlan[channel]; delete pendingDispatch[channel]; delete pendingMcp[channel];
         await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, 그건 취소할게.`);
         return;
       }
@@ -1486,6 +1505,18 @@ async function handle(event, client) {
       else if (/^(취소|넘어가|안\s?해|됐어|아니)/.test(raw)) { delete pendingSchedule[channel]; logDecision(channel, 'schedule-cancel', '확인에서 취소'); await postAs(client, channel, thread_ts, LEAD, '오케이, 스케줄 안 걸게.'); return; }
       else if (/^(1회|한\s?번|일회|이번\s?만|한번만)/.test(raw)) { const ps = pendingSchedule[channel]; delete pendingSchedule[channel]; logDecision(channel, 'schedule→work', `1회 작업으로 전환: "${ps.s.label}"`); await postAs(client, channel, thread_ts, LEAD, '오케이, 반복 말고 한 번만 할게.'); startWork(client, channel, thread_ts, ps.s.newProject ? WORK_DEFAULT_REPO : resolveRepo(ps.s.repo), ps.s.task || ps.s.label, !!ps.s.newProject, !!settings.approval[channel]); return; }
       else if (/^(스케줄\s*등록|등록|반복|그대로|강행|응|맞아|확인)/.test(raw) && canCommand(event.user)) { const ps = pendingSchedule[channel]; delete pendingSchedule[channel]; startSchedule(ps.s, ps.s.kind !== 'daily'); persistSchedules(); logDecision(channel, 'schedule', `확인 후 등록 #${ps.s.id} ${ps.s.label} (${ps.when})`); await postAs(client, channel, thread_ts, LEAD, `⏰ 알겠어, 반복 스케줄로 등록했어 (#${ps.s.id}, ${ps.when}). (취소: "스케줄 취소 ${ps.s.id}")`); return; }
+    }
+    // B3: MCP 붙이기 제안 응답
+    if (pendingMcp[channel]) {
+      if (pendingMcp[channel].at && Date.now() - pendingMcp[channel].at > 30 * 60 * 1000) { delete pendingMcp[channel]; }
+      else if (/^(넘어가|취소|안\s?해|됐어|패스|놔둬|나중에)/.test(raw)) { delete pendingMcp[channel]; await postAs(client, channel, thread_ts, LEAD, '오케이, 그 MCP는 안 붙일게.'); return; }
+      else if (/^(붙여|붙이|추가|연결|등록|해|응|좋아|ㄱㄱ|고고|실행)/.test(raw) && canCommand(event.user)) {
+        const pm = pendingMcp[channel]; delete pendingMcp[channel]; const c = pm.cand;
+        const ok = addMcpServer(c.name, c.config);
+        const missing = (c.needs || []).filter(k => !process.env[k]);
+        await postAs(client, channel, thread_ts, byName('윈터') || LEAD, ok ? `🔌 ${c.name} MCP 설정 추가하고 핫리로드했어.${missing.length ? `\n⚠️ 근데 키가 아직 없어(👤): ${missing.join(', ')} — Railway env에 넣고 "MCP 리로드"하면 그때부터 진짜로 작동해.` : ' 키도 다 있어서 바로 쓸 수 있어.'}\n지금 연결: ${mcpServerNames().join(', ')}` : `${c.name} 추가하다 오류났어. 수동으로 ${USER_MCP_FILE}에 넣어줘.`);
+        return;
+      }
     }
     if (pendingPlan[channel]) {
       if (pendingPlan[channel].at && Date.now() - pendingPlan[channel].at > 30 * 60 * 1000) { delete pendingPlan[channel]; } // 30분 만료
@@ -1553,6 +1584,12 @@ async function handle(event, client) {
     // R8: MCP 툴 플러그인 조회/안내
     // B2: MCP 핫리로드 — 재시작 없이 /data/mcp.json 다시 읽어 반영
     if (/^(mcp|엠씨피)\s*(리로드|새로고침|reload|갱신)/i.test(raw)) { buildMcpConfig(); const ns = mcpServerNames(); await postAs(client, channel, thread_ts, byName('윈터') || LEAD, `🔄 MCP 설정 다시 읽었어(재시작 없이). 지금 연결: ${ns.join(', ') || '없음'}`); return; }
+    // B3: MCP 추천 — 작업 설명/키워드에 맞는 검증된 후보 제안
+    if (/^(mcp|엠씨피|툴)\s*(추천|제안|필요|뭐\s*쓰|뭐\s*붙)/i.test(raw)) {
+      const cands = suggestMcp(raw) ; const all = MCP_REGISTRY.filter(m => !mcpServerNames().includes(m.name));
+      if (cands.length) { await proposeMcp(client, channel, cands[0], '네가 말한 작업에 맞는 검증된 후보야.'); return; }
+      await postAs(client, channel, thread_ts, byName('윈터') || LEAD, `지금 작업 신호엔 딱 맞는 후보가 안 잡혀. 화이트리스트에 있는 검증된 MCP: ${all.map(m => `${m.name}(${m.desc})`).join(', ') || '(다 연결됨)'}. "MCP 추천 postgres 연동" 처럼 구체적으로 말하거나, 작업 시키면 필요할 때 알아서 제안할게.`); return;
+    }
     if (/^(mcp|엠씨피|툴)\s*(목록|리스트|상태|뭐|있어)?/i.test(raw) && !/추가|연결|넣어|등록/.test(raw)) { const ns = mcpServerNames(); await postAs(client, channel, thread_ts, byName('윈터') || LEAD, ns.length ? `🔌 연결된 MCP 툴: ${ns.join(', ')}\n새 툴은 ${USER_MCP_FILE}에 {"mcpServers":{...}} 넣고 "MCP 리로드"하면 재시작 없이 붙어. API키 필요한 건 너가(👤).` : '아직 연결된 MCP 툴이 없어(figma는 FIGMA_API_KEY 넣으면 자동). 새 툴은 ' + USER_MCP_FILE + '에 mcpServers 넣고 "MCP 리로드".'); return; }
     if (/^(mcp|엠씨피|툴)\s*(추가|연결|등록|넣)/i.test(raw)) { await postAs(client, channel, thread_ts, byName('윈터') || LEAD, `MCP 툴 추가는 ${USER_MCP_FILE}에 {"mcpServers":{"이름":{"command":"...","args":[...],"env":{...}}}} 넣고 "MCP 리로드"하면 재시작 없이 붙어(B2). API키/시크릿 필요한 건 너가 넣어줘야 해(👤). 검증된 후보를 봇이 알아서 제안하게 하려면 그냥 작업 시키면 돼(B3). 지금 연결: ${mcpServerNames().join(', ') || '없음'}.`); return; }
     // R7: 저장된 장기 기억 조회 ("기억 목록" / "스포노노 기억")
@@ -1942,18 +1979,18 @@ function buildHomeBlocks() {
 async function publishHome(client, userId) { try { await client.views.publish({ user_id: userId, view: { type: 'home', blocks: buildHomeBlocks() } }); } catch (e) { try { console.log('[home] publish 실패(앱설정에서 Home 탭 켜야 함?):', String(e && e.data && e.data.error || e).slice(0, 120)); } catch (_) {} } }
 app.event('app_home_opened', async ({ event, client }) => { if (event.tab && event.tab !== 'home') return; await publishHome(client, event.user); });
 // L3: Block Kit 버튼 클릭 → 동등한 텍스트 명령을 합성해 handle() 재사용(로직 무리팩터·텍스트 폴백 유지). 메인앱(botClient)이 올린 버튼만 여기로 라우팅됨.
-app.action(/^(dispatch|plan|sched)_/, async ({ ack, body, action }) => {
+app.action(/^(dispatch|plan|sched|mcp)_/, async ({ ack, body, action }) => {
   await ack();
   try {
-    const map = { dispatch_run: '실행', dispatch_skip: '넘어가', plan_go: '진행', plan_skip: '넘어가', sched_register: '스케줄 등록', sched_once: '1회만', sched_cancel: '취소' };
-    const label = { dispatch_run: '실행', dispatch_skip: '넘어가기', plan_go: '진행', plan_skip: '넘어가기', sched_register: '스케줄 등록', sched_once: '1회만', sched_cancel: '취소' };
+    const map = { dispatch_run: '실행', dispatch_skip: '넘어가', plan_go: '진행', plan_skip: '넘어가', sched_register: '스케줄 등록', sched_once: '1회만', sched_cancel: '취소', mcp_add: '붙여', mcp_skip: '넘어가' };
+    const label = { dispatch_run: '실행', dispatch_skip: '넘어가기', plan_go: '진행', plan_skip: '넘어가기', sched_register: '스케줄 등록', sched_once: '1회만', sched_cancel: '취소', mcp_add: 'MCP 붙이기', mcp_skip: '넘어가기' };
     const text = map[action.action_id]; if (!text) return;
     const channel = (body.channel && body.channel.id) || (body.container && body.container.channel_id); if (!channel) return;
     // 1회용: 클릭 즉시 버튼 메시지를 결과 텍스트로 교체(연타로 중복 작업·전역중단 터지던 버그). botClient가 올린 메시지라 botClient로 교체.
     const msgTs = body.message && body.message.ts;
     if (msgTs) { try { await botClient.chat.update({ channel, ts: msgTs, text: `✅ ${label[action.action_id] || text}`, blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `✅ 선택: *${label[action.action_id] || text}*` } }] }); } catch (_) {} }
     // 스테일 클릭 가드: 해당 대기 결정이 이미 처리됐으면(없으면) 무시 — 늦게/중복 눌러도 엉뚱한 동작 안 함.
-    const pend = action.action_id.startsWith('dispatch') ? pendingDispatch : action.action_id.startsWith('plan') ? pendingPlan : pendingSchedule;
+    const pend = action.action_id.startsWith('dispatch') ? pendingDispatch : action.action_id.startsWith('plan') ? pendingPlan : action.action_id.startsWith('mcp') ? pendingMcp : pendingSchedule;
     if (!pend[channel]) { try { console.log('[action] stale', action.action_id, channel); } catch (_) {} return; }
     await handle({ channel, user: body.user && body.user.id, ts: 'btn-' + (action.action_ts || (body.actions && body.actions[0] && body.actions[0].action_ts) || '0'), text }, app.client);
   } catch (e) { try { console.log('[action] err', String(e).slice(0, 120)); } catch (_) {} }
