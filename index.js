@@ -1665,9 +1665,16 @@ app.action(/^(dispatch|plan|sched)_/, async ({ ack, body, action }) => {
   await ack();
   try {
     const map = { dispatch_run: '실행', dispatch_skip: '넘어가', plan_go: '진행', plan_skip: '넘어가', sched_register: '스케줄 등록', sched_once: '1회만', sched_cancel: '취소' };
+    const label = { dispatch_run: '실행', dispatch_skip: '넘어가기', plan_go: '진행', plan_skip: '넘어가기', sched_register: '스케줄 등록', sched_once: '1회만', sched_cancel: '취소' };
     const text = map[action.action_id]; if (!text) return;
     const channel = (body.channel && body.channel.id) || (body.container && body.container.channel_id); if (!channel) return;
-    await handle({ channel, user: body.user && body.user.id, ts: 'btn-' + (action.action_ts || (body.actions && body.actions[0] && body.actions[0].action_ts) || Math.round(Date.now())), text }, app.client);
+    // 1회용: 클릭 즉시 버튼 메시지를 결과 텍스트로 교체(연타로 중복 작업·전역중단 터지던 버그). botClient가 올린 메시지라 botClient로 교체.
+    const msgTs = body.message && body.message.ts;
+    if (msgTs) { try { await botClient.chat.update({ channel, ts: msgTs, text: `✅ ${label[action.action_id] || text}`, blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `✅ 선택: *${label[action.action_id] || text}*` } }] }); } catch (_) {} }
+    // 스테일 클릭 가드: 해당 대기 결정이 이미 처리됐으면(없으면) 무시 — 늦게/중복 눌러도 엉뚱한 동작 안 함.
+    const pend = action.action_id.startsWith('dispatch') ? pendingDispatch : action.action_id.startsWith('plan') ? pendingPlan : pendingSchedule;
+    if (!pend[channel]) { try { console.log('[action] stale', action.action_id, channel); } catch (_) {} return; }
+    await handle({ channel, user: body.user && body.user.id, ts: 'btn-' + (action.action_ts || (body.actions && body.actions[0] && body.actions[0].action_ts) || '0'), text }, app.client);
   } catch (e) { try { console.log('[action] err', String(e).slice(0, 120)); } catch (_) {} }
 });
 // L3: 메인 봇(botClient)이 버튼을 별도 메시지로 올림 — 페르소나는 별개 토큰이라 버튼 라우팅이 안 되므로. 실패해도 텍스트 명령이 폴백.
