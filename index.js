@@ -1450,6 +1450,11 @@ const BIZ_PRODUCT = {
   'nameofkk/wewantpeace': '전 세계 분쟁·전쟁을 실시간 추적하는 플랫폼(지도·긴장지수·AI분석·알림). 핵심행동=알림 구독/지도 사용, 노스스타=전달한 분쟁 알림·활성 이슈.',
   'nameofkk/sponono': '유튜브·트위터·웹툰에서 스포일러를 자동 차단하는 구독 앱(무료10개·프리미엄 무제한). 핵심행동=첫 차단 경험, 노스스타=막아준 스포일러 수, 수익=월 구독.',
 };
+// 정확한 스토어 listing URL — CX가 WebFetch로 이 페이지를 읽어 평점·설치수·리뷰를 정확히 봄(퍼지검색 엉뚱앱 방지). 공개 데이터라 키 불필요.
+const STORE_URLS = {
+  'nameofkk/wewantpeace': ['Play스토어: https://play.google.com/store/apps/details?id=com.wewantpeace.app&hl=ko'],
+  'nameofkk/sponono': ['Chrome웹스토어: https://chromewebstore.google.com/detail/lhbfibaioimpnmlcbhjmhekoidlfhhja?hl=ko'],
+};
 // A2: 사업 브리핑 — 서비스별로 따로 분석(제품이 달라 한 덩어리 금지). 실수치+추세+루브릭 → 운영자 해석. 친한국어, 추정 0.
 let bizBriefAt = 0;
 async function runBizBriefing(client, channel, manual = false) {
@@ -1524,7 +1529,7 @@ async function runBizGrowth(client, channel, manual = false) {
 
 // ── Phase B: 부서별 운영 루프 — 각 부서가 실데이터를 자기 관점으로 검토→진단+개선 제안(게이트). 4개가 같은 골격이라 제네릭. 페르소나=부서장. ──
 const DEPTS = {
-  cx: { name: '고객(CX)', persona: '우정잉', role: '고객 경험(CX) 책임자', prompt: '아래 "인앱 피드백"(우리 서비스가 직접 받은 진짜 사용자 의견)이 있으면 그걸 최우선으로 분석해라 — 반복되는 불만·요청·칭찬을 테마별로 묶고 제품 개선을 제안. [중요] 인앱 피드백이 없는 서비스는 외부 스토어 리뷰를 추정하지 마라(웹서치는 동명의 엉뚱한 앱을 물어오기 쉬움). 그런 서비스엔 "인앱 피드백/리뷰 수집부터 심자"를 제안. 외부 스토어 수치는 정확한 URL 없으면 단정 금지.' },
+  cx: { name: '고객(CX)', persona: '우정잉', role: '고객 경험(CX) 책임자', prompt: '아래 "인앱 피드백"(우리 서비스가 직접 받은 진짜 사용자 의견)과, "스토어 페이지" URL이 주어지면 그 URL을 WebFetch로 직접 열어서 평점·설치수·최근 리뷰를 정확히 읽어라(절대 기억이나 검색으로 추정 말고 그 페이지 실제 내용만). 둘을 합쳐 반복되는 불만·요청·칭찬을 테마별로 묶고 제품 개선을 제안. 스토어 URL이 없는 서비스는 리뷰를 지어내지 말고 "스토어 미게시/URL 필요"라고만 해.' },
   marketing: { name: '마케팅', persona: '영듀', role: '마케팅/그로스(획득) 책임자', prompt: '획득(신규유입) 관점에서 콘텐츠·SEO·GEO(ChatGPT·Claude 같은 AI검색이 우리를 인용하게 구조화)·SNS 전략을 제안. 핵심 키워드·경쟁 포지셔닝은 웹서치로. 실제 발행 계정이 필요한 건 사람만 가능하다고 표시.' },
   finance: { name: '재무(CFO)', persona: '윈터', role: '재무(CFO)', prompt: '수익(매출·유료 구독자)과 비용(우리 봇 운영 토큰비용 등) 신호로 번레이트·런웨이·유닛이코노믹스(LTV:CAC·전환율·이탈) 관점에서 진단하고, 비용 이상치·수익 개선을 제안. 데이터 없으면 추정 말고 "이 재무지표부터 잡자"로.' },
   market: { name: '시장·경쟁', persona: '아이유', role: '시장·경쟁 인텔리전스 책임자', prompt: '경쟁사 동향·시장 트렌드·신규 위협을 웹서치로 조사해(예: 스포일러 차단 앱 경쟁사, 분쟁 추적 서비스 경쟁사), 우리한테 주는 시사점과 대응을 제안.' },
@@ -1534,8 +1539,8 @@ async function runDeptLoop(client, channel, deptKey, manual = false) {
   try {
     startTyping(channel);
     let svcCtx = Object.keys(bizData).map(rp => `[${rp.split('/').pop()}]\n${bizScorecard(rp)}${BIZ_PRODUCT[rp] ? '\n제품: ' + BIZ_PRODUCT[rp] : ''}`).join('\n\n') || '(등록된 서비스 없음)';
-    if (deptKey === 'cx') { // 인앱 피드백(진짜 사용자 의견) 주입
-      for (const rp of Object.keys(bizData)) { const fb = await bizFeedback(rp); if (fb && fb.recent.length) svcCtx += `\n\n[${rp.split('/').pop()} 인앱 피드백 ${fb.total}건 중 최근]\n` + fb.recent.slice(0, 20).map(f => `- (${f.category || ''}) ${f.message}`).join('\n'); }
+    if (deptKey === 'cx') { // 인앱 피드백(진짜 사용자 의견) + 정확한 스토어 URL 주입
+      for (const rp of Object.keys(bizData)) { const fb = await bizFeedback(rp); if (fb && fb.recent.length) svcCtx += `\n\n[${rp.split('/').pop()} 인앱 피드백 ${fb.total}건 중 최근]\n` + fb.recent.slice(0, 20).map(f => `- (${f.category || ''}) ${f.message}`).join('\n'); if (STORE_URLS[rp]) svcCtx += `\n[${rp.split('/').pop()} 스토어 페이지 — WebFetch로 직접 열어서 평점·설치수·최근 리뷰를 정확히 봐라]\n${STORE_URLS[rp].join('\n')}`; }
     }
     const days = [...usageHist, usageStat].filter(x => x && x.day).slice(-7); const tot = days.reduce((a, x) => a + (x.outTokens || 0), 0);
     const finCtx = deptKey === 'finance' ? `\n[우리 봇 운영비용 신호] 최근 ${days.length}일 출력토큰 ~${Math.round(tot / 1000)}k(클로드 사용비 비례)` : '';
