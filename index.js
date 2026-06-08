@@ -165,6 +165,18 @@ function buildMcpConfig() {
   } catch { mcpPath = process.env.FIGMA_API_KEY ? '/app/.mcp.json' : null; }
 }
 function mcpServerNames() { try { if (!mcpPath) return []; return Object.keys((JSON.parse(fs.readFileSync(mcpPath, 'utf8')).mcpServers) || {}); } catch { return []; } }
+// B2: MCP 핫리로드 — /data/mcp.json에 서버 병합 후 buildMcpConfig 재호출(재시작 없이 다음 제작 작업부터 반영)
+function addMcpServer(name, config) {
+  try {
+    let cur = {}; try { if (fs.existsSync(USER_MCP_FILE)) cur = JSON.parse(fs.readFileSync(USER_MCP_FILE, 'utf8')) || {}; } catch {}
+    const servers = cur.mcpServers || (cur.command ? {} : cur) || {};
+    servers[name] = config;
+    fs.writeFileSync(USER_MCP_FILE, JSON.stringify({ mcpServers: servers }, null, 2));
+    buildMcpConfig(); // 핫리로드
+    log('info', 'mcp-added', { name, total: mcpServerNames().length });
+    return true;
+  } catch (e) { try { log('error', 'mcp-add-err', { e: String(e).slice(0, 120) }); } catch (_) {} return false; }
+}
 // Q4: 서킷브레이커 — claude 연속 실패(N=5) 시 60s 회로 개방. 개방 동안 3×재시도 난타 대신 즉시 강등 응답(장애 증폭 방지).
 let claudeBreaker = { fails: 0, openUntil: 0 };
 function breakerBump(ok) { if (ok) { claudeBreaker.fails = 0; return; } claudeBreaker.fails++; if (claudeBreaker.fails >= 5) { claudeBreaker.openUntil = Date.now() + 60000; claudeBreaker.fails = 0; try { log('warn', 'breaker-open', { target: 'claude', cooldownMs: 60000 }); } catch (_) {} } }
@@ -1539,8 +1551,10 @@ async function handle(event, client) {
     // B: 봇 판단 기록 조회 ("결정 로그" / "왜 그랬어")
     if (/^(결정\s*로그|판단\s*(로그|기록)|결정\s*기록|왜\s*(그랬|그렇게|이렇게))/.test(raw)) { await postAs(client, channel, thread_ts, LEAD, decisionLog(channel)); return; }
     // R8: MCP 툴 플러그인 조회/안내
-    if (/^(mcp|엠씨피|툴)\s*(목록|리스트|상태|뭐|있어)?/i.test(raw) && !/추가|연결|넣어|등록/.test(raw)) { const ns = mcpServerNames(); await postAs(client, channel, thread_ts, byName('윈터') || LEAD, ns.length ? `🔌 연결된 MCP 툴: ${ns.join(', ')}\n새 툴은 ${USER_MCP_FILE}에 {"mcpServers":{...}} 형식으로 넣고 재시작하면 붙어. API키 필요한 건 너가 넣어줘야 해(👤).` : '아직 연결된 MCP 툴이 없어(figma는 FIGMA_API_KEY 넣으면 자동). 새 툴은 ' + USER_MCP_FILE + '에 mcpServers 설정 넣고 재시작.'); return; }
-    if (/^(mcp|엠씨피|툴)\s*(추가|연결|등록|넣)/i.test(raw)) { await postAs(client, channel, thread_ts, byName('윈터') || LEAD, `MCP 툴 추가는 보통 API키/명령이 필요해서 직접 설정해야 해(👤): ${USER_MCP_FILE} 파일에 {"mcpServers":{"이름":{"command":"...","args":[...],"env":{...}}}} 넣고 봇 재시작하면 제작 작업에서 그 툴을 쓸 수 있어. 지금 연결: ${mcpServerNames().join(', ') || '없음'}.`); return; }
+    // B2: MCP 핫리로드 — 재시작 없이 /data/mcp.json 다시 읽어 반영
+    if (/^(mcp|엠씨피)\s*(리로드|새로고침|reload|갱신)/i.test(raw)) { buildMcpConfig(); const ns = mcpServerNames(); await postAs(client, channel, thread_ts, byName('윈터') || LEAD, `🔄 MCP 설정 다시 읽었어(재시작 없이). 지금 연결: ${ns.join(', ') || '없음'}`); return; }
+    if (/^(mcp|엠씨피|툴)\s*(목록|리스트|상태|뭐|있어)?/i.test(raw) && !/추가|연결|넣어|등록/.test(raw)) { const ns = mcpServerNames(); await postAs(client, channel, thread_ts, byName('윈터') || LEAD, ns.length ? `🔌 연결된 MCP 툴: ${ns.join(', ')}\n새 툴은 ${USER_MCP_FILE}에 {"mcpServers":{...}} 넣고 "MCP 리로드"하면 재시작 없이 붙어. API키 필요한 건 너가(👤).` : '아직 연결된 MCP 툴이 없어(figma는 FIGMA_API_KEY 넣으면 자동). 새 툴은 ' + USER_MCP_FILE + '에 mcpServers 넣고 "MCP 리로드".'); return; }
+    if (/^(mcp|엠씨피|툴)\s*(추가|연결|등록|넣)/i.test(raw)) { await postAs(client, channel, thread_ts, byName('윈터') || LEAD, `MCP 툴 추가는 ${USER_MCP_FILE}에 {"mcpServers":{"이름":{"command":"...","args":[...],"env":{...}}}} 넣고 "MCP 리로드"하면 재시작 없이 붙어(B2). API키/시크릿 필요한 건 너가 넣어줘야 해(👤). 검증된 후보를 봇이 알아서 제안하게 하려면 그냥 작업 시키면 돼(B3). 지금 연결: ${mcpServerNames().join(', ') || '없음'}.`); return; }
     // R7: 저장된 장기 기억 조회 ("기억 목록" / "스포노노 기억")
     if ((/(^|\s)(기억|메모리)(\s*(목록|리스트|보여줘?|뭐\s*있어|있어\??|봐줘?|확인))?\s*[?？]?\s*$/.test(raw) || /^뭐\s*기억/.test(raw)) && !/(기억해|해줘|하지\s?마|지워|삭제|넣어)/.test(raw)) { const key = extractRepo(raw) || lastRepo[channel] || channel; const now = Date.now(); const arr = (facts[key] || facts[channel] || []).filter(f => now - (f.at || 0) < FACT_TTL_MS); await postAs(client, channel, thread_ts, LEAD, arr.length ? `🧠 ${key.split('/').pop()}에 대해 기억하는 것 (출처·경과):\n` + arr.slice(-15).map(f => `- ${f.text} _(${f.source || 'work'}${f.at ? '·' + Math.round((now - f.at) / 86400000) + 'd' : ''})_`).join('\n') : '아직 이 프로젝트에 대해 따로 기억해둔 게 없어. 작업·조사·토론하면 쌓여(90일 후 자동 만료).'); return; }
     // B1: 스킬 라이브러리 조회 ("스킬 목록" / "스포노노 스킬")
