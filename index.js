@@ -1242,6 +1242,12 @@ async function handle(event, client) {
   try {
     // 중단/취소 — 명확한 중단 명령일 때만 (문장 속 '중단/스톱' 부분일치로 오작동하던 거 수정)
     if (isStopMsg(raw)) {
+      // 대기 중인 결정(스케줄/계획/디스패치 확인)이 있으면 "취소/중단/그만"은 전역 중단이 아니라 그 결정 취소로 (버튼 [취소]가 중단 핸들러에 잡히던 버그)
+      if (pendingSchedule[channel] || pendingPlan[channel] || pendingDispatch[channel]) {
+        delete pendingSchedule[channel]; delete pendingPlan[channel]; delete pendingDispatch[channel];
+        await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, 그건 취소할게.`);
+        return;
+      }
       if (activeWork[channel] && activeWork[channel].repo !== undefined) pausedWork[channel] = { ...activeWork[channel] }; // 재개용 컨텍스트 보관
       const had = !!activeWork[channel];
       workCancel[channel] = true; activeWork[channel] = null; feedback[channel] = []; // 즉시 채널 해제 (스테일 activeWork로 막히는 거 방지)
