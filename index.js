@@ -126,12 +126,23 @@ async function postAs(defaultClient, channel, thread_ts, persona, text) {
 
 let claudeRunning = 0; const claudeQueue = [];
 const MAX_CLAUDE = parseInt(process.env.MAX_CLAUDE || '3', 10);
-// 사용량 집계 (오늘 Claude 호출/토큰/한도걸림) — 번레이트 보려고
+// Q3: 구조화 로깅 — JSON 한 줄(레일웨이 stdout 수집). 기존 console.log은 유지하고 핵심 결정/잡 지점에 구조화 로그 추가.
+const OWNER_USER_ID = process.env.OWNER_USER_ID || ''; // 👤 설정 시 드리프트 알림 DM. 없으면 조용히 스킵.
+function log(level, kind, fields) { try { console.log(JSON.stringify({ t: new Date().toISOString(), lvl: level, kind, ...(fields || {}) })); } catch (_) {} }
+// 사용량 집계 (오늘 Claude 호출/토큰/한도걸림) + Q3: /data 영속·N일 롤링(재시작에도 번레이트·운영리포트 보존)
 let usageStat = { day: null, calls: 0, outTokens: 0, limitedHits: 0 };
+let usageHist = []; // [{day, calls, outTokens, limitedHits}] — 마감된 날들
+const USAGE_FILE = process.env.USAGE_FILE || '/data/usage.json';
+let usagePersistAt = 0;
+function loadUsage() { try { if (fs.existsSync(USAGE_FILE)) { const j = JSON.parse(fs.readFileSync(USAGE_FILE, 'utf8')) || {}; usageHist = Array.isArray(j.hist) ? j.hist : []; if (j.today && j.today.day === kstNow().day) usageStat = j.today; } } catch { usageHist = []; } }
+function persistUsage() { try { fs.writeFileSync(USAGE_FILE, JSON.stringify({ today: usageStat, hist: usageHist.slice(-30) })); usagePersistAt = Date.now(); } catch {} }
 function bumpUsage(j, limited) {
-  try { const n = kstNow(); if (usageStat.day !== n.day) usageStat = { day: n.day, calls: 0, outTokens: 0, limitedHits: 0 };
+  try {
+    const n = kstNow();
+    if (usageStat.day !== n.day) { if (usageStat.day) usageHist.push(usageStat); if (usageHist.length > 30) usageHist = usageHist.slice(-30); usageStat = { day: n.day, calls: 0, outTokens: 0, limitedHits: 0 }; }
     usageStat.calls++; if (limited) usageStat.limitedHits++;
     const ot = j && j.usage && (j.usage.output_tokens || 0); if (ot) usageStat.outTokens += ot;
+    if (Date.now() - usagePersistAt > 20000) persistUsage(); // 20s 스로틀(디스크 thrash 방지)
   } catch (e) {}
 }
 function claudeAcquire() { return new Promise(res => { if (claudeRunning < MAX_CLAUDE) { claudeRunning++; res(); } else claudeQueue.push(res); }); }
@@ -1020,8 +1031,8 @@ function loadJobs() {
   persistJobs();
 }
 function persistJobs() { try { const ids = Object.keys(jobs).map(Number).sort((a, b) => a - b); if (ids.length > 200) for (const id of ids.slice(0, ids.length - 200)) delete jobs[id]; fs.writeFileSync(JOBS_FILE, JSON.stringify({ seq: jobSeq, items: jobs })); } catch {} } // 최근 200개만 유지
-function createJob(channel, type, title, repo, by) { const id = ++jobSeq; jobs[id] = { id, channel, type, title: String(title || '').slice(0, 120), repo: repo || null, status: 'running', by: by || null, createdAt: Date.now(), updatedAt: Date.now(), artifacts: [] }; persistJobs(); return jobs[id]; }
-function jobUpdateById(id, patch) { const j = jobs[id]; if (!j) return; Object.assign(j, patch, { updatedAt: Date.now() }); persistJobs(); }
+function createJob(channel, type, title, repo, by) { const id = ++jobSeq; const trace = 't' + id + '-' + (jobSeq * 7 + 13).toString(36); jobs[id] = { id, channel, type, title: String(title || '').slice(0, 120), repo: repo || null, status: 'running', by: by || null, trace, createdAt: Date.now(), updatedAt: Date.now(), artifacts: [] }; persistJobs(); log('info', 'job-start', { jobId: id, trace, type, repo: repo || null, title: String(title || '').slice(0, 60) }); return jobs[id]; }
+function jobUpdateById(id, patch) { const j = jobs[id]; if (!j) return; const prev = j.status; Object.assign(j, patch, { updatedAt: Date.now() }); persistJobs(); if (patch.status && patch.status !== prev && /^(done|failed|cancelled|limited|interrupted)$/.test(patch.status)) { try { log(patch.status === 'failed' ? 'error' : 'info', 'job-end', { jobId: id, trace: j.trace, status: patch.status, type: j.type, ms: j.updatedAt - j.createdAt, tokens: j.tokens || 0, error: j.error ? String(j.error).slice(0, 120) : undefined }); } catch (_) {} } }
 function jobUpdate(channel, patch) { const id = activeWork[channel] && activeWork[channel].jobId; if (id) jobUpdateById(id, patch); } // 현재 채널 진행작업에 연결된 job 갱신 (jobId 없으면 무시)
 function ensureJob(channel, type, title, repo) { if (!activeWork[channel]) return null; if (!activeWork[channel].jobId) activeWork[channel].jobId = createJob(channel, type, title, repo, activeWork[channel].by).id; return activeWork[channel].jobId; } // report/debate처럼 호출측이 activeWork만 세팅한 경우 job 붙이기
 // B: 결정 로깅 — 봇의 주요 판단(스케줄 등록·작업 라우팅·레포 선택·이상행동)을 기록해서 "실제 트래픽"을 감사 가능하게. 내가 상상한 케이스 말고 진짜 결정을 보고 골든셋·가드를 키운다.
@@ -1500,8 +1511,19 @@ async function handle(event, client) {
       return;
     }
     // 사용량/번레이트 (오늘 Claude 호출·토큰·한도걸림)
-    if (/(사용량|번레이트|토큰.*얼마|클로드.*사용|usage)/.test(raw)) {
+    if (/(사용량|번레이트|토큰.*얼마|클로드.*사용|usage)/.test(raw) && !/운영|리포트|report/.test(raw)) {
       await postAs(client, channel, thread_ts, LEAD, `오늘 우리 사용량이야.\n호출 ${usageStat.calls}회 · 출력토큰 약 ${usageStat.outTokens.toLocaleString()} · 한도걸림 ${usageStat.limitedHits}번.${usageStat.limitedHits ? ' 한도 자주 걸리면 팀원 모델 sonnet 유지하거나 작업 텀을 두자.' : ''}`);
+      return;
+    }
+    // Q3: 운영 리포트 — 최근 7일 호출·실토큰·한도걸림 + 잡 성공/실패율 (재시작에도 보존되는 영속 메트릭)
+    if (/(운영\s*리포트|운영\s*현황|메트릭|번레이트\s*리포트|ops\s*report)/i.test(raw)) {
+      const days = [...usageHist, usageStat].filter(d => d && d.day).slice(-7);
+      const tot = days.reduce((a, d) => ({ calls: a.calls + (d.calls || 0), outTokens: a.outTokens + (d.outTokens || 0), limitedHits: a.limitedHits + (d.limitedHits || 0) }), { calls: 0, outTokens: 0, limitedHits: 0 });
+      const recentJobs = Object.values(jobs).filter(j => Date.now() - (j.createdAt || 0) < 7 * 86400000);
+      const doneN = recentJobs.filter(j => j.status === 'done').length, failN = recentJobs.filter(j => j.status === 'failed').length;
+      const rate = (doneN + failN) ? Math.round(doneN / (doneN + failN) * 100) : null;
+      const perDay = days.map(d => `  ${d.day}: 호출 ${d.calls || 0} · 토큰 ${Math.round((d.outTokens || 0) / 1000)}k · 한도 ${d.limitedHits || 0}`).join('\n');
+      await postAs(client, channel, thread_ts, LEAD, `운영 리포트 (최근 ${days.length}일)\n총 호출 ${tot.calls}회 · 실출력토큰 약 ${tot.outTokens.toLocaleString()} · 한도걸림 ${tot.limitedHits}번\n잡 ${recentJobs.length}건 — 완료 ${doneN} / 실패 ${failN}${rate !== null ? ` (성공률 ${rate}%)` : ''}\n\n[일별]\n${perDay || '  (데이터 없음)'}`);
       return;
     }
     // 의존성 업데이트 → 안전하게 올리고 빌드 확인 후 PR
@@ -1726,7 +1748,15 @@ function buildHomeBlocks() {
   B.push({ type: 'divider' });
   const fkeys = Object.keys(facts).filter(k => (facts[k] || []).length);
   B.push({ type: 'section', text: { type: 'mrkdwn', text: `*📌 장기 기억*\n` + (fkeys.length ? fkeys.map(k => `*${k}*: ${facts[k].length}개`).join('  ·  ').slice(0, 2900) : '_저장된 기억 없음_') } });
-  B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '채널에서 "작업현황" · "스케줄 목록" · "결정 로그" · "기억 목록" 으로도 볼 수 있어 · 갱신하려면 홈 탭 다시 열기' }] });
+  B.push({ type: 'divider' });
+  // Q3: 운영 메트릭(7일 영속) — 호출/실토큰/한도걸림 + 잡 성공률
+  const mdays = [...usageHist, usageStat].filter(d => d && d.day).slice(-7);
+  const mtot = mdays.reduce((a, d) => ({ c: a.c + (d.calls || 0), t: a.t + (d.outTokens || 0), l: a.l + (d.limitedHits || 0) }), { c: 0, t: 0, l: 0 });
+  const rj = Object.values(jobs).filter(j => Date.now() - (j.createdAt || 0) < 7 * 86400000);
+  const dN = rj.filter(j => j.status === 'done').length, fN = rj.filter(j => j.status === 'failed').length;
+  const sr = (dN + fN) ? Math.round(dN / (dN + fN) * 100) : null;
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*📈 운영 메트릭* (최근 ${mdays.length}일)\n호출 ${mtot.c}회 · 실토큰 ~${Math.round(mtot.t / 1000)}k · 한도걸림 ${mtot.l}\n잡 ${rj.length}건 — 완료 ${dN} / 실패 ${fN}${sr !== null ? ` (성공률 ${sr}%)` : ''}` } });
+  B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '채널에서 "작업현황" · "스케줄 목록" · "결정 로그" · "기억 목록" · "운영 리포트" 로도 볼 수 있어 · 갱신하려면 홈 탭 다시 열기' }] });
   return B;
 }
 async function publishHome(client, userId) { try { await client.views.publish({ user_id: userId, view: { type: 'home', blocks: buildHomeBlocks() } }); } catch (e) { try { console.log('[home] publish 실패(앱설정에서 Home 탭 켜야 함?):', String(e && e.data && e.data.error || e).slice(0, 120)); } catch (_) {} } }
@@ -1766,13 +1796,14 @@ async function postButtons(channel, thread_ts, buttons) {
   loadMemory();
   loadRules();
   loadSettings();
-  loadTasks(); loadJobs(); loadFacts(); buildMcpConfig(); loadDecisions();
+  loadTasks(); loadJobs(); loadFacts(); buildMcpConfig(); loadDecisions(); loadUsage();
   loadLastRepo();
   loadServices();
   loadPending();
   setInterval(persistMemory, 15000);
   let opsLastDay = null;
   const OPS_HOUR = parseInt(process.env.OPS_HOUR || '10', 10); // 매일 이 시각(KST)에 운영 헬스체크 자동
+  let driftAt = 0; // Q3 드리프트 알림 쿨다운
   setInterval(() => {
     // 워치독: 생존신호(beat)가 25분 넘게 끊긴 작업만 풀어줌 → 영구 블록 방지. 정상적으로 오래 도는 작업(PRD 핑퐁+빌드 등)은 beat가 계속 갱신되니 안 끊음(예전엔 시작시각 기준이라 살아있는 작업을 죽여서 "풀어둘게" 쏘고 실제론 완성되는 레이스가 있었음)
     for (const ch of Object.keys(activeWork)) {
@@ -1803,6 +1834,19 @@ async function postButtons(channel, thread_ts, buttons) {
     if (n.m === 0 && n.h !== OPS_HOUR) {
       const chans = [...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))];
       for (const ch of chans) checkServices(botClient, ch, false, true).catch(() => {});
+    }
+    // Q3: 드리프트 알림 — 최근 1시간 잡 실패율 급증 / 한도걸림 스파이크 시 OWNER에게 1회 DM(쿨다운 1h). OWNER_USER_ID 없으면 스킵.
+    if (OWNER_USER_ID && Date.now() - driftAt > 3600000) {
+      const recent = Object.values(jobs).filter(j => Date.now() - (j.updatedAt || 0) < 3600000);
+      const fails = recent.filter(j => j.status === 'failed').length, total = recent.filter(j => /^(done|failed|cancelled|limited)$/.test(j.status)).length;
+      const failRate = total >= 4 ? fails / total : 0;
+      const limitSpike = (usageStat.limitedHits || 0) >= 10;
+      if (failRate > 0.3 || limitSpike) {
+        driftAt = Date.now();
+        const msg = failRate > 0.3 ? `⚠️ 드리프트 감지 — 최근 1시간 잡 실패율 ${Math.round(failRate * 100)}% (${fails}/${total}). 로그 확인 필요.` : `⚠️ 드리프트 감지 — 오늘 클로드 한도걸림 ${usageStat.limitedHits}회. 사용량 과부하.`;
+        log('warn', 'drift-alert', { failRate: Math.round(failRate * 100), fails, total, limitedHits: usageStat.limitedHits });
+        botClient.chat.postMessage({ channel: OWNER_USER_ID, text: msg }).catch(() => {});
+      }
     }
   }, 60000);
   const real = TEAM.concat(LEAD).filter(p => process.env[p.tokenEnv]).map(p => p.name);
