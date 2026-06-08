@@ -1170,6 +1170,29 @@ async function checkServices(client, channel, announce = true, onlyAlert = false
   if (down.length) await postAs(client, channel, undefined, byName('윈터') || LEAD, `⚠️ ${down.length}개 다운됐어. 확인 필요: ${down.map(s => s.repo).join(', ')}. 라이브가 진짜 죽은 건지 내가 로그 봐야겠어.`);
 }
 
+// A3: 자율 운영 브리핑 — services/jobs/usage/decisions/facts를 종합해 LEAD 1콜로 "건강·악화·주의·예측·개선후보" 요약(읽기전용). 일1회 자동 + "운영 브리핑" 수동. 데이터는 wrapUntrusted로 격리(Q2).
+let opsBriefAt = 0;
+async function runOpsBriefing(client, channel, manual = false) {
+  if (!manual && Date.now() - opsBriefAt < 18 * 3600000) return; // 자동은 하루 1회
+  opsBriefAt = Date.now();
+  try {
+    const svcs = Object.values(services).filter(s => s.url).map(s => { const last = (s.history || [])[s.history.length - 1] || {}; return `${s.repo}: ${s.lastStatus || '?'} ${last.ms != null ? last.ms + 'ms' : ''} ${svcTrend(s)}`.trim(); });
+    const rj = Object.values(jobs).filter(j => Date.now() - (j.createdAt || 0) < 7 * 86400000);
+    const dN = rj.filter(j => j.status === 'done').length, fN = rj.filter(j => j.status === 'failed').length;
+    const failedTitles = rj.filter(j => j.status === 'failed').slice(-5).map(j => `${j.type}:${(j.title || '').slice(0, 40)}(${j.error ? String(j.error).slice(0, 40) : ''})`);
+    const days = [...usageHist, usageStat].filter(d => d && d.day).slice(-7);
+    const tot = days.reduce((a, d) => ({ c: a.c + (d.calls || 0), t: a.t + (d.outTokens || 0), l: a.l + (d.limitedHits || 0) }), { c: 0, t: 0, l: 0 });
+    const recentDec = decisions.slice(-12).map(d => `[${d.kind}] ${String(d.detail || '').slice(0, 60)}`);
+    const incidents = Object.keys(facts).filter(k => k.startsWith('svc:')).flatMap(k => (facts[k] || []).filter(f => f.source === 'incident').slice(-3).map(f => `${k}: ${f.text}`));
+    const ctx = `[라이브 서비스]\n${svcs.join('\n') || '(없음)'}\n\n[최근 7일 잡] 완료 ${dN}/실패 ${fN}\n실패: ${failedTitles.join(' / ') || '없음'}\n\n[사용량 7일] 호출 ${tot.c} · 실토큰 ${Math.round(tot.t / 1000)}k · 한도걸림 ${tot.l}\n\n[최근 판단]\n${recentDec.join('\n')}\n\n[인시던트 이력]\n${incidents.join('\n') || '없음'}`;
+    const r = await runClaude(`너는 도핑연구소 운영 책임자(SRE)다. 아래는 우리 봇이 운영하는 서비스·작업·사용량·판단기록 데이터다.${UNTRUSTED_PREAMBLE}\n${wrapUntrusted(ctx)}\n\n이 데이터만 근거로 "오늘의 운영 브리핑"을 써라. 지어내지 말고 데이터에 있는 것만. 구성: ①건강(잘 도는 것) ②악화·주의(추세·실패·한도) ③예측(이대로면 뭐가 문제될지) ④개선 후보 1~3개(구체적, 우리가 착수 가능한 것). 마크다운·별표 금지, 친한 동료한테 말하듯 반말로 짧게.`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 180000);
+    const text = (r.text || '').trim() || '브리핑 생성 실패(데이터 부족이거나 한도).';
+    log('info', 'ops-briefing', { manual, jobs7d: rj.length, fails: fN, svcs: svcs.length });
+    if (channel) await postAs(client, channel, undefined, LEAD, `🗞️ 운영 브리핑\n${text}`);
+    if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: `🗞️ 운영 브리핑\n${scrubOutput(text)}` }).catch(() => {});
+  } catch (e) { try { log('error', 'ops-briefing-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
+}
+
 // 제작 끝나고 핸드오프 — 에이전트가 끝낸 것(✅)과 사람만 할 수 있는 것(☐ 체크리스트)을 구분해서 보고
 async function handoffChecklist(client, channel, thread_ts, repo, task) {
   const t = task || '';
@@ -1567,6 +1590,13 @@ async function handle(event, client) {
       await postAs(client, channel, thread_ts, LEAD, `운영 리포트 (최근 ${days.length}일)\n총 호출 ${tot.calls}회 · 실출력토큰 약 ${tot.outTokens.toLocaleString()} · 한도걸림 ${tot.limitedHits}번\n잡 ${recentJobs.length}건 — 완료 ${doneN} / 실패 ${failN}${rate !== null ? ` (성공률 ${rate}%)` : ''}\n\n[일별]\n${perDay || '  (데이터 없음)'}`);
       return;
     }
+    // A3: 자율 운영 브리핑 (LLM 종합 — 건강·악화·예측·개선후보). 수동 트리거.
+    if (/(운영\s*브리핑|운영\s*브리프|ops\s*brief|브리핑\s*해|브리핑\s*줘)/i.test(raw)) {
+      if (await guardBusy(client, channel, thread_ts)) return;
+      activeWork[channel] = { task: '운영 브리핑', started: Date.now() };
+      runOpsBriefing(client, channel, true).catch(() => {}).finally(() => { activeWork[channel] = null; });
+      return;
+    }
     // 의존성 업데이트 → 안전하게 올리고 빌드 확인 후 PR
     if (/(의존성|디펜던시|패키지|dependency).*(업데이트|갱신|올려|올리|update)/.test(raw)) {
       const eng = byName('윈터') || LEAD; // 의존성 업데이트 = 유지보수/엔지니어링
@@ -1876,6 +1906,9 @@ async function postButtons(channel, thread_ts, buttons) {
       opsLastDay = n.day;
       const chans = [...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))];
       for (const ch of chans) checkServices(botClient, ch, false).catch(() => {});
+      // A3: 일1회 자율 운영 브리핑 — 서비스 채널 있으면 거기, 없으면 최근 채널, 그것도 없으면 OWNER DM만
+      const briefCh = chans[0] || Object.keys(lastRequester)[0] || null;
+      runOpsBriefing(botClient, briefCh, false).catch(() => {});
     }
     // 매시 정각엔 조용히 감시하다가 새로 죽은 게 있으면 즉시 알림 (실시간 다운 감지)
     if (n.m === 0 && n.h !== OPS_HOUR) {
