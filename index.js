@@ -1328,6 +1328,16 @@ const BIZ_LABELS = {
   'platform.new_clusters_7d': { ko: '최근 7일 새 이슈', unit: '개', e: '🆕' },
   'stats.total_blocks': { ko: '누적 차단(스포일러)', unit: '건', e: '🛡️' },
   'stats.today.block_count': { ko: '오늘 차단', unit: '건', e: '🛡️' },
+  // /admin/stats (admin 토큰 연결 시 — 진짜 사업지표 전체)
+  'admin.total_users': { ko: '총 회원수', unit: '명', e: '👥' },
+  'admin.new_today': { ko: '오늘 신규가입', unit: '명', e: '🆕' },
+  'admin.dau': { ko: '오늘 활성유저(DAU)', unit: '명', e: '🟢' },
+  'admin.subscribers': { ko: '활성 구독자(유료)', unit: '명', e: '💳' },
+  'admin.monthly_revenue': { ko: '이번달 매출', unit: '', e: '💰' },
+  'admin.events_today': { ko: '오늘 수집 이벤트', unit: '건', e: '📊' },
+  'admin.crisis_countries': { ko: '위기 국가', unit: '개국', e: '🚨' },
+  'admin.push_tokens': { ko: '푸시 알림 대상', unit: '명', e: '🔔' },
+  'admin.pending_reports': { ko: '미처리 신고', unit: '건', e: '⚠️' },
 };
 function bizLabel(key, value) {
   const v = typeof value === 'number' ? value.toLocaleString() : value;
@@ -1337,6 +1347,23 @@ function bizLabel(key, value) {
 }
 // 마크다운 제거 — LLM이 **별표**·#헤더·-불릿 쓰면 슬랙에서 지저분. 사람 말투 평문으로.
 function deMd(t) { return String(t || '').replace(/\*\*(.+?)\*\*/g, '$1').replace(/(?<!\w)\*(?!\s)(.+?)(?<!\s)\*(?!\w)/g, '$1').replace(/^#{1,6}\s+/gm, '').replace(/^\s*[-*]\s+/gm, '• '); }
+// 운영자 스코어카드 — "봐야 할 모든 사업지표"를 AARRR로 정리. 연결된 건 값, 안 된 건 연결법. (지표가 적어 보이던 문제 해결)
+const BIZ_SCORECARD = [
+  { cat: '👥 획득', items: [{ ko: '총 회원수', keys: ['admin.total_users'], how: 'admin 토큰 연결' }, { ko: '오늘 신규가입', keys: ['admin.new_today'], how: 'admin 토큰' }] },
+  { cat: '⚡ 활성화', items: [{ ko: '활성화율(가입→첫 핵심행동)', keys: [], how: '가입·첫핵심행동 이벤트 계측' }, { ko: '푸시 알림 대상', keys: ['admin.push_tokens'], how: 'admin 토큰' }] },
+  { cat: '🔄 리텐션', items: [{ ko: '오늘 활성유저(DAU)', keys: ['admin.dau'], how: 'admin 토큰' }, { ko: 'D1/D7 리텐션', keys: [], how: '재방문 이벤트 계측' }, { ko: '최근 24시간 활동', keys: ['platform.events_24h', 'admin.events_today'], how: '' }] },
+  { cat: '💰 수익', items: [{ ko: '활성 구독자(유료)', keys: ['admin.subscribers'], how: 'admin 토큰' }, { ko: '이번달 매출', keys: ['admin.monthly_revenue'], how: 'admin 토큰' }, { ko: '무료→유료 전환율', keys: [], how: '결제·가입 이벤트 계측' }, { ko: 'LTV / LTV:CAC', keys: [], how: '매출+이탈+획득비 계측' }] },
+  { cat: '📣 추천', items: [{ ko: '뉴스레터 구독자', keys: ['newsletter.subscriber_count'], how: '' }, { ko: '공유·바이럴', keys: [], how: '공유 이벤트 계측' }] },
+  { cat: '⭐ 노스스타', items: [{ ko: '전달 가치(누적 이벤트/차단)', keys: ['platform.total_events', 'stats.total_blocks'], how: '' }, { ko: '활성 이슈/위기국가', keys: ['platform.active_clusters', 'admin.crisis_countries'], how: '' }] },
+];
+function bizScorecard(metrics) {
+  const m = metrics || {};
+  return BIZ_SCORECARD.map(g => g.cat + '\n' + g.items.map(it => {
+    const k = it.keys.find(kk => typeof m[kk] === 'number');
+    if (k != null) { const u = (BIZ_LABELS[k] && BIZ_LABELS[k].unit) || ''; return `  ✅ ${it.ko}: ${m[k].toLocaleString()}${u}`; }
+    return `  🔌 ${it.ko}: 미연결${it.how ? ` (${it.how})` : ''}`;
+  }).join('\n')).join('\n');
+}
 // 지표별 추세(직전 스냅샷 대비 증감) 한 줄
 function bizTrendLines(repo) {
   const b = bizData[repo]; const h = (b && b.history) || []; if (h.length < 2) return {};
@@ -1937,8 +1964,8 @@ async function handle(event, client) {
       const repos = targetRepo ? [targetRepo] : Object.keys(bizData);
       if (!repos.length) { await postAs(client, channel, thread_ts, LEAD, '아직 등록된 사업 메트릭 소스가 없어. "사업 메트릭 등록 <레포> <stats_url>"로 올려줘. (wewantpeace는 기본 시드돼 있어 — "사업 지표"로 바로 확인)'); return; }
       const lines = [];
-      for (const rp of repos) { const got = await bizFetch(rp); const cur = got || bizLatest(rp); lines.push(`*${rp.split('/').pop()}*\n` + (cur ? Object.entries(cur).map(([k, v]) => bizLabel(k, v)).join('\n') : '_아직 수치를 못 받았어 (URL/인증 확인 — "사업 메트릭 등록"으로 소스 점검)_')); }
-      await postAs(client, channel, thread_ts, byName('김채원') || LEAD, '📈 사업 지표 (실데이터, 지어낸 거 아님)\n' + lines.join('\n\n')); return;
+      for (const rp of repos) { const got = await bizFetch(rp); const cur = got || bizLatest(rp); lines.push(`■ ${rp.split('/').pop()}\n` + bizScorecard(cur)); }
+      await postAs(client, channel, thread_ts, byName('김채원') || LEAD, '📈 사업 스코어카드 — 봐야 할 지표 전체 (✅연결 / 🔌미연결, 실데이터·추정0)\n\n' + lines.join('\n\n')); return;
     }
     // A2: 사업 브리핑 (실수치 → AARRR 루브릭 해석 + 측정갭 + 개선안)
     if (/(사업\s*브리핑|비즈니스\s*브리핑|사업\s*분석|사업\s*진단)/i.test(raw)) {
