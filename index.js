@@ -958,7 +958,7 @@ function loadSchedules() {
 }
 function kstNow() {
   const d = new Date(Date.now() + 9 * 3600000);
-  return { h: d.getUTCHours(), m: d.getUTCMinutes(), day: d.getUTCFullYear() * 10000 + (d.getUTCMonth() + 1) * 100 + d.getUTCDate() };
+  return { h: d.getUTCHours(), m: d.getUTCMinutes(), dow: d.getUTCDay(), day: d.getUTCFullYear() * 10000 + (d.getUTCMonth() + 1) * 100 + d.getUTCDate() };
 }
 function parseDaily(text) {
   if (/마다/.test(text)) return null;
@@ -1191,6 +1191,33 @@ async function runOpsBriefing(client, channel, manual = false) {
     if (channel) await postAs(client, channel, undefined, LEAD, `🗞️ 운영 브리핑\n${text}`);
     if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: `🗞️ 운영 브리핑\n${scrubOutput(text)}` }).catch(() => {});
   } catch (e) { try { log('error', 'ops-briefing-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
+}
+
+// A4: 능동 개선 제안 — 운영 데이터(실패 잡·판단패턴·서비스)에서 "지금 효과 큰 개선" 1영역을 골라 구체 액션아이템 생성 → 기존 승인 게이트(pendingDispatch+버튼)로 발의. 실행은 승인 후. 주1회 자동 + "개선 제안" 수동.
+let improveAt = 0;
+async function runImprovementProposal(client, channel, manual = false) {
+  if (!manual && Date.now() - improveAt < 6 * 86400000) return; // 자동은 주1회
+  improveAt = Date.now();
+  if (!channel || activeWork[channel] || pendingDispatch[channel]) return; // 진행작업/대기제안 있으면 양보
+  try {
+    const rj = Object.values(jobs).filter(j => Date.now() - (j.createdAt || 0) < 14 * 86400000);
+    const fails = rj.filter(j => j.status === 'failed').slice(-8).map(j => `${j.repo || ''}:${(j.title || '').slice(0, 40)}(${j.error ? String(j.error).slice(0, 40) : ''})`);
+    const decCount = {}; decisions.slice(-40).forEach(d => { decCount[d.kind] = (decCount[d.kind] || 0) + 1; });
+    const svcs = Object.values(services).filter(s => s.url).map(s => `${s.repo}:${s.lastStatus} ${svcTrend(s)}`.trim());
+    const ctx = `[최근 실패 잡]\n${fails.join('\n') || '없음'}\n\n[판단패턴 빈도(많을수록 반복/마찰 신호)]\n${Object.entries(decCount).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}:${v}`).join(', ')}\n\n[서비스]\n${svcs.join('\n') || '없음'}`;
+    const r = await runClaude(`너는 도핑연구소 개선 책임자다. 아래 운영 데이터에서 "지금 착수하면 가장 효과 큰 개선" 1개 영역을 골라 그 구체 액션아이템을 뽑아라. 데이터 근거로만, 지어내지 마.${UNTRUSTED_PREAMBLE}\n${wrapUntrusted(ctx)}\n\nJSON만 출력: {"focus":"한 줄 요약","repo":"sponono|wewantpeace|myungjak|bot 중 대상(봇 자체개선이면 bot)","items":[{"who":"담당","task":"구체적 한 문장","kind":"investigate|build"}]}. items 최대 3개. 데이터에 개선거리 없으면 items 빈 배열.`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 150000);
+    const m = (r.text || '').match(/\{[\s\S]*\}/); if (!m) return;
+    let obj; try { obj = JSON.parse(m[0]); } catch { return; }
+    const items = (obj.items || []).filter(x => x && x.task && ['investigate', 'build'].includes(x.kind)).slice(0, 3);
+    if (!items.length) { if (manual) await postAs(client, channel, undefined, LEAD, '운영 데이터 훑어봤는데 지금 당장 착수할 개선거리는 딱히 안 보여. 깨끗해.'); return; }
+    const repo = resolveRepo(obj.repo || 'bot');
+    pendingDispatch[channel] = { repo, items, at: Date.now() };
+    logDecision(channel, 'improve-proposal', `${obj.focus || ''} (${repo})`);
+    log('info', 'improve-proposal', { manual, repo, focus: (obj.focus || '').slice(0, 60), n: items.length });
+    const fmt = items.map((x, i) => `${i + 1}. ${riskIcon(x.kind === 'investigate' ? 'low' : riskTier(x.task))} [${x.kind === 'investigate' ? '조사' : '코드수정'}] ${x.task}`).join('\n');
+    await postAs(client, channel, undefined, LEAD, `💡 능동 개선 제안 (${manual ? '수동' : '주간 자동'})\n초점: ${obj.focus || ''}\n대상: ${repo}\n${fmt}\n\n"실행" 하거나 버튼 누르면 착수해(조사=읽기전용, 코드수정=PR로 네가 머지). 안 할 거면 "넘어가".`);
+    await postButtons(channel, undefined, [{ text: '▶️ 실행', id: 'dispatch_run', style: 'primary' }, { text: '넘어가', id: 'dispatch_skip' }]);
+  } catch (e) { try { log('error', 'improve-proposal-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
 }
 
 // 제작 끝나고 핸드오프 — 에이전트가 끝낸 것(✅)과 사람만 할 수 있는 것(☐ 체크리스트)을 구분해서 보고
@@ -1614,6 +1641,12 @@ async function handle(event, client) {
       runOpsBriefing(client, channel, true).catch(() => {}).finally(() => { activeWork[channel] = null; });
       return;
     }
+    // A4: 능동 개선 제안 (운영 데이터 → 게이트된 액션아이템). 수동 트리거.
+    if (/(개선\s*제안|개선\s*아이디어|개선거리|뭐\s*개선|improve\s*proposal)/i.test(raw)) {
+      if (await guardBusy(client, channel, thread_ts)) return;
+      runImprovementProposal(client, channel, true).catch(() => {});
+      return;
+    }
     // 의존성 업데이트 → 안전하게 올리고 빌드 확인 후 PR
     if (/(의존성|디펜던시|패키지|dependency).*(업데이트|갱신|올려|올리|update)/.test(raw)) {
       const eng = byName('윈터') || LEAD; // 의존성 업데이트 = 유지보수/엔지니어링
@@ -1926,6 +1959,14 @@ async function postButtons(channel, thread_ts, buttons) {
       // A3: 일1회 자율 운영 브리핑 — 서비스 채널 있으면 거기, 없으면 최근 채널, 그것도 없으면 OWNER DM만
       const briefCh = chans[0] || Object.keys(lastRequester)[0] || null;
       runOpsBriefing(botClient, briefCh, false).catch(() => {});
+      // A4: 주1회(월요일) 능동 개선 제안 — 게이트로 발의
+      if (n.dow === 1 && briefCh) runImprovementProposal(botClient, briefCh, false).catch(() => {});
+    }
+    // A4: 능동 강화 — 악화(2연속 다운+) 서비스는 시간 기다리지 말고 다음 틱에 즉시 재확인(빠른 복구·다운 감지)
+    if (n.m % 5 === 0) {
+      for (const s of svcList()) {
+        if (s.url && s.channel && (s.failStreak || 0) >= 2) checkServices(botClient, s.channel, false, true).catch(() => {});
+      }
     }
     // 매시 정각엔 조용히 감시하다가 새로 죽은 게 있으면 즉시 알림 (실시간 다운 감지)
     if (n.m === 0 && n.h !== OPS_HOUR) {
