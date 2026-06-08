@@ -125,6 +125,7 @@ async function postAs(defaultClient, channel, thread_ts, persona, text) {
 }
 
 let claudeRunning = 0; const claudeQueue = [];
+let draining = false; // Q4: graceful shutdown 중이면 새 작업 안 받음
 const MAX_CLAUDE = parseInt(process.env.MAX_CLAUDE || '3', 10);
 // Q3: 구조화 로깅 — JSON 한 줄(레일웨이 stdout 수집). 기존 console.log은 유지하고 핵심 결정/잡 지점에 구조화 로그 추가.
 const OWNER_USER_ID = process.env.OWNER_USER_ID || ''; // 👤 설정 시 드리프트 알림 DM. 없으면 조용히 스킵.
@@ -164,12 +165,17 @@ function buildMcpConfig() {
   } catch { mcpPath = process.env.FIGMA_API_KEY ? '/app/.mcp.json' : null; }
 }
 function mcpServerNames() { try { if (!mcpPath) return []; return Object.keys((JSON.parse(fs.readFileSync(mcpPath, 'utf8')).mcpServers) || {}); } catch { return []; } }
+// Q4: 서킷브레이커 — claude 연속 실패(N=5) 시 60s 회로 개방. 개방 동안 3×재시도 난타 대신 즉시 강등 응답(장애 증폭 방지).
+let claudeBreaker = { fails: 0, openUntil: 0 };
+function breakerBump(ok) { if (ok) { claudeBreaker.fails = 0; return; } claudeBreaker.fails++; if (claudeBreaker.fails >= 5) { claudeBreaker.openUntil = Date.now() + 60000; claudeBreaker.fails = 0; try { log('warn', 'breaker-open', { target: 'claude', cooldownMs: 60000 }); } catch (_) {} } }
 async function runClaude(prompt, model, cwd = WORKDIR, perm = CLAUDE_PERMISSION_MODE, timeoutMs = 240000, useMcp = false) {
+  if (Date.now() < claudeBreaker.openUntil) return { ok: false, limited: true, text: '⏳ 클로드가 연속으로 막혀서 잠깐 쉬는 중이야(자동 회복 대기). 조금 있다 다시 시도해줘.' };
   for (let attempt = 0; attempt < 3; attempt++) {
     const r = await runClaudeOnce(prompt, model, cwd, perm, timeoutMs, useMcp);
-    if (!r.limited) return r;
+    if (!r.limited) { breakerBump(r.ok !== false); return r; } // 성공/일반오류는 여기서 종료(오류는 fail 카운트)
     if (attempt < 2) await new Promise(s => setTimeout(s, 8000 * (attempt + 1))); // 8s, 16s 백오프
   }
+  breakerBump(false); // 3회 다 한도 → 지속 장애로 카운트
   return { ok: false, limited: true, text: '⏳ 클로드 사용량 한도가 계속 걸려. 좀 있다 다시 시도해줘.' };
 }
 async function runClaudeOnce(prompt, model, cwd = WORKDIR, perm = CLAUDE_PERMISSION_MODE, timeoutMs = 240000, useMcp = false) {
@@ -197,7 +203,7 @@ async function runClaudeOnce(prompt, model, cwd = WORKDIR, perm = CLAUDE_PERMISS
         if (j.is_error || lim) {
           return finish({ ok: false, limited: lim, text: lim ? '⏳ 지금 클로드 사용량 한도에 걸렸어. 한도 리셋되면 다시 할게.' : (res || '오류가 났어').slice(0, 500) });
         }
-        return finish({ ok: true, text: res || out.slice(0, 1500) });
+        return finish({ ok: true, text: res || out.slice(0, 1500), outTokens: (j.usage && (j.usage.output_tokens || 0)) || 0 });
       }
       if (code !== 0 || isLimit(out) || isLimit(err)) return finish({ ok: false, limited: isLimit(out) || isLimit(err), text: (isLimit(out) || isLimit(err)) ? '⏳ 지금 클로드 사용량 한도에 걸렸어. 한도 리셋되면 다시 할게.' : (err || out || 'error').slice(0, 800) });
       finish({ ok: true, text: out.slice(0, 1500) });
@@ -624,7 +630,7 @@ async function runCritic(client, channel, thread_ts, dir, task, prd) {
     jobUpdate(channel, { critic: 'FAIL→수정', note: verdict.replace(/\n/g, ' ').slice(0, 150) });
     if (attempt >= 2) return false; // 두 번째도 FAIL이면 더 안 돌리고 정직하게 미충족 보고(아래 호출측)
     const fix = await runClaude(`심사자가 [실제 빌드 결과]와 코드를 근거로 다음을 지적했어. 지적대로 실제로 고쳐라(추측 말고 코드 직접 수정). 빌드 통과 유지.\n\n[지적]\n${verdict.slice(0, 2000)}\n\n원래 요청: "${task}"`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 540000, true);
-    addJobTokens(channel, estTokens(c.text) + estTokens(fix.text)); // I8
+    addJobTokens(channel, (c.outTokens || estTokens(c.text)) + (fix.outTokens || estTokens(fix.text))); // I8+Q4: 실토큰 우선
     if (fix.limited) return false;
   }
   return false;
@@ -702,7 +708,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const res = await runClaude(`${intro}${rulesCtx(channel)}${prules}${repo ? recallFacts(repo, task) : ''}${rmap}${PLAIN}${uiish ? DESIGN_RULE : ''}${newProject ? LAUNCH_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}${fbBuild ? '\n\n[사용자가 추가로 준 지시 — 반드시 반영]\n' + wrapUntrusted(fbBuild) : ''}${UNTRUSTED_PREAMBLE}\n\n요청:\n${wrapUntrusted(task)}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 540000, true);
   if (res.limited) { jobUpdate(channel, { status: 'limited' }); await postAs(client, channel, thread_ts, LEAD, '⏳ 제작 중에 클로드 사용량 한도에 걸렸어. 지금까지 만든 건 안 올렸어, 한도 리셋되면 이어서 만들게.'); return; }
   jobUpdate(channel, { stage: '코드생성' }); // R9: 진행 단계 체크포인트(재시작 알림용)
-  addJobTokens(channel, estTokens(res.text) + estTokens(task) + (prd ? estTokens(prd) : 0)); // I8: 비용 추적
+  addJobTokens(channel, (res.outTokens || estTokens(res.text)) + estTokens(task) + (prd ? estTokens(prd) : 0)); // I8+Q4: 실 API 출력토큰 우선(한글 len/4 ~2배오차 제거), 없으면 추정
   // 연속완성 패스(R2 원장+재계획, I1 하드캡+반복하드스톱) — 갭이 줄어드는지 추적, 진척 없으면(스톨) 접근 바꿔 재계획. 단 재계획해도 또 막히거나(반복) 토큰/시간 캡 넘으면 하드스톱 — 무한루프·비용폭주 방지.
   if ((newProject || uiish || (feedback[channel] || []).length) && !res.limited) {
     let prevGapCount = Infinity, stallStreak = 0; const progress = [];
@@ -722,7 +728,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
       prog.phase(stalled ? `접근 바꿔서 다시 (${pass}차)` : fbCont ? `방금 준 피드백 반영 (${pass}차)` : `아직 비어서 더 채우는 중 (${pass}차)`);
       const replanNote = stalled ? '\n\n[중요 — 재계획] 직전 시도가 진척이 없었어(같은 게 여전히 비어있음). 똑같은 방식 반복하지 마. 왜 안 됐는지 코드를 직접 보고 원인을 짚은 다음, 다른 접근(다른 파일 구조/다른 구현 방식)으로 실제로 끝까지 구현해라.' : '';
       const cont = await runClaude(`이 저장소를 더 다듬어라.${gaps.length ? ` 특히 지금 비어있는 것: ${gaps.join(' / ')} — 데모·플레이스홀더·로렘입숨·"TODO" 금지로 실제 화면(라우트 page)·컴포넌트·핵심 플로우를 끝까지 만들어라.` : ''}${replanNote}${fbCont ? `\n\n[사용자가 방금 추가로 준 지시 — 반드시 그대로 반영]\n${fbCont}` : ''}\n\n이미 있는 서버/타입은 활용하고 npm run build 통과 유지.${prd ? '\n\n[따라야 할 PRD]\n' + prd.slice(0, 5000) : ''}`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 540000, true);
-      addJobTokens(channel, estTokens(cont.text) + (prd ? estTokens(prd.slice(0, 5000)) : 0)); // I8
+      addJobTokens(channel, (cont.outTokens || estTokens(cont.text)) + (prd ? estTokens(prd.slice(0, 5000)) : 0)); // I8+Q4: 실토큰 우선
       if (cont.limited) { await postAs(client, channel, thread_ts, LEAD, '⏳ 이어서 채우다가 한도에 걸렸어. 지금까지 만든 만큼만 올릴게, 리셋되면 "이어서"라고 해줘.'); break; }
     }
   }
@@ -1267,6 +1273,7 @@ async function startWork(client, channel, thread_ts, repo, task, newProject, for
 }
 async function handle(event, client) {
   if (!event || !event.ts) return;
+  if (draining) return;                                // Q4: 재배포/종료 드레이닝 중엔 새 메시지 처리 안 함(반쪽 작업 방지)
   if (event.subtype || event.bot_id) return;          // 사람 메시지만 (봇/시스템/수정 무시 → 무한루프 방지)
   if (seen.has(event.ts)) return;                      // message·app_mention 중복 방지
   seen.add(event.ts); if (seen.size > 800) { const a = [...seen]; a.slice(0, a.length - 400).forEach(x => seen.delete(x)); } // 최근 400개만 유지(전체 비우면 직전 메시지 재처리 위험)
@@ -1863,4 +1870,19 @@ async function postButtons(channel, thread_ts, buttons) {
       }
     } catch (e) {}
   }, 8000);
+  // Q4: graceful shutdown — Railway 재배포(SIGTERM) 시 진행 작업을 interrupted로 깔끔히 표시·상태 영속하고, 자식 claude는 SIGKILL 말고 ~10s 자연 종료 대기(반쪽 git commit 방지).
+  const shutdown = (sig) => {
+    if (draining) return; draining = true;
+    try { log('warn', 'shutdown', { sig, claudeRunning, active: Object.keys(activeWork).filter(c => activeWork[c]).length }); } catch (_) {}
+    try { for (const ch of Object.keys(activeWork)) { const w = activeWork[ch]; if (w && w.jobId && jobs[w.jobId] && jobs[w.jobId].status === 'running') jobUpdateById(w.jobId, { status: 'interrupted' }); } } catch (_) {}
+    try { persistJobs(); persistUsage(); persistPending(); persistSchedules(); persistMemory(); } catch (_) {}
+    const t0 = Date.now();
+    const waiter = setInterval(() => {
+      if (claudeRunning <= 0 || Date.now() - t0 > 10000) { clearInterval(waiter); try { log('info', 'shutdown-done', { waitedMs: Date.now() - t0, claudeRunning }); } catch (_) {} process.exit(0); }
+    }, 300);
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('uncaughtException', e => { try { log('error', 'uncaughtException', { e: String((e && e.stack) || e).slice(0, 300) }); } catch (_) {} shutdown('uncaughtException'); });
+  process.on('unhandledRejection', e => { try { log('error', 'unhandledRejection', { e: String((e && e.stack) || e).slice(0, 300) }); } catch (_) {} });
 })();
