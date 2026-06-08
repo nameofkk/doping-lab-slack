@@ -236,6 +236,7 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
       const itemRisk = x => x.kind === 'investigate' ? 'low' : x.kind === 'human' ? 'low' : riskTier(x.task); // I4: 조사=읽기전용 저위험, 코드수정은 내용따라
       const fmt = items.map((x, i) => `${i + 1}. ${riskIcon(itemRisk(x))} [${label(x.kind)}] ${x.who ? x.who + ' — ' : ''}${x.task}`).join('\n');
       await postAs(client, channel, thread_ts, LEAD, `위 결론에서 실제로 착수 가능한 액션 뽑았어 (🟢저위험 🟡보통 🔴고위험):\n${fmt}\n\n"실행"이라고 하면 조사·코드수정 항목을 내가 바로 돌릴게(조사는 읽기전용, 코드수정은 PR로 올려서 네가 머지). 골라서 "실행 1,3"도 돼. 안 할 거면 "넘어가". (사람만 가능한 건 빼고 돌려)`);
+      await postButtons(channel, thread_ts, [{ text: '▶️ 전부 실행', id: 'dispatch_run', style: 'primary' }, { text: '넘어가', id: 'dispatch_skip' }]); // L3
     }
   }
 }
@@ -1209,6 +1210,7 @@ async function startWork(client, channel, thread_ts, repo, task, newProject, for
     const pl = await runClaude(`다음 새 프로젝트를 만들기 전, 핵심 계획만 6~8줄로 짧게: 뭘 만들지 한 줄·핵심기능 3~5개·기술스택·주요 화면. 군더더기·마크다운 없이.\n요청: ${JSON.stringify(task)}`, 'sonnet');
     pendingPlan[channel] = { repo, task, newProject, forcePR, projName, at: Date.now() };
     await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}📐 만들기 전 계획이야:\n${(pl.text || task).trim().slice(0, 1500)}\n\n이대로면 "진행", 바꿀 거 있으면 "수정: ~", 접으려면 "넘어가".`);
+    await postButtons(channel, thread_ts, [{ text: '▶️ 진행', id: 'plan_go', style: 'primary' }, { text: '넘어가', id: 'plan_skip' }]); // L3
     return;
   }
   launchWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName);
@@ -1549,6 +1551,7 @@ async function handle(event, client) {
         pendingSchedule[channel] = { s, when, at: Date.now() };
         logDecision(channel, 'schedule-iac', `의도불일치(${iac.verdict}) → 확인: "${s.label}"`);
         await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}${iac.ask || `이거 "${when}"마다 반복하는 스케줄로 등록할까, 한 번만 할까?`}\n• 반복이면 "스케줄 등록" • 한 번만이면 "1회만" • 아니면 "취소"`);
+        await postButtons(channel, thread_ts, [{ text: '🔁 반복 등록', id: 'sched_register' }, { text: '1회만', id: 'sched_once', style: 'primary' }, { text: '취소', id: 'sched_cancel', style: 'danger' }]); // L3
         return;
       }
       // A: 결정론적 백스톱 — 반복 스케줄이 'work'(코드 변경)면(LLM이 MATCH라 해도) 확인. report/유지보수는 바로 등록.
@@ -1556,6 +1559,7 @@ async function handle(event, client) {
         pendingSchedule[channel] = { s, when, at: Date.now() };
         logDecision(channel, 'schedule-confirm', `반복 코드변경 스케줄 의심 → 확인요청: "${s.label}" (${when})`);
         await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}잠깐 — 이거 "${when}"마다 **코드를 바꾸는 작업**을 반복 실행하는 걸로 잡혔어. 근데 같은 코드변경을 매번 다시 돌리는 건 보통 의도가 아니거든(스케줄은 점검·리포트·백업처럼 반복할 일에 써).\n• 정말 반복할 거면 "스케줄 등록"\n• 한 번만 할 거면 "1회만"\n• 아니면 "취소"`);
+        await postButtons(channel, thread_ts, [{ text: '🔁 반복 등록', id: 'sched_register' }, { text: '1회만', id: 'sched_once', style: 'primary' }, { text: '취소', id: 'sched_cancel', style: 'danger' }]); // L3
         return;
       }
       startSchedule(s, !daily);
@@ -1650,6 +1654,23 @@ async function handle(event, client) {
 
 app.event('message', async ({ event, client }) => { await handle(event, client); });
 app.event('app_mention', async ({ event, client }) => { await handle(event, client); });
+// L3: Block Kit 버튼 클릭 → 동등한 텍스트 명령을 합성해 handle() 재사용(로직 무리팩터·텍스트 폴백 유지). 메인앱(botClient)이 올린 버튼만 여기로 라우팅됨.
+app.action(/^(dispatch|plan|sched)_/, async ({ ack, body, action }) => {
+  await ack();
+  try {
+    const map = { dispatch_run: '실행', dispatch_skip: '넘어가', plan_go: '진행', plan_skip: '넘어가', sched_register: '스케줄 등록', sched_once: '1회만', sched_cancel: '취소' };
+    const text = map[action.action_id]; if (!text) return;
+    const channel = (body.channel && body.channel.id) || (body.container && body.container.channel_id); if (!channel) return;
+    await handle({ channel, user: body.user && body.user.id, ts: 'btn-' + (action.action_ts || (body.actions && body.actions[0] && body.actions[0].action_ts) || Math.round(Date.now())), text }, app.client);
+  } catch (e) { try { console.log('[action] err', String(e).slice(0, 120)); } catch (_) {} }
+});
+// L3: 메인 봇(botClient)이 버튼을 별도 메시지로 올림 — 페르소나는 별개 토큰이라 버튼 라우팅이 안 되므로. 실패해도 텍스트 명령이 폴백.
+async function postButtons(channel, thread_ts, buttons) {
+  try {
+    if (!botClient) return;
+    await botClient.chat.postMessage({ channel, thread_ts, text: '버튼: ' + buttons.map(b => b.text).join(' / '), blocks: [{ type: 'actions', elements: buttons.map(b => ({ type: 'button', text: { type: 'plain_text', text: b.text, emoji: true }, action_id: b.id, value: b.id, ...(b.style ? { style: b.style } : {}) })) }] });
+  } catch (e) {}
+}
 
 (async () => {
   // root와 uid1000(claude)이 같은 clone 디렉토리를 둘 다 신뢰하도록 (dubious ownership 방지)
