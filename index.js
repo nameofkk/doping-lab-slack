@@ -1335,6 +1335,41 @@ function bizLabel(key, value) {
   if (L) return `${L.e || '·'} ${L.ko}: *${v}${L.unit || ''}*`;
   return `· ${key.split('.').pop().replace(/_/g, ' ')}: *${v}*`; // 모르는 키 폴백
 }
+// 지표별 추세(직전 스냅샷 대비 증감) 한 줄
+function bizTrendLines(repo) {
+  const b = bizData[repo]; const h = (b && b.history) || []; if (h.length < 2) return {};
+  const cur = h[h.length - 1].metrics, prev = h[h.length - 2].metrics; const out = {};
+  for (const k of Object.keys(cur)) { if (typeof cur[k] === 'number' && typeof prev[k] === 'number' && prev[k] !== cur[k]) { const d = cur[k] - prev[k]; const pct = prev[k] ? Math.round(d / prev[k] * 100) : null; out[k] = `${d > 0 ? '▲' : '▼'}${Math.abs(d).toLocaleString()}${pct !== null ? `(${d > 0 ? '+' : ''}${pct}%)` : ''}`; } }
+  return out;
+}
+// A2: 운영자 KPI 프레임워크 — 브리핑 프롬프트에 주입. 친한국어, 추정 금지, 측정 갭 짚기.
+const BIZ_RUBRIC = `[운영자 KPI 프레임워크 — 이 기준으로 사업을 해석해라]
+- 획득(Acquisition): 신규 가입/방문 유입. 늘고 있나?
+- 활성화(Activation): 가입한 사람이 "첫 핵심행동"(가치 첫 경험)까지 도달하는 비율. 이게 낮으면 유입 늘려도 샌다.
+- 리텐션(Retention): 다시 돌아오나(재방문 D1/D7/D30), 이탈률. 사업의 진짜 건강.
+- 수익(Revenue): 유료 전환율(무료→유료), MRR(월 반복매출), 객단가, LTV(고객생애가치), LTV:CAC(획득비 대비).
+- 추천(Referral): 공유·구독·바이럴.
+- 노스스타: 이 서비스가 전달하는 "반복 가치" 1개(예: 차단한 스포일러 수 / 전달한 분쟁 알림).
+- 경보 기준선: 월 이탈 2% 초과, LTV:CAC 3배 미만, 무료→유료 2~5% 미만이면 빨간불.
+[중요] 데이터에 없는 핵심지표(활성화율·D7리텐션·LTV 등)는 절대 추정하지 마라. 대신 "이게 사업에 중요한데 지금 측정이 안 됨 → 이렇게 계측하면 됨"으로 '측정 갭'을 짚어라. 숫자는 준 데이터에 있는 것만 써라.`;
+// A2: 사업 브리핑 — 실수치+추세+루브릭 → 운영자 관점 해석. 친한국어, 추정 0.
+let bizBriefAt = 0;
+async function runBizBriefing(client, channel, manual = false) {
+  if (!manual && Date.now() - bizBriefAt < 18 * 3600000) return;
+  bizBriefAt = Date.now();
+  try {
+    const repos = Object.keys(bizData); if (!repos.length) { if (manual) await postAs(client, channel, undefined, LEAD, '아직 등록된 사업 메트릭이 없어. "사업 메트릭 등록"으로 서비스 stats를 연결해줘.'); return; }
+    const blocks = [];
+    for (const rp of repos) { const cur = await bizFetch(rp); const m = cur || bizLatest(rp); if (!m) continue; const tr = bizTrendLines(rp); blocks.push(`[${rp.split('/').pop()}]\n` + Object.entries(m).map(([k, v]) => `${(BIZ_LABELS[k] ? BIZ_LABELS[k].ko : k)}: ${v}${tr[k] ? ' ' + tr[k] : ''}`).join('\n')); }
+    if (!blocks.length) { if (manual) await postAs(client, channel, undefined, LEAD, '지금 사업 수치를 못 받았어(서비스 stats URL/인증 확인). "사업 지표"로 점검해줘.'); return; }
+    const ctx = blocks.join('\n\n');
+    const r = await runClaude(`너는 도핑연구소 사업 책임자(PM/그로스)다. 아래는 우리가 운영하는 서비스의 실제 사업 지표(직전 대비 추세 포함)다.${UNTRUSTED_PREAMBLE}\n${wrapUntrusted(ctx)}\n\n${BIZ_RUBRIC}\n\n이 데이터로 "사업 브리핑"을 친근한 한국어 반말로 써라(마크다운·별표·영어약어 남발 금지, 쉬운 말로). 구성: ①지금 사업 상태(AARRR 단계별로 있는 데이터만) ②눈에 띄는 변화·특이사항 ③📍측정 갭(사업에 중요한데 지금 안 보이는 지표 + 어떻게 측정할지) ④지금 하면 효과 클 개선 1~3개(각각 "어떤 지표를 올리려는 건지" 타겟 명시). 데이터에 없는 수치는 절대 지어내지 마.`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 180000);
+    const text = (r.text || '').trim() || '브리핑 생성 실패(데이터 부족/한도).';
+    log('info', 'biz-briefing', { manual, repos: blocks.length });
+    if (channel) await postAs(client, channel, undefined, byName('김채원') || LEAD, `📈 사업 브리핑\n${text}`);
+    if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: `📈 사업 브리핑\n${scrubOutput(text)}` }).catch(() => {});
+  } catch (e) { try { log('error', 'biz-briefing-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
+}
 // 운영 헬스체크 — 각 라이브 서비스 curl로 상태 확인 → 우정잉(QA/SRE)이 보고, 다운이면 윈터가 알림
 async function checkServices(client, channel, announce = true, onlyAlert = false) {
   const sre = byName('윈터') || LEAD; // 운영·헬스체크 = 인프라
@@ -1892,6 +1927,13 @@ async function handle(event, client) {
       for (const rp of repos) { const got = await bizFetch(rp); const cur = got || bizLatest(rp); lines.push(`*${rp.split('/').pop()}*\n` + (cur ? Object.entries(cur).map(([k, v]) => bizLabel(k, v)).join('\n') : '_아직 수치를 못 받았어 (URL/인증 확인 — "사업 메트릭 등록"으로 소스 점검)_')); }
       await postAs(client, channel, thread_ts, byName('김채원') || LEAD, '📈 사업 지표 (실데이터, 지어낸 거 아님)\n' + lines.join('\n\n')); return;
     }
+    // A2: 사업 브리핑 (실수치 → AARRR 루브릭 해석 + 측정갭 + 개선안)
+    if (/(사업\s*브리핑|비즈니스\s*브리핑|사업\s*분석|사업\s*진단)/i.test(raw)) {
+      if (await guardBusy(client, channel, thread_ts)) return;
+      activeWork[channel] = { task: '사업 브리핑', started: Date.now() };
+      runBizBriefing(client, channel, true).catch(() => {}).finally(() => { activeWork[channel] = null; });
+      return;
+    }
     // 사용량/번레이트 (오늘 Claude 호출·토큰·한도걸림)
     if (/(사용량|번레이트|토큰.*얼마|클로드.*사용|usage)/.test(raw) && !/운영|리포트|report/.test(raw)) {
       await postAs(client, channel, thread_ts, LEAD, `오늘 우리 사용량이야.\n호출 ${usageStat.calls}회 · 출력토큰 약 ${usageStat.outTokens.toLocaleString()} · 한도걸림 ${usageStat.limitedHits}번.${usageStat.limitedHits ? ' 한도 자주 걸리면 팀원 모델 sonnet 유지하거나 작업 텀을 두자.' : ''}`);
@@ -2239,6 +2281,8 @@ async function postButtons(channel, thread_ts, buttons) {
       // A3: 일1회 자율 운영 브리핑 — 서비스 채널 있으면 거기, 없으면 최근 채널, 그것도 없으면 OWNER DM만
       const briefCh = chans[0] || Object.keys(lastRequester)[0] || null;
       runOpsBriefing(botClient, briefCh, false).catch(() => {});
+      runBizBriefing(botClient, briefCh, false).catch(() => {}); // A2: 일1회 사업 브리핑
+
       // A4: 주1회(월요일) 능동 개선 제안 — 게이트로 발의
       if (n.dow === 1 && briefCh) runImprovementProposal(botClient, briefCh, false).catch(() => {});
       // B4: 주1회(수요일) 능동 자기개선 스캔 — 봇 자체 코드 개선 발의(게이트)
