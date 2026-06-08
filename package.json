@@ -5,7 +5,9 @@
   "description": "도핑연구소 Slack 멀티에이전트 봇 — 구독 기반 claude CLI, 직원별 정체성, 24/7",
   "scripts": {
     "start": "node index.js",
-    "regress": "node test/regress.mjs"
+    "regress": "node test/regress.mjs",
+    "eval": "node --check index.js && node test/regress.mjs",
+    "deploy": "npm run eval && railway up --service doping-lab --ci < /dev/null"
   },
   "dependencies": {
     "@slack/bolt": "^3.22.0",
