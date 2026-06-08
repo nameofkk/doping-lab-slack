@@ -1290,6 +1290,11 @@ async function handle(event, client) {
   }
   recordMsg(channel, '사용자', raw);
   if (event.user) lastRequester[channel] = event.user; // 완료 시 이 사람을 @멘션
+  // 내 슬랙 멤버ID 알려주기 (OWNER_USER_ID 설정용 등) — 봇이 받은 event.user가 곧 그 사람의 U… 멤버ID
+  if (/^(내\s*(아이디|id)|my\s*id|멤버\s*id|member\s*id|whoami)\s*\??$/i.test(raw)) {
+    await postAs(client, channel, event.thread_ts, LEAD, `${mention(channel)}네 슬랙 멤버 ID는 \`${event.user || '(못 읽음)'}\` 야. (OWNER_USER_ID에 이 값을 넣으면 드리프트 알림 DM이 너한테 와)`);
+    return;
+  }
   const thread_ts = event.thread_ts;
   // 새 프로젝트 시작 전 물어본 질문에 대한 답 → 그 답대로 기획 시작
   if (pendingProject[channel] && pendingProject[channel].at && Date.now() - pendingProject[channel].at > 30 * 60 * 1000) { delete pendingProject[channel]; persistPending(); } // 30분 지난 미답변 질문은 만료 — 한참 뒤 무관한 메시지를 '답'으로 오인하는 거 방지
