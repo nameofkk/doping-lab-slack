@@ -4,7 +4,8 @@
   "private": true,
   "description": "도핑연구소 Slack 멀티에이전트 봇 — 구독 기반 claude CLI, 직원별 정체성, 24/7",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "regress": "node test/regress.mjs"
   },
   "dependencies": {
     "@slack/bolt": "^3.22.0",
