@@ -863,8 +863,15 @@ function loadSchedules() {
     if (!fs.existsSync(SCHED_FILE)) return;
     const d = JSON.parse(fs.readFileSync(SCHED_FILE, 'utf8'));
     schedSeq = d.seq || 0;
-    for (const s of (d.items || [])) startSchedule({ ...s }, false);
-    console.log(`복원된 스케줄: ${schedules.length}개`);
+    let purged = 0;
+    for (const s of (d.items || [])) {
+      // 자동 정리: 일회성 기능변경/제작이 반복 스케줄로 잘못 등록된 것 제거(매일 같은 코드변경을 재실행하는 버그). 반복 모니터링(점검/백업/리포트)은 유지.
+      const lbl = `${s.label || ''} ${s.task || ''}`;
+      if (s.action === 'work' && /변경|전환|바꿔|바꾸|적용|개편|형식으로|방식으로|만들|제작|구현|기능\s*(추가|넣)/.test(lbl) && !/점검|백업|리포트|헬스|모니터|스캔|갱신|업데이트|확인|정리/.test(lbl)) { purged++; continue; }
+      startSchedule({ ...s }, false);
+    }
+    if (purged) persistSchedules();
+    console.log(`복원된 스케줄: ${schedules.length}개${purged ? ` (일회성 오등록 ${purged}개 자동 제거)` : ''}`);
   } catch (e) {}
 }
 function kstNow() {
@@ -1474,7 +1481,7 @@ async function handle(event, client) {
     // 주기 스케줄 등록 (간격 또는 매일 특정시각)
     const daily = parseDaily(raw);
     const ims = daily ? null : parseIntervalMs(raw);
-    if ((daily || ims) && !/만들|제작|개발|처음부터|새\s*프로젝트|짜줘|짜봐|구현/.test(raw) && !/(앱|어플|사이트|웹사이트|홈페이지|랜딩|게임|서비스|플랫폼|툴|봇)\s*$/.test(raw)) { // 신규제작 요청에 '매일' 들어간 거 스케줄로 오등록 방지, "하루한번 점검"은 포함. 동사 없이 제품명사로 끝나면(예: "매주 장보기 리스트 앱") 빌드 요청 → 스케줄 제외
+    if ((daily || ims) && !/만들|제작|개발|처음부터|새\s*프로젝트|짜줘|짜봐|구현|변경|전환|바꿔|바꾸|적용|개편|리팩터|마이그레이|형식으로|방식으로|기능\s*(추가|넣)/.test(raw) && !/(앱|어플|사이트|웹사이트|홈페이지|랜딩|게임|서비스|플랫폼|툴|봇)\s*$/.test(raw)) { // 스케줄=반복 모니터링/유지보수(점검·백업·리포트)만. 신규제작·일회성 기능변경(변경/전환/바꿔/형식으로 등)에 '매일'이 든 건 스케줄 아님(그 시각은 기능 스펙이지 스케줄 지시가 아님)
       const taskText = raw.replace(/(\d+\s*(초|분|시간|일|주)\s*마다|매일|매주|매시간|주기적으로|주기별로|(오전|아침|오후|저녁|밤)?\s*\d{1,2}\s*시(?:\s*\d{1,2}\s*분)?)/g, '').replace(/\s+/g, ' ').trim();
       const it = await classifyIntent(taskText || raw);
       const id = ++schedSeq;

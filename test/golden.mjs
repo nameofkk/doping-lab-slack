@@ -27,9 +27,11 @@ function parseDaily(t) { if (/마다/.test(t)) return null; const m = t.match(/(
 ok(parseDaily('밤 12시') === 0, '#16 밤 12시→자정0');
 ok(parseDaily('오후 12시') === 12, '오후 12시→정오12');
 ok(parseDaily('오후 6시') === 18, '오후 6시→18');
-const isSched = raw => { const d = parseDaily(raw); const ims = /마다/.test(raw); return !!(d !== null || ims) && !/만들|제작|개발|짜줘|구현/.test(raw) && !/(앱|사이트|게임|서비스|툴|봇)\s*$/.test(raw); };
+const isSched = raw => { const d = parseDaily(raw); const ims = /마다|매주|매시간/.test(raw); return !!(d !== null || ims) && !/만들|제작|개발|짜줘|구현|변경|전환|바꿔|바꾸|적용|개편|형식으로|방식으로/.test(raw) && !/(앱|사이트|게임|서비스|툴|봇)\s*$/.test(raw); };
 ok(isSched('매일 새벽 3시 점검해줘') === true, '스케줄 인식');
 ok(isSched('매주 장보기 리스트 앱') === false, '#15 제품명사 빌드→스케줄 아님');
+ok(isSched('매일 오전 10시 알람을 다이제스트 형식으로 변경') === false, '#기능변경+시각→스케줄 아님(매일10시 오등록 버그)');
+ok(isSched('매주 의존성 업데이트해줘') === true, '유지보수(업데이트)→스케줄 유지');
 
 // 한글 \b 버그 회귀 (R1 작업현황 / R5 진행승인)
 const jobCmd = raw => (/^(작업\s*현황|진행\s*상황|작업\s*보드|작업\s*목록|작업\s*리스트|jobs?|지금\s*뭐\s*(하|돌)|뭐\s*(하는\s*중|돌아가))/i.test(raw) || /^(작업|진행)\s*(어때|있어|중이야)/.test(raw)) && !/(만들|짜줘|짜봐|추가|구현|개발|보고서|작성)/.test(raw);
