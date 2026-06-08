@@ -241,7 +241,7 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
 }
 
 // ── 실제 작업 모드: 레포 클론 → claude 코드 작업 → 브랜치 push → PR → 보고 ──
-let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {}; const pendingPlan = {};
+let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {}; const pendingPlan = {}; const pendingSchedule = {};
 function drainFeedback(channel) { const f = (feedback[channel] || []).join('\n'); feedback[channel] = []; return f; } // 작업 중 사용자가 끼어든 수정요청 모아서 반환
 // 토론/회의 결론 → 실제 착수 가능한 액션아이템 추출 (조사/코드수정/사람만 분류). 자동 실행 아님 — 사용자 승인용 목록.
 async function extractActionItems(conclusion) {
@@ -850,7 +850,16 @@ function jobFor(s) {
       if (s.action === 'work' && s.task) await runWork(botClient, s.channel, undefined, repo, s.task, !!s.newProject, true);
       else await runReport(botClient, s.channel, undefined, reporter, repo, s.task || s.label);
     } catch (e) { /* 스케줄 작업 오류는 조용히 — 다음 회차에 재시도 */ }
-    finally { activeWork[s.channel] = null; }
+    finally {
+      // 서킷 브레이커(deadman) — 스케줄 work가 "변경 없음"(이미 적용돼 멱등)을 반복하면 무의미한 재실행이므로 자동 일시정지. wewantpeace 매일10시류 방어.
+      const jid = activeWork[s.channel] && activeWork[s.channel].jobId;
+      if (s.action === 'work' && jid && jobs[jid] && jobs[jid].note === '변경 없음') {
+        s.noopStreak = (s.noopStreak || 0) + 1;
+        if (s.noopStreak >= 2) { clearInterval(s.timer); const i = schedules.findIndex(x => x.id === s.id); if (i >= 0) schedules.splice(i, 1); persistSchedules(); logDecision(s.channel, 'schedule-autopause', `#${s.id} "${s.label}" 변경없음 ${s.noopStreak}회 반복 → 자동 일시정지`); postAs(botClient, s.channel, undefined, LEAD, `⏸️ 스케줄 #${s.id} "${s.label}"이 ${s.noopStreak}번 연속 바뀐 게 없어서(이미 다 돼있음) 자동으로 멈췄어. 더 할 게 있으면 그냥 작업으로 시켜줘.`).catch(() => {}); }
+        else persistSchedules();
+      } else if (s.action === 'work') { s.noopStreak = 0; persistSchedules(); }
+      activeWork[s.channel] = null;
+    }
   };
 }
 function startSchedule(s, runNow) {
@@ -959,6 +968,12 @@ function createJob(channel, type, title, repo, by) { const id = ++jobSeq; jobs[i
 function jobUpdateById(id, patch) { const j = jobs[id]; if (!j) return; Object.assign(j, patch, { updatedAt: Date.now() }); persistJobs(); }
 function jobUpdate(channel, patch) { const id = activeWork[channel] && activeWork[channel].jobId; if (id) jobUpdateById(id, patch); } // 현재 채널 진행작업에 연결된 job 갱신 (jobId 없으면 무시)
 function ensureJob(channel, type, title, repo) { if (!activeWork[channel]) return null; if (!activeWork[channel].jobId) activeWork[channel].jobId = createJob(channel, type, title, repo, activeWork[channel].by).id; return activeWork[channel].jobId; } // report/debate처럼 호출측이 activeWork만 세팅한 경우 job 붙이기
+// B: 결정 로깅 — 봇의 주요 판단(스케줄 등록·작업 라우팅·레포 선택·이상행동)을 기록해서 "실제 트래픽"을 감사 가능하게. 내가 상상한 케이스 말고 진짜 결정을 보고 골든셋·가드를 키운다.
+const DECIS_FILE = process.env.DECISIONS_FILE || '/data/decisions.json';
+let decisions = [];
+function loadDecisions() { try { if (fs.existsSync(DECIS_FILE)) decisions = JSON.parse(fs.readFileSync(DECIS_FILE, 'utf8')) || []; } catch { decisions = []; } }
+function logDecision(channel, kind, detail) { decisions.push({ at: Date.now(), channel, kind, detail: String(detail || '').replace(/\s+/g, ' ').slice(0, 240) }); if (decisions.length > 300) decisions = decisions.slice(-300); try { fs.writeFileSync(DECIS_FILE, JSON.stringify(decisions)); } catch {} try { console.log(`[decision] ${kind}: ${detail}`); } catch {} }
+function decisionLog(channel) { const mine = decisions.filter(d => !channel || d.channel === channel).slice(-20); if (!mine.length) return '아직 기록된 결정이 없어.'; const ago = at => { const m = Math.round((Date.now() - at) / 60000); return m < 60 ? m + '분 전' : Math.round(m / 60) + '시간 전'; }; return '🧾 최근 판단 기록 (왜 그렇게 했는지 감사용)\n' + mine.map(d => `• [${d.kind}] ${d.detail} _(${ago(d.at)})_`).join('\n'); }
 // I8/I1: job당 토큰·비용 추정 추적 (대략 글자수/4). 캡 초과 시 호출측이 하드스톱.
 function estTokens(s) { return Math.ceil(String(s || '').length / 4); }
 function addJobTokens(channel, n) { const id = activeWork[channel] && activeWork[channel].jobId; if (id && jobs[id]) jobUpdateById(id, { tokens: (jobs[id].tokens || 0) + n }); }
@@ -1234,6 +1249,13 @@ async function handle(event, client) {
       return;
     }
     // R5b: 신규제작 계획 승인 ("진행"=착수 / "수정: ~"=계획 반영해 다시 / "넘어가"=폐기)
+    // A: 반복 코드변경 스케줄 확인 응답 ("스케줄 등록"=강행 / "1회만"=일회성 작업 / "취소"=폐기)
+    if (pendingSchedule[channel]) {
+      if (pendingSchedule[channel].at && Date.now() - pendingSchedule[channel].at > 30 * 60 * 1000) { delete pendingSchedule[channel]; }
+      else if (/^(취소|넘어가|안\s?해|됐어|아니)/.test(raw)) { delete pendingSchedule[channel]; logDecision(channel, 'schedule-cancel', '확인에서 취소'); await postAs(client, channel, thread_ts, LEAD, '오케이, 스케줄 안 걸게.'); return; }
+      else if (/^(1회|한\s?번|일회|이번\s?만|한번만)/.test(raw)) { const ps = pendingSchedule[channel]; delete pendingSchedule[channel]; logDecision(channel, 'schedule→work', `1회 작업으로 전환: "${ps.s.label}"`); await postAs(client, channel, thread_ts, LEAD, '오케이, 반복 말고 한 번만 할게.'); startWork(client, channel, thread_ts, ps.s.newProject ? WORK_DEFAULT_REPO : resolveRepo(ps.s.repo), ps.s.task || ps.s.label, !!ps.s.newProject, !!settings.approval[channel]); return; }
+      else if (/^(스케줄\s*등록|등록|반복|그대로|강행|응|맞아|확인)/.test(raw) && canCommand(event.user)) { const ps = pendingSchedule[channel]; delete pendingSchedule[channel]; startSchedule(ps.s, ps.s.kind !== 'daily'); persistSchedules(); logDecision(channel, 'schedule', `확인 후 등록 #${ps.s.id} ${ps.s.label} (${ps.when})`); await postAs(client, channel, thread_ts, LEAD, `⏰ 알겠어, 반복 스케줄로 등록했어 (#${ps.s.id}, ${ps.when}). (취소: "스케줄 취소 ${ps.s.id}")`); return; }
+    }
     if (pendingPlan[channel]) {
       if (pendingPlan[channel].at && Date.now() - pendingPlan[channel].at > 30 * 60 * 1000) { delete pendingPlan[channel]; } // 30분 만료
       else if (/^(넘어가|취소|안\s?해|됐어|패스|놔둬)/.test(raw)) { delete pendingPlan[channel]; await postAs(client, channel, thread_ts, LEAD, '오케이, 이 계획은 접을게.'); return; }
@@ -1295,6 +1317,8 @@ async function handle(event, client) {
     if (/^태스크\s*(목록|보드|리스트)/.test(raw)) { const l = tasks[channel] || []; await postAs(client, channel, thread_ts, LEAD, l.length ? '📋 할 일 보드:\n' + l.map(t => `#${t.id} [${t.done ? '완료' : '진행'}] ${t.text}`).join('\n') : '등록된 태스크가 없어.'); return; }
     // R1: 봇 작업 현황 보드 (자동 추적 — 지금 뭐 돌고 있는지, 뭐 끝났는지, 재시작에 끊긴 건 뭔지)
     if ((/^(작업\s*현황|진행\s*상황|작업\s*보드|작업\s*목록|작업\s*리스트|jobs?|지금\s*뭐\s*(하|돌)|뭐\s*(하는\s*중|돌아가))/i.test(raw) || /^(작업|진행)\s*(어때|있어|중이야)/.test(raw)) && !/(만들|짜줘|짜봐|추가|구현|개발|보고서|작성)/.test(raw)) { await postAs(client, channel, thread_ts, LEAD, jobBoard(channel)); return; }
+    // B: 봇 판단 기록 조회 ("결정 로그" / "왜 그랬어")
+    if (/^(결정\s*로그|판단\s*(로그|기록)|결정\s*기록|왜\s*(그랬|그렇게|이렇게))/.test(raw)) { await postAs(client, channel, thread_ts, LEAD, decisionLog(channel)); return; }
     // R8: MCP 툴 플러그인 조회/안내
     if (/^(mcp|엠씨피|툴)\s*(목록|리스트|상태|뭐|있어)?/i.test(raw) && !/추가|연결|넣어|등록/.test(raw)) { const ns = mcpServerNames(); await postAs(client, channel, thread_ts, byName('윈터') || LEAD, ns.length ? `🔌 연결된 MCP 툴: ${ns.join(', ')}\n새 툴은 ${USER_MCP_FILE}에 {"mcpServers":{...}} 형식으로 넣고 재시작하면 붙어. API키 필요한 건 너가 넣어줘야 해(👤).` : '아직 연결된 MCP 툴이 없어(figma는 FIGMA_API_KEY 넣으면 자동). 새 툴은 ' + USER_MCP_FILE + '에 mcpServers 설정 넣고 재시작.'); return; }
     if (/^(mcp|엠씨피|툴)\s*(추가|연결|등록|넣)/i.test(raw)) { await postAs(client, channel, thread_ts, byName('윈터') || LEAD, `MCP 툴 추가는 보통 API키/명령이 필요해서 직접 설정해야 해(👤): ${USER_MCP_FILE} 파일에 {"mcpServers":{"이름":{"command":"...","args":[...],"env":{...}}}} 넣고 봇 재시작하면 제작 작업에서 그 툴을 쓸 수 있어. 지금 연결: ${mcpServerNames().join(', ') || '없음'}.`); return; }
@@ -1488,9 +1512,17 @@ async function handle(event, client) {
       const reporter = (pickPersona(raw) || LEAD).name;
       const base = { id, channel, label: taskText || raw, action: it.action, task: it.task, repo: it.repo, newProject: !!it.newProject, reporter };
       const s = daily ? { ...base, kind: 'daily', hour: daily.hour, minute: daily.minute } : { ...base, kind: 'interval', ms: ims };
+      const when = daily ? `매일 ${daily.hour}시${daily.minute ? ' ' + daily.minute + '분' : ''} (KST)` : humanMs(ims);
+      // A: 이상행동 sanity-check — 반복 스케줄이 'work'(코드 변경)면 거의 다 실수(매일 같은 코드를 재실행). 조용히 등록하지 말고 확인받는다. report/유지보수는 정상이라 바로 등록.
+      if (it.action === 'work') {
+        pendingSchedule[channel] = { s, when, at: Date.now() };
+        logDecision(channel, 'schedule-confirm', `반복 코드변경 스케줄 의심 → 확인요청: "${s.label}" (${when})`);
+        await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}잠깐 — 이거 "${when}"마다 **코드를 바꾸는 작업**을 반복 실행하는 걸로 잡혔어. 근데 같은 코드변경을 매번 다시 돌리는 건 보통 의도가 아니거든(스케줄은 점검·리포트·백업처럼 반복할 일에 써).\n• 정말 반복할 거면 "스케줄 등록"\n• 한 번만 할 거면 "1회만"\n• 아니면 "취소"`);
+        return;
+      }
       startSchedule(s, !daily);
       persistSchedules();
-      const when = daily ? `매일 ${daily.hour}시${daily.minute ? ' ' + daily.minute + '분' : ''} (KST)` : humanMs(ims);
+      logDecision(channel, 'schedule', `등록 #${id} ${it.action} "${s.label}" (${when})`);
       await postAs(client, channel, thread_ts, LEAD, `⏰ 스케줄 등록했어 (#${id})\n주기: ${when}\n내용: ${s.label}\n${daily ? '예약 시각에' : '지금 한 번 돌려보고 이후'} 자동 실행할게. 재시작해도 유지돼. (취소: "스케줄 취소 ${id}")`);
       return;
     }
@@ -1540,6 +1572,7 @@ async function handle(event, client) {
     if (intent && intent.action === 'work' && intent.task) {
       const newProject = !!intent.newProject;
       const repo = newProject ? WORK_DEFAULT_REPO : resolveR(intent.repo);
+      logDecision(channel, 'route:work', `"${raw.slice(0, 50)}" → ${newProject ? '신규프로젝트' : '기존 ' + repo} / ${intent.task.slice(0, 40)}`); // B: 신규 vs 기존 판단 기록
       // 시작 전에 정말 애매한 중요 결정 있으면 먼저 물어보고(없으면 바로 진행) — 신규·수정 둘 다
       startWork(client, channel, event.thread_ts || event.ts, repo, intent.task, newProject, !!settings.approval[channel], intent.name);
       return;
@@ -1590,7 +1623,7 @@ app.event('app_mention', async ({ event, client }) => { await handle(event, clie
   loadMemory();
   loadRules();
   loadSettings();
-  loadTasks(); loadJobs(); loadFacts(); buildMcpConfig();
+  loadTasks(); loadJobs(); loadFacts(); buildMcpConfig(); loadDecisions();
   loadLastRepo();
   loadServices();
   loadPending();
