@@ -1569,6 +1569,23 @@ async function handle(event, client) {
       })().catch(e => postAs(client, channel, thread_ts, win, '코드 가져오기 오류: ' + String(e).slice(0, 200))).finally(() => { activeWork[channel] = null; });
       return;
     }
+    // 서비스 등록/목록 — 라이브 URL을 모니터링 대장에 올림(헬스체크·센티넬 대상). "서비스 등록 sponono https://sponono.com"
+    {
+      const reg = raw.match(/^서비스\s*(?:등록|추가|모니터링?)\s+(\S+)\s+(https?:\/\/\S+)/i) || raw.match(/^(?:모니터링?)\s+(https?:\/\/\S+)\s+(\S+)$/i);
+      if (reg) {
+        let repoArg = /^https?:/i.test(reg[1]) ? reg[2] : reg[1]; const urlArg = /^https?:/i.test(reg[1]) ? reg[1] : reg[2];
+        const rsv = extractRepo(repoArg); const repoKey = (rsv && !rsv.startsWith('alias:')) ? rsv : (rsv ? rsv.replace('alias:', '') : repoArg);
+        registerService(repoKey, urlArg.replace(/[)>,]+$/, ''), channel);
+        logDecision(channel, 'service-register', `${repoKey} → ${urlArg}`);
+        await postAs(client, channel, thread_ts, byName('윈터') || LEAD, `대장에 올렸어: ${repoKey} · ${urlArg}\n이제 헬스체크·운영 센티넬이 이 서비스를 추적해. "헬스체크" 치면 바로 상태·지연 잡아줄게.`);
+        return;
+      }
+      if (/^서비스\s*(목록|리스트|대장|상태)\s*\??$/.test(raw)) {
+        const ls = svcList().filter(s => s.url);
+        await postAs(client, channel, thread_ts, byName('윈터') || LEAD, ls.length ? '📋 모니터링 서비스\n' + ls.map(s => { const last = (s.history || [])[s.history.length - 1]; return `${s.lastStatus === 'down' ? '🔴' : '🟢'} ${s.repo} · ${s.url}${last && last.ms != null ? ` (${last.ms}ms)` : ''} ${svcTrend(s)}`.trim(); }).join('\n') : '아직 URL 등록된 서비스가 없어. "서비스 등록 <레포> <url>"로 올려줘.');
+        return;
+      }
+    }
     if (/(헬스\s?체크|운영\s?점검|상태\s?점검|서비스.*점검|모니터링)/.test(raw)) {
       await postAs(client, channel, thread_ts, byName('윈터') || LEAD, '지금 바로 다 돌려서 살아있는지 확인할게.');
       checkServices(client, channel).catch(e => postAs(client, channel, thread_ts, LEAD, '점검 오류: ' + String(e).slice(0, 200)));
