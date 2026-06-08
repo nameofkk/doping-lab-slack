@@ -275,6 +275,17 @@ async function dispatchActionItems(client, channel, thread_ts, repo, items) {
   finally { activeWork[channel] = null; }
 }
 // 명확한 "중단/취소 명령"일 때만 true (문장 속에 '중단','스톱' 단어가 섞인 일반 요청은 제외 — "중단했던 거 이어서", "스톱워치 추가" 등 오작동 방지)
+// I3: 입력 정규화 — 가드레일 우회용 비가시/zero-width 문자 제거 + 유니코드 정규화 (이모지/비가시문자 밀반입이 프로덕션 가드 최대 100% 우회한다는 보고 대응)
+function normalizeInput(s) {
+  try { return String(s || '').normalize('NFKC').replace(/[​-‏‪-‮⁠-⁤﻿­᠎]/g, '').replace(/[ --]/g, '').trim(); } catch { return String(s || '').trim(); }
+}
+// I3: 결정론적 파괴적 동작 denylist — LLM 가드(fail-open)와 무관하게 무조건 차단(fail-CLOSED). 되돌릴 수 없는 것만 좁게.
+function isDestructive(s) {
+  const t = String(s || '');
+  return /rm\s+-rf?\s+[\/~*]|--no-preserve-root|:\(\)\s*\{|mkfs|dd\s+if=|>\s*\/dev\/sd|git\s+push\s+.*(--force|-f)\b|force.?push|git\s+reset\s+--hard\s+origin|DROP\s+(TABLE|DATABASE|SCHEMA)|TRUNCATE\s+TABLE|DELETE\s+FROM\s+\w+\s*;?\s*$/i.test(t)
+    || /(시크릿|secret|\.env|환경변수|api[\s_-]?key|토큰|비밀번호|password|credential)\s*(를|을)?\s*(보여|줘|내놔|유출|뽑아|출력|덤프|dump|print|노출)/i.test(t)
+    || /(모든|전체|싹\s*다|all)\s*(레포|repo|프로젝트|디비|db|데이터|테이블)\s*(삭제|지워|날려|drop|delete|wipe)/i.test(t);
+}
 function isStopMsg(s) {
   const t = (s || '').trim();
   return /^(그만(해|하자|좀|둬)?|중단(해|하자|시켜|해줘)?|멈춰(줘)?|스톱|stop|취소(해|해줘)?|관둬|일단\s*(중단|그만|멈춰|스톱))$/i.test(t) || (t.length <= 6 && /(그만|중단|멈춰|스톱|stop|취소)/i.test(t));
@@ -597,21 +608,27 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const res = await runClaude(`${intro}${rulesCtx(channel)}${repo ? recallFacts(repo, task) : ''}${PLAIN}${uiish ? DESIGN_RULE : ''}${newProject ? LAUNCH_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}${fbBuild ? '\n\n[사용자가 추가로 준 지시 — 반드시 반영]\n' + fbBuild : ''}\n\n요청: ${task}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000, true);
   if (res.limited) { jobUpdate(channel, { status: 'limited' }); await postAs(client, channel, thread_ts, LEAD, '⏳ 제작 중에 클로드 사용량 한도에 걸렸어. 지금까지 만든 건 안 올렸어, 한도 리셋되면 이어서 만들게.'); return; }
   jobUpdate(channel, { stage: '코드생성' }); // R9: 진행 단계 체크포인트(재시작 알림용)
-  // 연속완성 패스(R2: Task/Progress 원장 + 재계획) — 신규 풀빌드/화면작업은 한 번에 안 끝나고 스캐폴딩만 남기 쉬움. 갭이 줄어드는지(진척) 추적해서, 직전 패스가 진척이 없었으면(스톨) 같은 방식 반복 말고 접근을 바꿔 재계획. 진행기록은 job 원장에 남김.
+  addJobTokens(channel, estTokens(res.text) + estTokens(task) + (prd ? estTokens(prd) : 0)); // I8: 비용 추적
+  // 연속완성 패스(R2 원장+재계획, I1 하드캡+반복하드스톱) — 갭이 줄어드는지 추적, 진척 없으면(스톨) 접근 바꿔 재계획. 단 재계획해도 또 막히거나(반복) 토큰/시간 캡 넘으면 하드스톱 — 무한루프·비용폭주 방지.
   if ((newProject || uiish || (feedback[channel] || []).length) && !res.limited) {
-    let prevGapCount = Infinity; const progress = [];
-    for (let pass = 1; pass <= 4 && !workCancel[channel]; pass++) { // 재계획 여지로 3→4
+    let prevGapCount = Infinity, stallStreak = 0; const progress = [];
+    for (let pass = 1; pass <= 4 && !workCancel[channel]; pass++) {
       bumpWork(channel);
+      if (jobTokens(channel) > JOB_TOKEN_CAP) { progress.push(`토큰 캡 초과 → 하드스톱`); await postAs(client, channel, thread_ts, LEAD, '⚠️ 이 작업이 토큰 한도(설정값)를 넘어서 더 안 돌리고 지금까지 만든 걸로 마무리할게. 부족하면 "이어서".'); break; }
+      if (activeWork[channel] && Date.now() - activeWork[channel].started > JOB_WALL_CAP_MS) { progress.push(`시간 캡 초과 → 하드스톱`); await postAs(client, channel, thread_ts, LEAD, '⚠️ 이 작업이 너무 오래 걸려서(시간 한도) 여기서 마무리할게. 부족하면 "이어서".'); break; }
       const gaps = await checkAppGaps(dir);
-      const fbCont = drainFeedback(channel); // 메인 생성 도중 들어온 사용자 피드백("그거 빼고/바꿔")을 이 패스에서 실제로 반영
+      const fbCont = drainFeedback(channel);
       if (!gaps.length && !fbCont) { progress.push(`${pass - 1}차 후 갭 없음 → 완료`); break; }
-      const stalled = gaps.length && gaps.length >= prevGapCount; // 직전 패스가 갭을 못 줄임 = 진척 없음
+      const stalled = gaps.length && gaps.length >= prevGapCount;
+      stallStreak = stalled ? stallStreak + 1 : 0;
+      if (stallStreak >= 2 && !fbCont) { progress.push(`재계획에도 진척 없음(${stallStreak}연속) → 하드스톱`); await postAs(client, channel, thread_ts, LEAD, `🛑 접근을 바꿔 다시 시도해도 진척이 없어서(${stallStreak}연속) 여기서 멈출게. 남은 부분: ${gaps.join(', ')}. 사람이 한 번 봐야 할 것 같아.`); break; } // I1: 반복 하드스톱
       prevGapCount = gaps.length;
       progress.push(`${pass}차: 갭 ${gaps.length}개${stalled ? '(진척없음→재계획)' : ''}${fbCont ? '+피드백' : ''}`);
       jobUpdate(channel, { ledger: { plan: prd ? 'PRD 기반 빌드' : task.slice(0, 80), gaps, progress: progress.slice(-6) } });
       prog.phase(stalled ? `접근 바꿔서 다시 (${pass}차)` : fbCont ? `방금 준 피드백 반영 (${pass}차)` : `아직 비어서 더 채우는 중 (${pass}차)`);
       const replanNote = stalled ? '\n\n[중요 — 재계획] 직전 시도가 진척이 없었어(같은 게 여전히 비어있음). 똑같은 방식 반복하지 마. 왜 안 됐는지 코드를 직접 보고 원인을 짚은 다음, 다른 접근(다른 파일 구조/다른 구현 방식)으로 실제로 끝까지 구현해라.' : '';
       const cont = await runClaude(`이 저장소를 더 다듬어라.${gaps.length ? ` 특히 지금 비어있는 것: ${gaps.join(' / ')} — 데모·플레이스홀더·로렘입숨·"TODO" 금지로 실제 화면(라우트 page)·컴포넌트·핵심 플로우를 끝까지 만들어라.` : ''}${replanNote}${fbCont ? `\n\n[사용자가 방금 추가로 준 지시 — 반드시 그대로 반영]\n${fbCont}` : ''}\n\n이미 있는 서버/타입은 활용하고 npm run build 통과 유지.${prd ? '\n\n[따라야 할 PRD]\n' + prd.slice(0, 5000) : ''}`, 'sonnet', dir, WORK_PERMISSION_MODE, 540000, true);
+      addJobTokens(channel, estTokens(cont.text) + (prd ? estTokens(prd.slice(0, 5000)) : 0)); // I8
       if (cont.limited) { await postAs(client, channel, thread_ts, LEAD, '⏳ 이어서 채우다가 한도에 걸렸어. 지금까지 만든 만큼만 올릴게, 리셋되면 "이어서"라고 해줘.'); break; }
     }
   }
@@ -908,12 +925,18 @@ function createJob(channel, type, title, repo, by) { const id = ++jobSeq; jobs[i
 function jobUpdateById(id, patch) { const j = jobs[id]; if (!j) return; Object.assign(j, patch, { updatedAt: Date.now() }); persistJobs(); }
 function jobUpdate(channel, patch) { const id = activeWork[channel] && activeWork[channel].jobId; if (id) jobUpdateById(id, patch); } // 현재 채널 진행작업에 연결된 job 갱신 (jobId 없으면 무시)
 function ensureJob(channel, type, title, repo) { if (!activeWork[channel]) return null; if (!activeWork[channel].jobId) activeWork[channel].jobId = createJob(channel, type, title, repo, activeWork[channel].by).id; return activeWork[channel].jobId; } // report/debate처럼 호출측이 activeWork만 세팅한 경우 job 붙이기
+// I8/I1: job당 토큰·비용 추정 추적 (대략 글자수/4). 캡 초과 시 호출측이 하드스톱.
+function estTokens(s) { return Math.ceil(String(s || '').length / 4); }
+function addJobTokens(channel, n) { const id = activeWork[channel] && activeWork[channel].jobId; if (id && jobs[id]) jobUpdateById(id, { tokens: (jobs[id].tokens || 0) + n }); }
+function jobTokens(channel) { const id = activeWork[channel] && activeWork[channel].jobId; return (id && jobs[id] && jobs[id].tokens) || 0; }
+const JOB_TOKEN_CAP = parseInt(process.env.JOB_TOKEN_CAP || '900000', 10); // job당 출력토큰 추정 상한 — 초과 시 루프 하드스톱(2700만 토큰 루프류 방지)
+const JOB_WALL_CAP_MS = parseInt(process.env.JOB_WALL_CAP_MIN || '20', 10) * 60000; // job당 벽시계 상한
 function endJob(channel) { const id = activeWork[channel] && activeWork[channel].jobId; if (id && jobs[id] && jobs[id].status === 'running') jobUpdateById(id, { status: 'done' }); } // 종료 시 아직 running이면 done (정확한 상태는 각 함수가 먼저 박음)
 function jobBoard(channel) {
   const mine = Object.values(jobs).filter(j => j.channel === channel).sort((a, b) => b.id - a.id).slice(0, 12);
   if (!mine.length) return '아직 기록된 작업이 없어.';
   const icon = { running: '🔵', 'awaiting-approval': '🟡', done: '✅', failed: '❌', interrupted: '⚠️', limited: '⏳', cancelled: '⏹️', planning: '📝' };
-  const fmt = j => { const m = Math.round((j.updatedAt - j.createdAt) / 60000); const led = j.ledger && j.ledger.progress && j.ledger.progress.length ? '\n   📝 ' + j.ledger.progress[j.ledger.progress.length - 1] : ''; return `${icon[j.status] || '•'} #${j.id} [${j.status}] ${j.type} · ${j.title}${j.repo ? ' (' + j.repo.split('/').pop() + ')' : ''}${m ? ' ·' + m + '분' : ''}${led}${j.artifacts && j.artifacts.length ? '\n   ↳ ' + j.artifacts.join(' ') : ''}`; };
+  const fmt = j => { const m = Math.round((j.updatedAt - j.createdAt) / 60000); const led = j.ledger && j.ledger.progress && j.ledger.progress.length ? '\n   📝 ' + j.ledger.progress[j.ledger.progress.length - 1] : ''; const tok = j.tokens ? ` ·~${Math.round(j.tokens / 1000)}k토큰` : ''; return `${icon[j.status] || '•'} #${j.id} [${j.status}] ${j.type} · ${j.title}${j.repo ? ' (' + j.repo.split('/').pop() + ')' : ''}${m ? ' ·' + m + '분' : ''}${tok}${led}${j.artifacts && j.artifacts.length ? '\n   ↳ ' + j.artifacts.join(' ') : ''}`; };
   return '📋 작업 현황 (최근 12개)\n' + mine.map(fmt).join('\n');
 }
 // ── R7: 장기 메모리(mem0식) — 레포별 durable 사실(컨벤션·결정·선호)을 추출·저장하고 작업 시작 시 주입. 무한 슬라이딩 윈도우 한계 극복. (벡터 대신 레포키+키워드 회상 — 인프라 0) ──
@@ -1071,7 +1094,9 @@ async function guardrailCheck(task) {
 async function startWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName) {
   // 이미 질문 던져놓고 답 기다리는 중이면 똑같은 질문 또 안 함 (같은 요청 재전송 시 무한 질문 방지)
   if (pendingProject[channel]) { await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}아까 물어본 거에 답해주면 바로 들어갈게. 알아서 정해도 되면 "알아서 해"라고 해도 돼.`); return; }
-  // R4: 무거운 작업 전 안전·범위 가드 (파괴적·악의적·범위밖 차단)
+  // I3: 결정론적 fail-CLOSED — 되돌릴 수 없는 파괴적 동작은 LLM 가드 결과와 무관하게 무조건 차단
+  if (isDestructive(task)) { await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}이건 안 돼 — 되돌릴 수 없는 파괴적 동작(대량 삭제·force push·시크릿 유출 등)은 자동으로 막아놨어. 정말 필요하면 사람이 직접 해줘(👤).`); return; }
+  // R4: 무거운 작업 전 안전·범위 가드 (파괴적·악의적·범위밖 차단) — LLM 보조 스크린(fail-open)
   const guard = await guardrailCheck(task);
   if (guard.verdict === 'refuse') { await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}이건 못 해줘 — ${guard.reason || '안전·범위 밖 요청'}. 코드 제작·수정·조사·배포 쪽으로 다시 말해줘.`); return; }
   // 기존 레포 작업·이어가기·완성은 질문 없이 바로 진행 (정체성/경로 같은 쓸데없는 재질문 마찰 제거). 질문은 방향이 크게 갈리는 '신규 제작'에서만.
@@ -1097,7 +1122,7 @@ async function handle(event, client) {
   seen.add(event.ts); if (seen.size > 800) { const a = [...seen]; a.slice(0, a.length - 400).forEach(x => seen.delete(x)); } // 최근 400개만 유지(전체 비우면 직전 메시지 재처리 위험)
   if (ALLOWED.length && !ALLOWED.includes(event.user)) return;
   const channel = event.channel;
-  const raw = (event.text || '').replace(/<@[^>]+>/g, '').trim();
+  const raw = normalizeInput((event.text || '').replace(/<@[^>]+>/g, '').trim());
   if (!raw) return;
   recordMsg(channel, '사용자', raw);
   if (event.user) lastRequester[channel] = event.user; // 완료 시 이 사람을 @멘션

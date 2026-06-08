@@ -307,3 +307,10 @@ test specified) 판별해 안 돌림.
 - 구현: test/golden.mjs(회귀 잦은 핵심 결정을 index.js 로직 그대로 단언 — extractRepo 오탐/별칭, force-new #28/#33, 스케줄 #15/#16, 한글 \b 회귀 작업현황/진행승인, 마케팅 vs 보고). test/regress.mjs가 golden+jobs+r2/r4/r5/r6/r7 전체를 한 방에 실행·집계, 실패 시 exit 1. package.json "npm run regress" = 배포 전 게이트.
 - 효과: 프롬프트/정규식 드리프트를 배포 전에 잡음. 실제로 r7 테스트가 옛 정규식 쓰던 것을 이 하네스가 잡아냄(drift 감지 실증). (테스트는 Dockerfile이 안 복사 — 런타임 무영향, dev/CI 전용)
 - 검증: 전체 회귀 통과(exit 0), node --check 통과.
+
+## 개선 배치1 — 안전·비용 토대 (I3+I1+I8)
+- I3 입력정규화: 메시지 intake에서 NFKC 정규화+zero-width/비가시/RTL마커 제거(가드레일 우회 난독화 차단).
+- I3 fail-CLOSED denylist: rm -rf/force push/git reset --hard origin/DROP TABLE/시크릿 유출/대량삭제는 LLM 가드와 무관하게 결정론적 무조건 차단. 정상작업·환경변수설정은 통과.
+- I1 하드캡: job당 토큰 추정 캡(JOB_TOKEN_CAP 90만)+벽시계 캡(20분) 초과 시 연속완성 루프 하드스톱. 2연속 스톨(재계획에도 진척없음)이면 하드스톱 — 2700만 토큰 무한루프류 방지.
+- I8 비용추적: job당 토큰 추정 누적, 작업현황 보드에 ~Nk토큰 표시.
+- 검증: 정규화·denylist·캡/반복 14케이스 전부 통과. 전체 회귀(golden+i_batch1+R) 통과. node --check 통과.
