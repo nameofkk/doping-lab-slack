@@ -164,8 +164,9 @@ function commandMenuText() {
     '• `헬스체크` · `서비스 목록` · `서비스 등록 <레포> <url>`',
     '• `운영 브리핑` — 종합 진단 · `운영 리포트` — 사용량/성공률',
     '',
-    '📈 *사업(비즈니스)*',
-    '• `사업 지표` — 실수치(가입·활동·구독자) · `사업 메트릭 등록 <레포> <url>`',
+    '사업(비즈니스)',
+    '• `사업 지표` — 실수치 스코어카드 · `사업 브리핑` — AARRR 해석·측정갭',
+    '• `그로스 제안` — 타겟지표+가설 실험 발의 · `실험 현황` — 효과측정',
     '',
     '🤖 *자율(오토파일럿)*',
     '• `오토파일럿 켜` / `끄` / `상태` — 위험도별 자동실행',
@@ -1452,6 +1453,52 @@ async function runBizBriefing(client, channel, manual = false) {
     if (!any && manual) await postAs(client, channel, undefined, LEAD, '지금 사업 수치를 못 받았어(서비스 stats URL/인증 확인). "사업 지표"로 점검해줘.');
   } catch (e) { try { log('error', 'biz-briefing-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
 }
+
+// ── A3: 그로스 루프 — 실데이터 → 타겟지표+가설 단 개선 실험 제안 → 승인/실행(게이트) → 효과측정(다음 수집서 지표 이동) → 학습 ──
+const EXP_FILE = process.env.EXP_FILE || '/data/experiments.json';
+let experiments = [];
+function loadExperiments() { try { if (fs.existsSync(EXP_FILE)) experiments = JSON.parse(fs.readFileSync(EXP_FILE, 'utf8')) || []; } catch { experiments = []; } }
+function persistExperiments() { try { fs.writeFileSync(EXP_FILE, JSON.stringify(experiments.slice(-100))); } catch {} }
+function addExperiment(repo, focus, targetKey, hypothesis) {
+  const cur = bizLatest(repo) || {};
+  const baseline = (targetKey && typeof cur[targetKey] === 'number') ? cur[targetKey] : null;
+  const id = experiments.reduce((m, e) => Math.max(m, e.id || 0), 0) + 1;
+  experiments.push({ id, repo, focus: String(focus || '').slice(0, 120), targetKey: targetKey || null, baseline, startDay: kstNow().day, hypothesis: String(hypothesis || '').slice(0, 200), status: 'proposed', at: Date.now() });
+  persistExperiments(); return id;
+}
+// 진행 실험의 타겟지표 baseline 대비 현재값 측정 + 효과 본 건 스킬로 학습
+function measureExperiments(repo) {
+  const cur = bizLatest(repo) || {};
+  return experiments.filter(e => e.repo === repo).map(e => {
+    if (e.targetKey && typeof cur[e.targetKey] === 'number' && typeof e.baseline === 'number') {
+      const now = cur[e.targetKey], d = now - e.baseline, pct = e.baseline ? Math.round(d / e.baseline * 100) : null;
+      if (pct !== null && pct >= 10 && e.status !== 'measured') { e.status = 'measured'; try { addSkill(repo, `그로스: ${e.focus}`, e.hypothesis, `${(BIZ_LABELS[e.targetKey] ? BIZ_LABELS[e.targetKey].ko : e.targetKey)}를 ${pct}% 올린 개선. 비슷한 상황에 재사용.`); } catch (_) {} persistExperiments(); } // 학습
+      return { ...e, now, delta: d, pct };
+    }
+    return { ...e, now: null };
+  });
+}
+let bizGrowthAt = 0;
+async function runBizGrowth(client, channel, manual = false) {
+  if (!manual && Date.now() - bizGrowthAt < 6 * 86400000) return; bizGrowthAt = Date.now();
+  if (!channel) return;
+  try {
+    for (const rp of Object.keys(bizData)) {
+      const cur = await bizFetch(rp); const m = cur || bizLatest(rp); if (!m) continue;
+      const name = rp.split('/').pop(); const sc = bizScorecard(rp); const availKeys = Object.keys(m).filter(k => typeof m[k] === 'number');
+      const prod = BIZ_PRODUCT[rp] ? `\n제품: ${BIZ_PRODUCT[rp]}` : '';
+      startTyping(channel); // 생성 동안 스피너
+      const out = await runClaude(`너는 "${name}" 그로스 책임자다.${prod}\n아래 사업 스코어카드를 보고, 지금 하면 효과 클 그로스 실험 1~2개를 제안해라. 각 실험은 반드시 "어떤 지표를 올리려는지(타겟)"가 명확하고, 측정 가능하면 아래 키 중 하나를 target_key로.${UNTRUSTED_PREAMBLE}\n${wrapUntrusted(sc)}\n\n측정가능 타겟키(이 중 하나 또는 null): ${availKeys.join(', ') || '(없음)'}\n\nJSON만: {"experiments":[{"focus":"한줄 요약","target_key":"위 키중 하나 or null","hypothesis":"이걸 하면 ~될 거란 가설","action":{"task":"구체적으로 뭘 할지 한 문장","kind":"investigate|build"}}]}. 데이터 근거로만, 측정갭 메우기(계측 추가)도 좋은 실험.`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 150000);
+      const mm = (out.text || '').match(/\{[\s\S]*\}/); if (!mm) { stopTyping(channel); continue; }
+      let obj; try { obj = JSON.parse(mm[0]); } catch { stopTyping(channel); continue; }
+      const exps = (obj.experiments || []).slice(0, 2); const items = [];
+      for (const e of exps) { if (!e || !e.action || !e.action.task) continue; const tk = (e.target_key && e.target_key !== 'null') ? e.target_key : null; const eid = addExperiment(rp, e.focus, tk, e.hypothesis); const tgtLabel = tk ? (BIZ_LABELS[tk] ? BIZ_LABELS[tk].ko : tk) : (e.focus || '지표'); items.push({ who: '그로스', task: `[실험#${eid}] ${e.action.task} (타겟: ${tgtLabel} / 가설: ${String(e.hypothesis || '').slice(0, 60)})`, kind: ['investigate', 'build'].includes(e.action.kind) ? e.action.kind : 'investigate' }); }
+      if (!items.length) { stopTyping(channel); if (manual) await postAs(client, channel, undefined, byName('김채원') || LEAD, `${name}: 지금 데이터로 뽑을 그로스 실험이 마땅찮아. 측정 갭부터 메우자("사업 브리핑" 참고).`); continue; }
+      log('info', 'biz-growth', { repo: rp, n: items.length });
+      await proposeOrAuto(client, channel, resolveRepo(rp), items, `그로스 실험 제안 — ${name} (승인하면 착수, 효과는 다음 측정에서 baseline 대비 비교)`); // postAs가 스피너 정리
+    }
+  } catch (e) { try { log('error', 'biz-growth-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
+}
 // 운영 헬스체크 — 각 라이브 서비스 curl로 상태 확인 → 우정잉(QA/SRE)이 보고, 다운이면 윈터가 알림
 async function checkServices(client, channel, announce = true, onlyAlert = false) {
   const sre = byName('윈터') || LEAD; // 운영·헬스체크 = 인프라
@@ -2020,6 +2067,18 @@ async function handle(event, client) {
       runBizBriefing(client, channel, true).catch(() => {}).finally(() => { activeWork[channel] = null; });
       return;
     }
+    // A3: 그로스 실험 제안 (타겟지표+가설 → 게이트) + 실험 현황(효과측정)
+    if (/(그로스\s*제안|성장\s*제안|그로스\s*실험|실험\s*제안)/i.test(raw)) {
+      if (await guardBusy(client, channel, thread_ts)) return;
+      runBizGrowth(client, channel, true).catch(() => {});
+      return;
+    }
+    if (/(실험\s*현황|실험\s*목록|그로스\s*현황|실험\s*상태)/i.test(raw)) {
+      const all = Object.keys(bizData).flatMap(rp => measureExperiments(rp)).slice(-12);
+      if (!all.length) { await postAs(client, channel, thread_ts, byName('김채원') || LEAD, '아직 진행 중인 그로스 실험이 없어. "그로스 제안"으로 시작하면, 각 실험에 타겟지표·가설이 붙고 다음 측정에서 효과를 비교해줄게.'); return; }
+      const lines = all.map(e => { const tgt = e.targetKey ? (BIZ_LABELS[e.targetKey] ? BIZ_LABELS[e.targetKey].ko : e.targetKey) : '(지표 미측정)'; const eff = (e.now != null && typeof e.baseline === 'number') ? `${e.baseline.toLocaleString()} → ${e.now.toLocaleString()}${e.pct != null ? ` (${e.pct > 0 ? '+' : ''}${e.pct}%${e.pct >= 10 ? ', 효과 있음' : e.pct <= -10 ? ', 역효과' : ''})` : ''}` : '측정 대기'; return `#${e.id} [${e.repo.split('/').pop()}] ${e.focus}\n   타겟: ${tgt} / ${eff} / 상태: ${e.status}`; });
+      await postAs(client, channel, thread_ts, byName('김채원') || LEAD, '그로스 실험 현황 (타겟지표 baseline → 현재)\n' + lines.join('\n')); return;
+    }
     // 사용량/번레이트 (오늘 Claude 호출·토큰·한도걸림)
     if (/(사용량|번레이트|토큰.*얼마|클로드.*사용|usage)/.test(raw) && !/운영|리포트|report/.test(raw)) {
       await postAs(client, channel, thread_ts, LEAD, `오늘 우리 사용량이야.\n호출 ${usageStat.calls}회 · 출력토큰 약 ${usageStat.outTokens.toLocaleString()} · 한도걸림 ${usageStat.limitedHits}번.${usageStat.limitedHits ? ' 한도 자주 걸리면 팀원 모델 sonnet 유지하거나 작업 텀을 두자.' : ''}`);
@@ -2331,7 +2390,7 @@ async function postButtons(channel, thread_ts, buttons) {
   loadMemory();
   loadRules();
   loadSettings();
-  loadTasks(); loadJobs(); loadFacts(); loadSkills(); buildMcpConfig(); loadDecisions(); loadUsage(); loadBiz();
+  loadTasks(); loadJobs(); loadFacts(); loadSkills(); buildMcpConfig(); loadDecisions(); loadUsage(); loadBiz(); loadExperiments();
   loadLastRepo();
   loadServices();
   loadPending();
@@ -2373,6 +2432,8 @@ async function postButtons(channel, thread_ts, buttons) {
       if (n.dow === 1 && briefCh) runImprovementProposal(botClient, briefCh, false).catch(() => {});
       // B4: 주1회(수요일) 능동 자기개선 스캔 — 봇 자체 코드 개선 발의(게이트)
       if (n.dow === 3 && briefCh) runSelfImproveScan(botClient, briefCh, false).catch(() => {});
+      // A3: 주1회(화요일) 그로스 실험 제안 — 사업 데이터 기반(게이트)
+      if (n.dow === 2 && briefCh) runBizGrowth(botClient, briefCh, false).catch(() => {});
     }
     // A4: 능동 강화 — 악화(2연속 다운+) 서비스는 시간 기다리지 말고 다음 틱에 즉시 재확인(빠른 복구·다운 감지)
     if (n.m % 5 === 0) {
