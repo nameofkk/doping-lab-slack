@@ -29,5 +29,16 @@ ok(svcTrend({ failStreak: 0, history: [up(200), up(1500)] }) === '', '샘플 부
 // 살짝 오르지만 800ms 미만이면 무시(오탐 방지)
 ok(svcTrend({ failStreak: 0, history: [up(100), up(110), up(120), up(300), up(320), up(340)] }) === '', '300ms대는 오탐 안냄(임계 800ms)');
 
+// 서비스 등록 파싱 — Slack이 URL을 <url> / <url|텍스트>로 감싸는 것 해제(라이브 버그 회귀)
+function parseSvcReg(raw) {
+  const rawU = String(raw).replace(/<(https?:\/\/[^>|]+)(\|[^>]*)?>/g, '$1');
+  const reg = rawU.match(/^서비스\s*(?:등록|추가|모니터링?)\s+(\S+)\s+(https?:\/\/\S+)/i);
+  return reg ? { repo: reg[1], url: reg[2].replace(/[)>,]+$/, '') } : null;
+}
+ok(parseSvcReg('서비스 등록 sponono <https://sponono.com>') && parseSvcReg('서비스 등록 sponono <https://sponono.com>').url === 'https://sponono.com', 'Slack <url> 래핑 해제 등록');
+ok(parseSvcReg('서비스 등록 wewantpeace <https://www.wewantpeace.live|WeWantPeace>') && parseSvcReg('서비스 등록 wewantpeace <https://www.wewantpeace.live|WeWantPeace>').url === 'https://www.wewantpeace.live', 'Slack <url|텍스트> 해제');
+ok(parseSvcReg('서비스 등록 sponono https://sponono.com') && parseSvcReg('서비스 등록 sponono https://sponono.com').repo === 'sponono', '평문 URL 등록 파싱');
+ok(!parseSvcReg('헬스체크'), '헬스체크는 등록 명령 아님');
+
 console.log(fail ? '\n❌ 센티넬 실패 ' + fail : '\n✅ 센티넬 전부 통과');
 process.exit(fail ? 1 : 0);

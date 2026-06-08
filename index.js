@@ -1598,7 +1598,8 @@ async function handle(event, client) {
     }
     // 서비스 등록/목록 — 라이브 URL을 모니터링 대장에 올림(헬스체크·센티넬 대상). "서비스 등록 sponono https://sponono.com"
     {
-      const reg = raw.match(/^서비스\s*(?:등록|추가|모니터링?)\s+(\S+)\s+(https?:\/\/\S+)/i) || raw.match(/^(?:모니터링?)\s+(https?:\/\/\S+)\s+(\S+)$/i);
+      const rawU = raw.replace(/<(https?:\/\/[^>|]+)(\|[^>]*)?>/g, '$1'); // Slack이 URL을 <url> / <url|텍스트>로 감싸는 것 해제(등록 정규식이 못 잡던 버그)
+      const reg = rawU.match(/^서비스\s*(?:등록|추가|모니터링?)\s+(\S+)\s+(https?:\/\/\S+)/i) || rawU.match(/^(?:모니터링?)\s+(https?:\/\/\S+)\s+(\S+)$/i);
       if (reg) {
         let repoArg = /^https?:/i.test(reg[1]) ? reg[2] : reg[1]; const urlArg = /^https?:/i.test(reg[1]) ? reg[1] : reg[2];
         const rsv = extractRepo(repoArg); const repoKey = (rsv && !rsv.startsWith('alias:')) ? rsv : (rsv ? rsv.replace('alias:', '') : repoArg);
