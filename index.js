@@ -1450,11 +1450,57 @@ const BIZ_PRODUCT = {
   'nameofkk/wewantpeace': '전 세계 분쟁·전쟁을 실시간 추적하는 플랫폼(지도·긴장지수·AI분석·알림). 핵심행동=알림 구독/지도 사용, 노스스타=전달한 분쟁 알림·활성 이슈.',
   'nameofkk/sponono': '유튜브·트위터·웹툰에서 스포일러를 자동 차단하는 구독 앱(무료10개·프리미엄 무제한). 핵심행동=첫 차단 경험, 노스스타=막아준 스포일러 수, 수익=월 구독.',
 };
-// 정확한 스토어 listing URL — CX가 WebFetch로 이 페이지를 읽어 평점·설치수·리뷰를 정확히 봄(퍼지검색 엉뚱앱 방지). 공개 데이터라 키 불필요.
+// 정확한 스토어 listing URL — 참조/표기용. 공개 데이터라 키 불필요.
 const STORE_URLS = {
   'nameofkk/wewantpeace': ['Play스토어: https://play.google.com/store/apps/details?id=com.wewantpeace.app&hl=ko'],
   'nameofkk/sponono': ['Chrome웹스토어: https://chromewebstore.google.com/detail/lhbfibaioimpnmlcbhjmhekoidlfhhja?hl=ko'],
 };
+// 스토어 실데이터 패칭 — 정확한 앱 ID로 평점·설치수·실제 리뷰 본문을 가져옴(WebFetch는 SPA라 실패해서 전용 패칭). 내 앱 공개 리뷰라 자격증명 무관.
+const STORE_IDS = {
+  'nameofkk/wewantpeace': { play: 'com.wewantpeace.app' },
+  'nameofkk/sponono': { chrome: 'lhbfibaioimpnmlcbhjmhekoidlfhhja' },
+};
+// Play 스토어: google-play-scraper(동적 import — CJS에서도 항상 동작)로 평점/설치/리뷰 실수치+본문. 실패 시 null(허위 금지).
+async function storePlay(appId) {
+  try {
+    const gpm = await import('google-play-scraper');
+    const gp = gpm.default || gpm;
+    const app = await gp.app({ appId, country: 'kr', lang: 'ko' });
+    let revs = [];
+    try { const r = await gp.reviews({ appId, country: 'kr', lang: 'ko', sort: 2, num: 15 }); revs = (r && r.data) || []; } catch {}
+    return { kind: 'play', title: app.title, score: app.score, ratings: app.ratings, reviews: app.reviews, installs: app.installs, minInstalls: app.minInstalls, maxInstalls: app.maxInstalls, recent: revs.map(x => ({ score: x.score, user: x.userName, text: x.text, date: x.date })) };
+  } catch (e) { log('warn', 'store-play-fail', { appId, err: String(e && e.message || e) }); return null; }
+}
+// Chrome 웹스토어: 신버전이 평점/리뷰를 별도 XHR로 늦게 로드해 정적수집 제한적. 게시여부·제목만 확인하고 리뷰는 정직하게 "수집제한"으로.
+async function storeChrome(extId) {
+  try {
+    const r = await sh(`curl -sL --max-time 15 -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36' 'https://chromewebstore.google.com/detail/${extId}?hl=ko'`);
+    const html = r.out || '';
+    const tm = html.match(/<title>([^<]*)<\/title>/);
+    const title = tm ? tm[1].replace(/ - Chrome Web Store$/, '').trim() : null;
+    const published = /Chrome Web Store/.test(html) && !!title;
+    return { kind: 'chrome', title, published, note: '신버전 Chrome웹스토어는 평점/리뷰를 JS로 늦게 로드해 자동수집 제한 — 정확한 리뷰는 개발자 대시보드(OAuth, 사람) 필요. 현재 초기단계라 리뷰 거의 없음.' };
+  } catch (e) { log('warn', 'store-chrome-fail', { extId, err: String(e && e.message || e) }); return null; }
+}
+// 서비스의 스토어 실데이터를 CX 주입용 텍스트로. 추정 0 — 못 읽으면 그대로 "수집 실패/제한" 명시.
+async function storeReviews(repo) {
+  const ids = STORE_IDS[repo]; if (!ids) return null;
+  const name = repo.split('/').pop(); let out = '';
+  if (ids.play) {
+    const p = await storePlay(ids.play);
+    if (p) {
+      out += `\n[${name} Play스토어 실데이터] 평점 ${p.score ?? '?'}점 · 평가 ${p.ratings ?? '?'}개 · 리뷰 ${p.reviews ?? '?'}개 · 설치 ${p.installs ?? '?'}(추정 ${p.minInstalls ?? '?'}~${p.maxInstalls ?? '?'})\n`;
+      if (p.recent && p.recent.length) out += p.recent.slice(0, 15).map(x => `- ${x.score}점 (${x.user || '익명'}): ${String(x.text || '').slice(0, 160).replace(/\s+/g, ' ')}`).join('\n');
+      else out += '- (최근 리뷰 본문 수집 실패)';
+    } else out += `\n[${name} Play스토어] 자동수집 실패(미게시 or 차단) — 추정 금지.`;
+  }
+  if (ids.chrome) {
+    const c = await storeChrome(ids.chrome);
+    if (c) out += `\n[${name} Chrome웹스토어] ${c.published ? '게시됨' : '확인불가'}: ${c.title || '?'} — ${c.note}`;
+    else out += `\n[${name} Chrome웹스토어] 자동수집 실패 — 추정 금지.`;
+  }
+  return out.trim() || null;
+}
 // A2: 사업 브리핑 — 서비스별로 따로 분석(제품이 달라 한 덩어리 금지). 실수치+추세+루브릭 → 운영자 해석. 친한국어, 추정 0.
 let bizBriefAt = 0;
 async function runBizBriefing(client, channel, manual = false) {
@@ -1529,7 +1575,7 @@ async function runBizGrowth(client, channel, manual = false) {
 
 // ── Phase B: 부서별 운영 루프 — 각 부서가 실데이터를 자기 관점으로 검토→진단+개선 제안(게이트). 4개가 같은 골격이라 제네릭. 페르소나=부서장. ──
 const DEPTS = {
-  cx: { name: '고객(CX)', persona: '우정잉', role: '고객 경험(CX) 책임자', prompt: '아래 "인앱 피드백"(우리 서비스가 직접 받은 진짜 사용자 의견)과, "스토어 페이지" URL이 주어지면 그 URL을 WebFetch로 직접 열어서 평점·설치수·최근 리뷰를 정확히 읽어라(절대 기억이나 검색으로 추정 말고 그 페이지 실제 내용만). 둘을 합쳐 반복되는 불만·요청·칭찬을 테마별로 묶고 제품 개선을 제안. 스토어 URL이 없는 서비스는 리뷰를 지어내지 말고 "스토어 미게시/URL 필요"라고만 해.' },
+  cx: { name: '고객(CX)', persona: '우정잉', role: '고객 경험(CX) 책임자', prompt: '아래에 "인앱 피드백"(우리 서비스가 직접 받은 진짜 사용자 의견)과 "스토어 실데이터"(평점·설치수·실제 리뷰 본문 — 이미 정확한 앱에서 가져온 진짜 데이터)가 주어진다. 그 실제 내용만 근거로(절대 기억·검색으로 추정 금지) 반복되는 불만·요청·칭찬을 테마별로 묶고, 평점/리뷰가 말해주는 제품 개선을 제안해라. "수집 실패/제한"이라고 적힌 건 데이터 없는 것이니 지어내지 말고 그 사실만 짚어라.' },
   marketing: { name: '마케팅', persona: '영듀', role: '마케팅/그로스(획득) 책임자', prompt: '획득(신규유입) 관점에서 콘텐츠·SEO·GEO(ChatGPT·Claude 같은 AI검색이 우리를 인용하게 구조화)·SNS 전략을 제안. 핵심 키워드·경쟁 포지셔닝은 웹서치로. 실제 발행 계정이 필요한 건 사람만 가능하다고 표시.' },
   finance: { name: '재무(CFO)', persona: '윈터', role: '재무(CFO)', prompt: '수익(매출·유료 구독자)과 비용(우리 봇 운영 토큰비용 등) 신호로 번레이트·런웨이·유닛이코노믹스(LTV:CAC·전환율·이탈) 관점에서 진단하고, 비용 이상치·수익 개선을 제안. 데이터 없으면 추정 말고 "이 재무지표부터 잡자"로.' },
   market: { name: '시장·경쟁', persona: '아이유', role: '시장·경쟁 인텔리전스 책임자', prompt: '경쟁사 동향·시장 트렌드·신규 위협을 웹서치로 조사해(예: 스포일러 차단 앱 경쟁사, 분쟁 추적 서비스 경쟁사), 우리한테 주는 시사점과 대응을 제안.' },
@@ -1540,7 +1586,7 @@ async function runDeptLoop(client, channel, deptKey, manual = false) {
     startTyping(channel);
     let svcCtx = Object.keys(bizData).map(rp => `[${rp.split('/').pop()}]\n${bizScorecard(rp)}${BIZ_PRODUCT[rp] ? '\n제품: ' + BIZ_PRODUCT[rp] : ''}`).join('\n\n') || '(등록된 서비스 없음)';
     if (deptKey === 'cx') { // 인앱 피드백(진짜 사용자 의견) + 정확한 스토어 URL 주입
-      for (const rp of Object.keys(bizData)) { const fb = await bizFeedback(rp); if (fb && fb.recent.length) svcCtx += `\n\n[${rp.split('/').pop()} 인앱 피드백 ${fb.total}건 중 최근]\n` + fb.recent.slice(0, 20).map(f => `- (${f.category || ''}) ${f.message}`).join('\n'); if (STORE_URLS[rp]) svcCtx += `\n[${rp.split('/').pop()} 스토어 페이지 — WebFetch로 직접 열어서 평점·설치수·최근 리뷰를 정확히 봐라]\n${STORE_URLS[rp].join('\n')}`; }
+      for (const rp of Object.keys(bizData)) { const fb = await bizFeedback(rp); if (fb && fb.recent.length) svcCtx += `\n\n[${rp.split('/').pop()} 인앱 피드백 ${fb.total}건 중 최근]\n` + fb.recent.slice(0, 20).map(f => `- (${f.category || ''}) ${f.message}`).join('\n'); const sr = await storeReviews(rp); if (sr) svcCtx += `\n${sr}`; }
     }
     const days = [...usageHist, usageStat].filter(x => x && x.day).slice(-7); const tot = days.reduce((a, x) => a + (x.outTokens || 0), 0);
     const finCtx = deptKey === 'finance' ? `\n[우리 봇 운영비용 신호] 최근 ${days.length}일 출력토큰 ~${Math.round(tot / 1000)}k(클로드 사용비 비례)` : '';
