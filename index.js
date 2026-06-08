@@ -225,7 +225,7 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
   const structDigest = structured.length ? `\n\n[구조화된 핵심 주장 — 이걸 1차 입력으로 종합해라]\n${structured.map(s => `- ${s.who}: ${s.tag}`).join('\n')}` : '';
   const synth = await runClaude(`${LEAD.prompt}${STYLE}${rulesCtx(channel)}${structDigest}\n\n[토론 전문(참고)]\n${transcript.slice(-3500)}\n\n위 구조화된 핵심 주장을 1차 근거로, 전문은 보조로 종합해. 의견 갈린 지점 짚고, 가장 설득력 있는 쪽으로 최적 결론. 단순 요약 말고 결정과 다음 액션까지. 특히 '미해결'로 표시된 건 액션아이템 후보로 챙겨.${HONEST}`, LEAD.model);
   await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}📋 결론\n` + (synth.text || '').trim().slice(0, 2800));
-  extractFacts(repo || channel, `[토론: ${idea}]\n${(synth.text || '').slice(0, 1800)}`).catch(() => {}); // R7: 토론 결론에서 결정·사실 저장
+  extractFacts(repo || channel, `[토론: ${idea}]\n${(synth.text || '').slice(0, 1800)}`, '토론').catch(() => {}); // R7: 토론 결론에서 결정·사실 저장
   // 결론의 액션아이템을 뽑아서 "승인하면 실제로 착수"하게 제시 (자동 실행 X — 사용자 승인 게이트). 레포 있을 때만(코드로 할 게 있어야 함).
   if (repo && synth.text && synth.ok !== false) {
     const items = await extractActionItems(synth.text);
@@ -233,8 +233,9 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
     if (doable.length) {
       pendingDispatch[channel] = { repo, items, at: Date.now() };
       const label = k => k === 'investigate' ? '조사' : k === 'build' ? '코드수정' : '사람만';
-      const fmt = items.map((x, i) => `${i + 1}. [${label(x.kind)}] ${x.who ? x.who + ' — ' : ''}${x.task}`).join('\n');
-      await postAs(client, channel, thread_ts, LEAD, `위 결론에서 실제로 착수 가능한 액션 뽑았어:\n${fmt}\n\n"실행"이라고 하면 조사·코드수정 항목을 내가 바로 돌릴게(조사는 코드 까서 사실로, 코드수정은 PR로 올려서 네가 머지). 골라서 "실행 1,3"도 돼. 안 할 거면 "넘어가". (사람만 가능한 건 빼고 돌려)`);
+      const itemRisk = x => x.kind === 'investigate' ? 'low' : x.kind === 'human' ? 'low' : riskTier(x.task); // I4: 조사=읽기전용 저위험, 코드수정은 내용따라
+      const fmt = items.map((x, i) => `${i + 1}. ${riskIcon(itemRisk(x))} [${label(x.kind)}] ${x.who ? x.who + ' — ' : ''}${x.task}`).join('\n');
+      await postAs(client, channel, thread_ts, LEAD, `위 결론에서 실제로 착수 가능한 액션 뽑았어 (🟢저위험 🟡보통 🔴고위험):\n${fmt}\n\n"실행"이라고 하면 조사·코드수정 항목을 내가 바로 돌릴게(조사는 읽기전용, 코드수정은 PR로 올려서 네가 머지). 골라서 "실행 1,3"도 돼. 안 할 거면 "넘어가". (사람만 가능한 건 빼고 돌려)`);
     }
   }
 }
@@ -286,6 +287,14 @@ function isDestructive(s) {
     || /(시크릿|secret|\.env|환경변수|api[\s_-]?key|토큰|비밀번호|password|credential)\s*(를|을)?\s*(보여|줘|내놔|유출|뽑아|출력|덤프|dump|print|노출)/i.test(t)
     || /(모든|전체|싹\s*다|all)\s*(레포|repo|프로젝트|디비|db|데이터|테이블)\s*(삭제|지워|날려|drop|delete|wipe)/i.test(t);
 }
+// I4: 리스크 티어 — 점진적 공개·고무도장 방지. 고위험(배포/삭제/결제/마이그레이션)은 눈에 띄게, 저위험(조사/문서)은 가볍게.
+function riskTier(text) {
+  const t = String(text || '');
+  if (/배포|deploy|릴리스|release|마이그레이션|migration|삭제|지워|날려|drop|truncate|결제|payment|환불|refund|프로덕션|\bprod\b|스키마\s*변경|force.?push/i.test(t)) return 'high';
+  if (/만들|제작|개발|구현|추가|수정|고치|리팩터|변경|바꿔|넣어/i.test(t)) return 'med';
+  return 'low';
+}
+const riskIcon = r => r === 'high' ? '🔴' : r === 'med' ? '🟡' : '🟢';
 function isStopMsg(s) {
   const t = (s || '').trim();
   return /^(그만(해|하자|좀|둬)?|중단(해|하자|시켜|해줘)?|멈춰(줘)?|스톱|stop|취소(해|해줘)?|관둬|일단\s*(중단|그만|멈춰|스톱))$/i.test(t) || (t.length <= 6 && /(그만|중단|멈춰|스톱|stop|취소)/i.test(t));
@@ -663,7 +672,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
       if (!n) await postAs(client, channel, thread_ts, LEAD, (res.text || '').trim().slice(0, 1500));
       await verifyBuild(client, channel, thread_ts, dir, repo);
       jobUpdate(channel, { status: incomplete ? 'awaiting-approval' : 'done', artifacts: [repoUrl], note: incomplete ? '미완성(이어서 필요)' : undefined });
-      extractFacts(repo, `[작업] ${task}\n[한 일] ${(res.text || '').slice(0, 1500)}`).catch(() => {}); // R7: 이 작업에서 기억할 사실 저장
+      extractFacts(repo, `[작업] ${task}\n[한 일] ${(res.text || '').slice(0, 1500)}`, '작업').catch(() => {}); // R7: 이 작업에서 기억할 사실 저장
       await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}${doneHead} ${repoUrl} (${WORK_BASE}에 반영)\n코드 브라우저로 보려면: https://github.dev/${repo}\n빌드·라이브·스크린샷은 위에 확인해줘. (코드 파일로 받고 싶으면 "코드 줘"라고 해)`);
       if (newProject && !incomplete) await handoffChecklist(client, channel, thread_ts, repo, task); // 미완성이면 "상용 오픈 체크리스트" 안 띄움(거짓 신호 방지)
       return;
@@ -807,7 +816,7 @@ async function runReport(client, channel, thread_ts, reporter, repo, task) {
     const synth = await runClaude(`${LEAD.prompt}${PLAIN}${rulesCtx(channel)}\n\n[사용자 질문]\n${task}\n\n[팀 의견]\n${(res.text || '').slice(0, 2500)}\n\n[안다연 반론]\n${devilText.slice(0, 1200)}\n\n위를 다 검토해서 "최종안"으로 종합·보완해라. 의견 충돌은 네가 정리하고, 우선순위(1·2·3)를 매기고, 코드로 확인 안 된 가정은 빼거나 "확인 필요"로 표시해라. 바로 실행 가능한 구체적 액션으로 끝내. 마크다운 금지.`, LEAD.model, WORKDIR, CLAUDE_PERMISSION_MODE, 180000);
     if (synth.text && synth.ok !== false) await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}📌 최종안 (팀 의견+반론 종합)\n${synth.text.trim().slice(0, 2500)}`);
     else await postAs(client, channel, thread_ts, reporter, `${mention(channel)}다 정리했어, 위에 봐줘!`);
-    extractFacts(repo, `[조사] ${task}\n${(synth.text || res.text || '').slice(0, 1800)}`).catch(() => {}); // R7: 조사에서 확인된 사실 저장
+    extractFacts(repo, `[조사] ${task}\n${(synth.text || res.text || '').slice(0, 1800)}`, '조사').catch(() => {}); // R7: 조사에서 확인된 사실 저장
   } finally { await prog.done(); }
 }
 
@@ -952,13 +961,32 @@ const FACTS_FILE = process.env.FACTS_FILE || '/data/facts.json';
 let facts = {}; // facts[repoOrChannel] = [{text, at}]
 function loadFacts() { try { if (fs.existsSync(FACTS_FILE)) facts = JSON.parse(fs.readFileSync(FACTS_FILE, 'utf8')) || {}; } catch { facts = {}; } }
 function persistFacts() { try { fs.writeFileSync(FACTS_FILE, JSON.stringify(facts)); } catch {} }
-function addFact(key, text) { const t = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 220); if (!t || t.length < 6) return; const arr = (facts[key] = facts[key] || []); if (arr.some(f => f.text === t)) return; arr.push({ text: t, at: Date.now() }); if (arr.length > 40) facts[key] = arr.slice(-40); persistFacts(); } // 레포당 40개 캡, 중복 방지
-function recallFacts(key, taskText) { const arr = facts[key] || []; if (!arr.length) return ''; const words = String(taskText || '').toLowerCase().match(/[a-z가-힣0-9]{2,}/g) || []; const scored = arr.map(f => ({ f, s: words.filter(w => f.text.toLowerCase().includes(w)).length })); const rel = scored.filter(x => x.s > 0).sort((a, b) => b.s - a.s).slice(0, 6).map(x => x.f); const use = rel.length ? rel : arr.slice(-5); return '\n\n[이 프로젝트에 대해 전에 확인·결정된 것(기억) — 참고하되 코드와 다르면 코드 우선]\n' + use.map(f => '- ' + f.text).join('\n'); }
-async function extractFacts(key, contextText) { // 작업/대화 끝나고 durable 사실 0~3개 뽑아 저장
+const FACT_TTL_MS = parseInt(process.env.FACT_TTL_DAYS || '90', 10) * 86400000; // I6: 사실 만료(기본 90일) — stale/poisoned 메모리 방어
+// I6: source(출처)·TTL·충돌(근사중복 갱신) 추가. 신뢰소스(commit/test/work)만 들어옴.
+function addFact(key, text, source) {
+  const t = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 220); if (!t || t.length < 6) return;
+  const arr = (facts[key] = facts[key] || []);
+  const sig = t.toLowerCase().replace(/[^a-z가-힣0-9]/g, '').slice(0, 24); // 근사중복 키
+  const dup = arr.findIndex(f => f.text === t || (f.text.toLowerCase().replace(/[^a-z가-힣0-9]/g, '').slice(0, 24) === sig));
+  if (dup >= 0) { arr[dup] = { text: t, at: Date.now(), source: source || arr[dup].source }; persistFacts(); return; } // 충돌/중복 → 최신으로 갱신(superseded)
+  arr.push({ text: t, at: Date.now(), source: source || 'work' });
+  if (arr.length > 40) facts[key] = arr.slice(-40); persistFacts();
+}
+function recallFacts(key, taskText) {
+  const now = Date.now(); const arr = (facts[key] || []).filter(f => now - (f.at || 0) < FACT_TTL_MS); // I6: 만료 사실 제외
+  if (arr.length !== (facts[key] || []).length) { facts[key] = arr; persistFacts(); } // 만료된 건 정리
+  if (!arr.length) return '';
+  const words = String(taskText || '').toLowerCase().match(/[a-z가-힣0-9]{2,}/g) || [];
+  const scored = arr.map(f => ({ f, s: words.filter(w => f.text.toLowerCase().includes(w)).length }));
+  const rel = scored.filter(x => x.s > 0).sort((a, b) => b.s - a.s).slice(0, 6).map(x => x.f);
+  const use = rel.length ? rel : arr.slice(-5);
+  return '\n\n[이 프로젝트에 대해 전에 확인·결정된 것(기억) — 참고하되 코드와 다르면 코드 우선]\n' + use.map(f => '- ' + f.text).join('\n');
+}
+async function extractFacts(key, contextText, source) { // 작업/대화(신뢰소스: 봇이 코드/실행으로 확인한 결과)에서 durable 사실 0~3개 뽑아 저장
   if (!key) return;
   try {
     const r = await runClaude(`다음 작업/대화에서 "앞으로도 계속 유효할 durable 사실"만 0~3개 뽑아 한 줄씩 출력(없으면 빈 출력). 일회성·진행상황·인사는 빼고, 프로젝트 컨벤션·기술결정·구조·사용자 선호처럼 다음에 또 쓸 것만. 각 줄 12~40자, 군더더기·번호·마크다운 없이.\n\n${String(contextText || '').slice(0, 2500)}`, 'haiku');
-    for (const line of (r.text || '').split('\n').map(s => s.replace(/^[-*\d.\s]+/, '').trim()).filter(Boolean).slice(0, 3)) addFact(key, line);
+    for (const line of (r.text || '').split('\n').map(s => s.replace(/^[-*\d.\s]+/, '').trim()).filter(Boolean).slice(0, 3)) addFact(key, line, source || 'work');
   } catch {}
 }
 
@@ -1254,7 +1282,7 @@ async function handle(event, client) {
     if (/^(mcp|엠씨피|툴)\s*(목록|리스트|상태|뭐|있어)?/i.test(raw) && !/추가|연결|넣어|등록/.test(raw)) { const ns = mcpServerNames(); await postAs(client, channel, thread_ts, byName('윈터') || LEAD, ns.length ? `🔌 연결된 MCP 툴: ${ns.join(', ')}\n새 툴은 ${USER_MCP_FILE}에 {"mcpServers":{...}} 형식으로 넣고 재시작하면 붙어. API키 필요한 건 너가 넣어줘야 해(👤).` : '아직 연결된 MCP 툴이 없어(figma는 FIGMA_API_KEY 넣으면 자동). 새 툴은 ' + USER_MCP_FILE + '에 mcpServers 설정 넣고 재시작.'); return; }
     if (/^(mcp|엠씨피|툴)\s*(추가|연결|등록|넣)/i.test(raw)) { await postAs(client, channel, thread_ts, byName('윈터') || LEAD, `MCP 툴 추가는 보통 API키/명령이 필요해서 직접 설정해야 해(👤): ${USER_MCP_FILE} 파일에 {"mcpServers":{"이름":{"command":"...","args":[...],"env":{...}}}} 넣고 봇 재시작하면 제작 작업에서 그 툴을 쓸 수 있어. 지금 연결: ${mcpServerNames().join(', ') || '없음'}.`); return; }
     // R7: 저장된 장기 기억 조회 ("기억 목록" / "스포노노 기억")
-    if ((/(^|\s)(기억|메모리)(\s*(목록|리스트|보여줘?|뭐\s*있어|있어\??|봐줘?|확인))?\s*[?？]?\s*$/.test(raw) || /^뭐\s*기억/.test(raw)) && !/(기억해|해줘|하지\s?마|지워|삭제|넣어)/.test(raw)) { const key = extractRepo(raw) || lastRepo[channel] || channel; const arr = facts[key] || facts[channel] || []; await postAs(client, channel, thread_ts, LEAD, arr.length ? `🧠 ${key.split('/').pop()}에 대해 기억하는 것:\n` + arr.slice(-15).map(f => '- ' + f.text).join('\n') : '아직 이 프로젝트에 대해 따로 기억해둔 게 없어. 작업·조사·토론하면 쌓여.'); return; }
+    if ((/(^|\s)(기억|메모리)(\s*(목록|리스트|보여줘?|뭐\s*있어|있어\??|봐줘?|확인))?\s*[?？]?\s*$/.test(raw) || /^뭐\s*기억/.test(raw)) && !/(기억해|해줘|하지\s?마|지워|삭제|넣어)/.test(raw)) { const key = extractRepo(raw) || lastRepo[channel] || channel; const now = Date.now(); const arr = (facts[key] || facts[channel] || []).filter(f => now - (f.at || 0) < FACT_TTL_MS); await postAs(client, channel, thread_ts, LEAD, arr.length ? `🧠 ${key.split('/').pop()}에 대해 기억하는 것 (출처·경과):\n` + arr.slice(-15).map(f => `- ${f.text} _(${f.source || 'work'}${f.at ? '·' + Math.round((now - f.at) / 86400000) + 'd' : ''})_`).join('\n') : '아직 이 프로젝트에 대해 따로 기억해둔 게 없어. 작업·조사·토론하면 쌓여(90일 후 자동 만료).'); return; }
     if ((tm = raw.match(/^태스크\s*완료\s*(\d+)/))) { const t = (tasks[channel] || []).find(x => x.id === parseInt(tm[1])); if (t) { t.done = true; persistTasks(); await postAs(client, channel, thread_ts, LEAD, `#${tm[1]} 완료 처리했어.`); } else await postAs(client, channel, thread_ts, LEAD, '그 태스크 못 찾겠어.'); return; }
     if ((tm = raw.match(/^태스크\s*삭제\s*(\d+)/))) { tasks[channel] = (tasks[channel] || []).filter(x => x.id !== parseInt(tm[1])); persistTasks(); await postAs(client, channel, thread_ts, LEAD, `#${tm[1]} 삭제했어.`); return; }
     // 배포 — 특정/직전 레포를 Railway에 다시 올림 (단, 고치고/만들고 같은 작업 의도가 있으면 여기서 안 잡고 작업으로 보냄)
