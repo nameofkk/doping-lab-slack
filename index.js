@@ -167,6 +167,7 @@ function commandMenuText() {
     '사업(비즈니스)',
     '• `사업 지표` — 실수치 스코어카드 · `사업 브리핑` — AARRR 해석·측정갭',
     '• `그로스 제안` — 타겟지표+가설 실험 발의 · `실험 현황` — 효과측정',
+    '• 부서 검토: `고객 검토`(리뷰) · `마케팅 검토` · `재무 검토` · `경쟁 동향`',
     '',
     '🤖 *자율(오토파일럿)*',
     '• `오토파일럿 켜` / `끄` / `상태` — 위험도별 자동실행',
@@ -403,13 +404,20 @@ function apTier(kind, repo, task) {
 // 제안을 오토파일럿 상태에 따라 자동실행 또는 게이트. OFF면 기존처럼 버튼 게이트.
 const AP_BUILD_CAP = parseInt(process.env.AP_BUILD_CAP || '3', 10); // autopilot 자동 빌드 일일 상한(폭주·비용 방지)
 let apBuildDay = null, apBuildCount = 0;
+// 디스패치 버튼 — 항목이 여럿이면 개별 번호 버튼도(슬랙 한 줄 최대 5개). 많으면 전부/넘어가만 + "실행 1,3" 안내.
+function dispatchButtons(n) {
+  const b = [{ text: '전부 실행', id: 'dispatch_run', style: 'primary' }];
+  if (n > 1 && n <= 3) for (let i = 1; i <= n; i++) b.push({ text: `${i}번만`, id: `dispatch_n${i}` });
+  b.push({ text: '넘어가', id: 'dispatch_skip' });
+  return b;
+}
 async function proposeOrAuto(client, channel, repo, items, headerLine) {
   const label = k => k === 'investigate' ? '조사' : k === 'build' ? '코드수정' : '사람만';
-  const fmt = items.map((x, i) => `${i + 1}. ${riskIcon(x.kind === 'investigate' ? 'low' : x.kind === 'human' ? 'low' : riskTier(x.task))} [${label(x.kind)}] ${x.task}`).join('\n');
+  const fmt = items.map((x, i) => `${i + 1}. [${label(x.kind)}] ${x.task}`).join('\n');
   if (!settings.autopilot || !settings.autopilot[channel]) { // 오토파일럿 OFF → 기존 게이트
     pendingDispatch[channel] = { repo, items, at: Date.now() };
-    await postAs(client, channel, undefined, LEAD, `${headerLine}\n${fmt}\n\n"실행" 하거나 버튼 누르면 착수. 안 할 거면 "넘어가".`);
-    await postButtons(channel, undefined, [{ text: '▶️ 실행', id: 'dispatch_run', style: 'primary' }, { text: '넘어가', id: 'dispatch_skip' }]);
+    await postAs(client, channel, undefined, LEAD, `${headerLine}\n${fmt}\n\n전부 하려면 "실행"(또는 버튼), 골라서 "실행 1,3"도 돼. 안 할 거면 "넘어가".`);
+    await postButtons(channel, undefined, dispatchButtons(items.length));
     return;
   }
   // 오토파일럿 ON → 티어 분기
@@ -420,21 +428,22 @@ async function proposeOrAuto(client, channel, repo, items, headerLine) {
   const gated = tiered.filter(z => z.t === 'gate' || z.t === 'block').map(z => z.x);
   // 일일 빌드 상한 초과분은 게이트로 전환(폭주 방지)
   if (autoBuild.length && apBuildCount + autoBuild.length > AP_BUILD_CAP) { const room = Math.max(0, AP_BUILD_CAP - apBuildCount); gated.push(...autoBuild.slice(room)); autoBuild = autoBuild.slice(0, room); }
-  await postAs(client, channel, undefined, LEAD, `🛸 오토파일럿: ${headerLine}\n${fmt}`);
   const autoNow = autoInv.concat(autoBuild);
+  // 헤더 한 줄 + 무엇이 자동/승인인지 요약(전체 덤프 안 함 — 어수선 방지)
+  await postAs(client, channel, undefined, LEAD, `${headerLine}\n오토파일럿: 자동 실행 ${autoNow.length}건(읽기·비프로드), 승인 필요 ${gated.length}건(프로드·자기수정).`);
   if (autoNow.length && !activeWork[channel]) {
     apBuildCount += autoBuild.length;
     logDecision(channel, 'autopilot-run', `자동실행 ${autoNow.length}건(조사 ${autoInv.length}·코드 ${autoBuild.length}) ${repo}`);
     log('info', 'autopilot-run', { repo, inv: autoInv.length, build: autoBuild.length });
-    if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: `🛸 오토파일럿 자동실행(${repo.split('/').pop()}): ${autoNow.map(x => x.task.slice(0, 40)).join(' / ')}` }).catch(() => {});
-    dispatchActionItems(client, channel, undefined, repo, autoNow).catch(() => {}); // build는 비프로드라 PR로 올라감(머지는 사람) — 코드 자동수정의 안전판
+    if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: `오토파일럿 자동실행(${repo.split('/').pop()}): ${autoNow.map(x => x.task.slice(0, 40)).join(' / ')}` }).catch(() => {});
+    dispatchActionItems(client, channel, undefined, repo, autoNow).catch(() => {});
   } else if (autoNow.length) { gated.push(...autoNow); } // 이미 작업중이면 게이트로
   if (gated.length) {
     pendingDispatch[channel] = { repo, items: gated, at: Date.now() };
     const glabel = k => k === 'investigate' ? '조사' : k === 'build' ? '코드수정' : '사람만';
     const glist = gated.map((x, i) => `${i + 1}. [${glabel(x.kind)}] ${x.task}`).join('\n');
-    await postAs(client, channel, undefined, LEAD, `🔒 이건 고위험이라 승인 받을게 (자기수정·프로드·파괴적):\n${glist}\n\n"실행"하면 착수, "넘어가"로 패스.`);
-    await postButtons(channel, undefined, [{ text: '▶️ 실행', id: 'dispatch_run', style: 'primary' }, { text: '넘어가', id: 'dispatch_skip' }]);
+    await postAs(client, channel, undefined, LEAD, `승인 필요 (프로드·자기수정이라 자동 안 함):\n${glist}\n\n전부 하려면 "실행"(또는 전부 실행 버튼), 골라서 "실행 1" 또는 번호 버튼. 안 할 거면 "넘어가".`);
+    await postButtons(channel, undefined, dispatchButtons(gated.length));
   }
 }
 // 명확한 "중단/취소 명령"일 때만 true (문장 속에 '중단','스톱' 단어가 섞인 일반 요청은 제외 — "중단했던 거 이어서", "스톱워치 추가" 등 오작동 방지)
@@ -1505,6 +1514,30 @@ async function runBizGrowth(client, channel, manual = false) {
     await proposeOrAuto(client, channel, allItems[0].repo, allItems, '그로스 실험 제안 (승인하면 착수, "실행 1,3"으로 골라도 됨. 효과는 다음 측정에서 baseline 대비 비교)'); // 한 제안으로 — 아이템별 repo
   } catch (e) { try { stopTyping(channel); log('error', 'biz-growth-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
 }
+
+// ── Phase B: 부서별 운영 루프 — 각 부서가 실데이터를 자기 관점으로 검토→진단+개선 제안(게이트). 4개가 같은 골격이라 제네릭. 페르소나=부서장. ──
+const DEPTS = {
+  cx: { name: '고객(CX)', persona: '우정잉', role: '고객 경험(CX) 책임자', prompt: '앱스토어·크롬웹스토어·플레이스토어의 우리 앱 리뷰와 평점을 웹서치로 찾아보고(예: "sponono chrome extension review", "wewantpeace app review"), 반복되는 불만·요청을 테마별로 정리해 제품 개선을 제안. 리뷰가 안 잡히면 "리뷰 수집/피드백 채널부터 만들자"를 제안.' },
+  marketing: { name: '마케팅', persona: '영듀', role: '마케팅/그로스(획득) 책임자', prompt: '획득(신규유입) 관점에서 콘텐츠·SEO·GEO(ChatGPT·Claude 같은 AI검색이 우리를 인용하게 구조화)·SNS 전략을 제안. 핵심 키워드·경쟁 포지셔닝은 웹서치로. 실제 발행 계정이 필요한 건 사람만 가능하다고 표시.' },
+  finance: { name: '재무(CFO)', persona: '윈터', role: '재무(CFO)', prompt: '수익(매출·유료 구독자)과 비용(우리 봇 운영 토큰비용 등) 신호로 번레이트·런웨이·유닛이코노믹스(LTV:CAC·전환율·이탈) 관점에서 진단하고, 비용 이상치·수익 개선을 제안. 데이터 없으면 추정 말고 "이 재무지표부터 잡자"로.' },
+  market: { name: '시장·경쟁', persona: '아이유', role: '시장·경쟁 인텔리전스 책임자', prompt: '경쟁사 동향·시장 트렌드·신규 위협을 웹서치로 조사해(예: 스포일러 차단 앱 경쟁사, 분쟁 추적 서비스 경쟁사), 우리한테 주는 시사점과 대응을 제안.' },
+};
+async function runDeptLoop(client, channel, deptKey, manual = false) {
+  const d = DEPTS[deptKey]; if (!d || !channel) return;
+  try {
+    startTyping(channel);
+    const svcCtx = Object.keys(bizData).map(rp => `[${rp.split('/').pop()}]\n${bizScorecard(rp)}${BIZ_PRODUCT[rp] ? '\n제품: ' + BIZ_PRODUCT[rp] : ''}`).join('\n\n') || '(등록된 서비스 없음)';
+    const days = [...usageHist, usageStat].filter(x => x && x.day).slice(-7); const tot = days.reduce((a, x) => a + (x.outTokens || 0), 0);
+    const finCtx = deptKey === 'finance' ? `\n[우리 봇 운영비용 신호] 최근 ${days.length}일 출력토큰 ~${Math.round(tot / 1000)}k(클로드 사용비 비례)` : '';
+    const out = await runClaude(`너는 도핑연구소 ${d.role}다. 우리가 운영하는 서비스들을 ${d.name} 관점에서 검토해라.\n${d.prompt}${UNTRUSTED_PREAMBLE}\n[서비스 현황]\n${wrapUntrusted(svcCtx)}${finCtx}\n\n친한국어 반말로(마크다운·별표·#·이모지 금지, 쉬운 말). 먼저 진단 3~6줄. 그 다음 줄에 액션을 JSON으로만: {"proposals":[{"repo":"sponono|wewantpeace|bot","task":"구체적으로 뭘 할지 한 문장","kind":"investigate|build","target":"올리려는 지표/기대효과"}]} (최대 3개, 데이터·웹서치 근거로. 발행계정·결제 등 사람만 가능한 건 빼고).`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 220000, true);
+    const raw = out.text || '';
+    const jm = raw.match(/\{[\s\S]*"proposals"[\s\S]*\}/);
+    const prose = deMd(raw.replace(/```[\s\S]*?```/g, '').replace(/\{[\s\S]*"proposals"[\s\S]*\}/, '').trim()) || '(검토 생성 실패 — 데이터부족/한도)';
+    log('info', 'dept-loop', { dept: deptKey, manual });
+    await postAs(client, channel, undefined, byName(d.persona) || LEAD, `${d.name} 검토\n${prose.slice(0, 2600)}`); // postAs가 스피너 정리
+    if (jm) { try { const obj = JSON.parse(jm[0]); const items = (obj.proposals || []).filter(p => p && p.task && ['investigate', 'build'].includes(p.kind)).slice(0, 3).map(p => ({ who: d.name, repo: resolveRepo(p.repo || 'bot'), task: `${p.task}${p.target ? ` (타겟: ${p.target})` : ''}`, kind: p.kind })); if (items.length) await proposeOrAuto(client, channel, items[0].repo, items, `${d.name} 개선 제안`); } catch (_) {} }
+  } catch (e) { try { stopTyping(channel); log('error', 'dept-loop-err', { dept: deptKey, e: String(e).slice(0, 120) }); } catch (_) {} }
+}
 // 운영 헬스체크 — 각 라이브 서비스 curl로 상태 확인 → 우정잉(QA/SRE)이 보고, 다운이면 윈터가 알림
 async function checkServices(client, channel, announce = true, onlyAlert = false) {
   const sre = byName('윈터') || LEAD; // 운영·헬스체크 = 인프라
@@ -2079,6 +2112,14 @@ async function handle(event, client) {
       runBizGrowth(client, channel, true).catch(() => {});
       return;
     }
+    // Phase B: 부서별 운영 루프
+    { let dk = null;
+      if (/(고객\s*검토|리뷰\s*분석|cx\s*검토|고객\s*피드백|리뷰\s*검토)/i.test(raw)) dk = 'cx';
+      else if (/(마케팅\s*검토|마케팅\s*제안|획득\s*전략|seo|geo\b)/i.test(raw)) dk = 'marketing';
+      else if (/(재무\s*검토|재무\s*제안|cfo|런웨이|번레이트|유닛이코노믹스|비용\s*검토)/i.test(raw)) dk = 'finance';
+      else if (/(경쟁\s*동향|경쟁사|시장\s*분석|시장\s*동향|경쟁\s*검토|트렌드\s*조사)/i.test(raw)) dk = 'market';
+      if (dk) { if (await guardBusy(client, channel, thread_ts)) return; runDeptLoop(client, channel, dk, true).catch(() => {}); return; }
+    }
     if (/(실험\s*현황|실험\s*목록|그로스\s*현황|실험\s*상태)/i.test(raw)) {
       const all = Object.keys(bizData).flatMap(rp => measureExperiments(rp)).slice(-12);
       if (!all.length) { await postAs(client, channel, thread_ts, byName('김채원') || LEAD, '아직 진행 중인 그로스 실험이 없어. "그로스 제안"으로 시작하면, 각 실험에 타겟지표·가설이 붙고 다음 측정에서 효과를 비교해줄게.'); return; }
@@ -2367,7 +2408,9 @@ app.action(/^(dispatch|plan|sched|mcp)_/, async ({ ack, body, action }) => {
   try {
     const map = { dispatch_run: '실행', dispatch_skip: '넘어가', plan_go: '진행', plan_skip: '넘어가', sched_register: '스케줄 등록', sched_once: '1회만', sched_cancel: '취소', mcp_add: '붙여', mcp_skip: '넘어가' };
     const label = { dispatch_run: '실행', dispatch_skip: '넘어가기', plan_go: '진행', plan_skip: '넘어가기', sched_register: '스케줄 등록', sched_once: '1회만', sched_cancel: '취소', mcp_add: 'MCP 붙이기', mcp_skip: '넘어가기' };
-    const text = map[action.action_id]; if (!text) return;
+    const pick = action.action_id.match(/^dispatch_n(\d+)$/); // 개별 번호 버튼
+    const text = pick ? `실행 ${pick[1]}` : map[action.action_id]; if (!text) return;
+    if (pick) { label[action.action_id] = `${pick[1]}번 실행`; }
     const channel = (body.channel && body.channel.id) || (body.container && body.container.channel_id); if (!channel) return;
     // 1회용: 클릭 즉시 버튼 메시지를 결과 텍스트로 교체(연타로 중복 작업·전역중단 터지던 버그). botClient가 올린 메시지라 botClient로 교체.
     const msgTs = body.message && body.message.ts;
