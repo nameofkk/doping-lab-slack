@@ -1453,6 +1453,9 @@ async function startWork(client, channel, thread_ts, repo, task, newProject, for
     const iac = await intentActionCheck(task, '기존 레포 수정이 아니라, 새 프로젝트/레포(새 깃허브 저장소)를 처음부터 새로 생성');
     if (iac.verdict !== 'MATCH') { logDecision(channel, 'newproj-iac', `${iac.verdict}: ${String(task).slice(0, 50)}`); await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}${iac.ask || '이거 새로 만드는 거야, 아니면 기존 프로젝트를 고치는 거야?'}\n→ 새로면 "새로 만들어줘", 기존이면 "(레포이름) 고쳐줘"로 다시 말해줘.`); return; }
   }
+  // AP3: 오토파일럿 ON이면 신규 프로젝트도 질문·승인플랜 마찰 없이 바로 기획~제작~배포~등록 체이닝(폭발반경 작은 신규만). 막히는 건 👤(키/계정)뿐.
+  const autoPilot = !!(settings.autopilot && settings.autopilot[channel]);
+  if (autoPilot && newProject) { logDecision(channel, 'autopilot-newproject', `무게이트 신규제작: ${String(task).slice(0, 50)}`); await postAs(client, channel, thread_ts, LEAD, `🛸 오토파일럿: 질문·승인 없이 바로 기획→제작→QA→배포까지 알아서 갈게. 계정·키 필요한 건 그때 알려줄게.`); launchWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName); return; }
   // 기존 레포 작업·이어가기·완성은 질문 없이 바로 진행 (정체성/경로 같은 쓸데없는 재질문 마찰 제거). 질문은 방향이 크게 갈리는 '신규 제작'에서만.
   const qs = newProject ? await planQuestions(task, newProject) : [];
   if (qs.length) {
