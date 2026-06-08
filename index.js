@@ -217,7 +217,7 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
 }
 
 // ── 실제 작업 모드: 레포 클론 → claude 코드 작업 → 브랜치 push → PR → 보고 ──
-let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {};
+let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {}; const pendingPlan = {};
 function drainFeedback(channel) { const f = (feedback[channel] || []).join('\n'); feedback[channel] = []; return f; } // 작업 중 사용자가 끼어든 수정요청 모아서 반환
 // 토론/회의 결론 → 실제 착수 가능한 액션아이템 추출 (조사/코드수정/사람만 분류). 자동 실행 아님 — 사용자 승인용 목록.
 async function extractActionItems(conclusion) {
@@ -1040,6 +1040,13 @@ async function startWork(client, channel, thread_ts, repo, task, newProject, for
     await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오 좋다. ${newProject ? '만들기' : '작업'} 전에 이것만 먼저 정해주라:\n${qs.map((q, i) => `${i + 1}. ${q}`).join('\n')}\n\n답 주면 그대로 들어갈게. 알아서 정해도 되면 "알아서 해"라고 해도 돼.`);
     return;
   }
+  // R5b: 승인모드 + 신규제작이면 만들기 전 계획을 보여주고 승인받음 (Devin "실행 전 플랜 편집"). 평소(승인모드 off)엔 바로 진행 — 마찰 최소.
+  if (newProject && settings.approval[channel]) {
+    const pl = await runClaude(`다음 새 프로젝트를 만들기 전, 핵심 계획만 6~8줄로 짧게: 뭘 만들지 한 줄·핵심기능 3~5개·기술스택·주요 화면. 군더더기·마크다운 없이.\n요청: ${JSON.stringify(task)}`, 'sonnet');
+    pendingPlan[channel] = { repo, task, newProject, forcePR, projName, at: Date.now() };
+    await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}📐 만들기 전 계획이야:\n${(pl.text || task).trim().slice(0, 1500)}\n\n이대로면 "진행", 바꿀 거 있으면 "수정: ~", 접으려면 "넘어가".`);
+    return;
+  }
   launchWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName);
 }
 async function handle(event, client) {
@@ -1080,6 +1087,19 @@ async function handle(event, client) {
       if (activeWork[channel].repo !== undefined) pausedWork[channel] = { ...activeWork[channel] }; // 재개("이어서"/"다시 해") 가능하게 보관
       activeWork[channel] = null; feedback[channel] = [];
     }
+    // R5a: 보드의 특정 작업 재개 — "이어서 #12" / "재개 12" (재시작에 끊긴 작업·실패·완료 다 재실행 가능)
+    const jm = raw.match(/^(?:이어서|재개|다시\s*(?:해|시작|돌려))\s*#?\s*(\d+)\b/);
+    if (jm && !activeWork[channel] && canCommand(event.user)) {
+      const jb = jobs[parseInt(jm[1], 10)];
+      if (jb && jb.channel === channel && ['work', 'build', 'report', 'debate'].includes(jb.type)) {
+        await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}#${jb.id} "${jb.title}" 다시 돌릴게${jb.repo ? ' (' + jb.repo.split('/').pop() + ')' : ''}.`);
+        if (jb.type === 'report') runReport(client, channel, thread_ts, LEAD, jb.repo, jb.title).catch(() => {}).finally(() => { endJob(channel); activeWork[channel] = null; });
+        else if (jb.type === 'debate') { activeWork[channel] = { task: jb.title, started: Date.now() }; runDebate(client, channel, thread_ts, jb.title, jb.repo).catch(() => {}).finally(() => { endJob(channel); activeWork[channel] = null; }); }
+        else launchWork(client, channel, thread_ts, jb.repo || WORK_DEFAULT_REPO, jb.title, jb.type === 'build', !!settings.approval[channel]);
+        return;
+      }
+      await postAs(client, channel, thread_ts, LEAD, `#${jm[1]} 작업을 못 찾겠어. "작업현황"으로 번호 확인해줘.`); return;
+    }
     // 재개 — 중단했던 작업을 새로 만들지 말고 그대로 이어감
     if (!activeWork[channel] && pausedWork[channel] && (/^(이어서|이어가|이어|계속(해|하자|진행)?|마저|아까\s*거|이전\s*거)/.test(raw) || /^다시(\s*(해|해줘|진행|시작|시켜|돌려|돌려줘))?\s*$/.test(raw) || /(이전에|전에|아까)\s*하던\s*거|하던\s*거\s*(그대로|다시|이어)/.test(raw))) {
       const pw = pausedWork[channel]; delete pausedWork[channel];
@@ -1093,6 +1113,18 @@ async function handle(event, client) {
       await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, 직전에 만들던 ${tgt.split('/').pop()}에서 아직 미완성인 부분(특히 사용자 화면) 마저 완성할게.`);
       launchWork(client, channel, thread_ts, tgt, '이전에 만들던 이 프로젝트에서 아직 미완성인 부분, 특히 사용자한테 보이는 화면(라우트 page)과 핵심 사용자 플로우를 실제로 동작하게 끝까지 완성해라. 데모·플레이스홀더·로렘입숨 금지, 실제 화면과 로직으로. npm run build 통과 유지.', false, !!settings.approval[channel]);
       return;
+    }
+    // R5b: 신규제작 계획 승인 ("진행"=착수 / "수정: ~"=계획 반영해 다시 / "넘어가"=폐기)
+    if (pendingPlan[channel]) {
+      if (pendingPlan[channel].at && Date.now() - pendingPlan[channel].at > 30 * 60 * 1000) { delete pendingPlan[channel]; } // 30분 만료
+      else if (/^(넘어가|취소|안\s?해|됐어|패스|놔둬)/.test(raw)) { delete pendingPlan[channel]; await postAs(client, channel, thread_ts, LEAD, '오케이, 이 계획은 접을게.'); return; }
+      else if (/^(진행(해|하자|할게|시켜)?|승인(해)?|좋아(요)?|ㄱㄱ|고고|이대로(\s*(가자|해|진행))?|오케이|ok|콜)\s*$/i.test(raw) && canCommand(event.user)) {
+        const pp = pendingPlan[channel]; delete pendingPlan[channel];
+        if (await guardBusy(client, channel, thread_ts)) { pendingPlan[channel] = pp; return; }
+        await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이 그 계획대로 들어간다.`);
+        launchWork(client, channel, thread_ts, pp.repo, pp.task, pp.newProject, pp.forcePR, pp.projName); return;
+      }
+      else if (/^수정\s*[:：]?\s*(.+)/.test(raw)) { const mod = raw.match(/^수정\s*[:：]?\s*([\s\S]+)/)[1].trim(); const pp = pendingPlan[channel]; delete pendingPlan[channel]; await postAs(client, channel, thread_ts, LEAD, '계획에 반영해서 다시 잡을게.'); startWork(client, channel, thread_ts, pp.repo, `${pp.task}\n\n[추가 수정 지시]\n${mod}`, pp.newProject, pp.forcePR, pp.projName); return; }
     }
     // 토론 결론 액션아이템 실행 승인 — "실행"/"실행 1,3"으로 착수, "넘어가"로 폐기 (승인 게이트: 자동 실행 안 함)
     if (pendingDispatch[channel]) {
