@@ -116,6 +116,7 @@ function clientFor(persona) {
 }
 async function postAs(defaultClient, channel, thread_ts, persona, text) {
   try {
+    try { stopTyping(channel); } catch (_) {} // 답 나가면 입력중 스피너 제거
     text = scrubOutput(text); // Q2: 발신 직전 시크릿 마스킹(모든 발신 단일 통로)
     const wc = clientFor(persona);
     if (wc) await wc.chat.postMessage({ channel, thread_ts, text });          // 진짜 별도 멤버
@@ -123,20 +124,29 @@ async function postAs(defaultClient, channel, thread_ts, persona, text) {
     recordMsg(channel, persona.name, text);
   } catch (e) { /* not_in_channel 등 → 채널에 초대 안 된 봇은 조용히 패스 */ }
 }
-// 타이핑 느낌 — 슬랙 네이티브 "작성 중" 표시는 봇이 못 쓰니(RTM 폐기) "💬 입력 중…" 임시 메시지를 올리고 점을 1초마다 순환시켜(로딩 스피너 연출) 답 나오면 그 자리에 교체. 별도 토큰(진짜 멤버) 직원만 깔끔; 아니면 폴백으로 그냥 게시.
-const TYPING_FRAMES = ['💬 입력 중', '💬 입력 중 ·', '💬 입력 중 · ·', '💬 입력 중 · · ·'];
+// 타이핑 연출 — 슬랙 네이티브 "작성 중"은 봇이 못 쓰니(RTM 폐기) "입력 중 ·" 임시 메시지를 1초마다 순환(로딩 스피너). 채널당 1개, 봇이 답(postAs)하면 자동 삭제. 모든 대화에 적용.
+const TYPING_FRAMES = ['입력 중', '입력 중 ·', '입력 중 · ·', '입력 중 · · ·'];
+const channelTyping = {};
+function startTyping(channel, thread_ts) {
+  if (!channel || channelTyping[channel]) return;
+  const wc = clientFor(LEAD); if (!wc) return; // 한로로 토큰으로 "팀이 입력 중" 표시
+  channelTyping[channel] = { wc, ts: null, timer: null, started: Date.now() };
+  wc.chat.postMessage({ channel, thread_ts, text: TYPING_FRAMES[0] }).then(r => {
+    const t = channelTyping[channel]; if (!t || (r && r.__stopped)) return;
+    if (!t || !channelTyping[channel]) { if (r && r.ts) wc.chat.delete({ channel, ts: r.ts }).catch(() => {}); return; }
+    t.ts = r && r.ts;
+    if (t.ts) { let i = 0; t.timer = setInterval(() => { if (Date.now() - t.started > 120000) return stopTyping(channel); i = (i + 1) % TYPING_FRAMES.length; wc.chat.update({ channel, ts: t.ts, text: TYPING_FRAMES[i] }).catch(() => {}); }, 1000); }
+  }).catch(() => { delete channelTyping[channel]; });
+}
+function stopTyping(channel) {
+  const t = channelTyping[channel]; if (!t) return; delete channelTyping[channel];
+  try { if (t.timer) clearInterval(t.timer); if (t.ts) t.wc.chat.delete({ channel, ts: t.ts }).catch(() => {}); } catch {}
+}
 async function replyTyping(client, channel, thread_ts, persona, gen) {
-  const wc = clientFor(persona); let ts = null, timer = null;
-  if (wc) {
-    try { const r = await wc.chat.postMessage({ channel, thread_ts, text: TYPING_FRAMES[0] }); ts = r && r.ts; } catch {}
-    if (ts) { let i = 0; timer = setInterval(() => { i = (i + 1) % TYPING_FRAMES.length; wc.chat.update({ channel, ts, text: TYPING_FRAMES[i] }).catch(() => {}); }, 1000); } // 1초마다 점 순환 = 실시간 작성 연출
-  }
+  startTyping(channel, thread_ts);
   let res; try { res = await gen(); } catch { res = {}; }
-  if (timer) clearInterval(timer);
   const text = scrubOutput((((res && res.text) || '') + '').trim()) || '…';
-  // 스피너를 update로 교체하면 "(편집됨)"이 남아 → 스피너 삭제하고 답변은 새 메시지로 게시(편집 흔적 없음)
-  if (wc && ts) { try { await wc.chat.delete({ channel, ts }); } catch {} }
-  await postAs(client, channel, thread_ts, persona, text);
+  await postAs(client, channel, thread_ts, persona, text); // postAs가 스피너 삭제
   return res;
 }
 // 명령어 메뉴 — 자연어 명령들을 카테고리로 정리. "명령어"/"도움말" 텍스트 또는 (등록 시) /도핑 슬래시로 호출.
@@ -1706,6 +1716,7 @@ async function handle(event, client) {
   }
   recordMsg(channel, '사용자', raw);
   if (event.user) lastRequester[channel] = event.user; // 완료 시 이 사람을 @멘션
+  startTyping(channel, event.thread_ts); // 모든 대화에 "입력 중" 스피너 — 봇이 답(postAs)하면 자동 삭제
   // 명령어 메뉴
   if (/^(명령어|도움말|메뉴|help|커맨드|commands?|\?|？|뭐\s*할\s*수\s*있어|뭐\s*시킬)/i.test(raw)) { await postAs(client, channel, event.thread_ts, LEAD, commandMenuText()); return; }
   // 내 슬랙 멤버ID 알려주기 (OWNER_USER_ID 설정용 등) — 봇이 받은 event.user가 곧 그 사람의 U… 멤버ID
