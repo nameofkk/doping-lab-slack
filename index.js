@@ -130,13 +130,13 @@ const channelTyping = {};
 function startTyping(channel, thread_ts) {
   if (!channel || channelTyping[channel]) return;
   const wc = clientFor(LEAD); if (!wc) return; // 한로로 토큰으로 "팀이 입력 중" 표시
-  channelTyping[channel] = { wc, ts: null, timer: null, started: Date.now() };
+  const self = { wc, ts: null, timer: null, started: Date.now() }; // 전역 재읽기 금지 — 자기 객체만 추적(레이스로 새 스피너 가로채 ts덮어쓰는 더블스피너 버그 방지)
+  channelTyping[channel] = self;
   wc.chat.postMessage({ channel, thread_ts, text: TYPING_FRAMES[0] }).then(r => {
-    const t = channelTyping[channel]; if (!t || (r && r.__stopped)) return;
-    if (!t || !channelTyping[channel]) { if (r && r.ts) wc.chat.delete({ channel, ts: r.ts }).catch(() => {}); return; }
-    t.ts = r && r.ts;
-    if (t.ts) { let i = 0; t.timer = setInterval(() => { if (Date.now() - t.started > 120000) return stopTyping(channel); i = (i + 1) % TYPING_FRAMES.length; wc.chat.update({ channel, ts: t.ts, text: TYPING_FRAMES[i] }).catch(() => {}); }, 1000); }
-  }).catch(() => { delete channelTyping[channel]; });
+    if (channelTyping[channel] !== self) { if (r && r.ts) wc.chat.delete({ channel, ts: r.ts }).catch(() => {}); return; } // 그새 stop/교체됨 → 이 메시지는 고아라 삭제(정지 스피너 잔존 방지)
+    self.ts = r && r.ts;
+    if (self.ts) { let i = 0; self.timer = setInterval(() => { if (Date.now() - self.started > 120000) return stopTyping(channel); i = (i + 1) % TYPING_FRAMES.length; wc.chat.update({ channel, ts: self.ts, text: TYPING_FRAMES[i] }).catch(() => {}); }, 1000); }
+  }).catch(() => { if (channelTyping[channel] === self) delete channelTyping[channel]; });
 }
 function stopTyping(channel) {
   const t = channelTyping[channel]; if (!t) return; delete channelTyping[channel];
