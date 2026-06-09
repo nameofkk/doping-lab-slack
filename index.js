@@ -166,7 +166,8 @@ function commandMenuText() {
     '🛠️ *작업·제작*',
     '• `홀덤게임 만들어줘` — 새 프로젝트 (기획→제작→QA→배포)',
     '• `스포노노 다크모드 추가해줘` — 기존 레포 수정',
-    '• `이어서` / `중단` — 작업 이어가기/멈추기',
+    '• `이어서` / `중단` — 작업 이어가기/멈추기 (실패 시 자동 진단·복구·재개)',
+    '• `전체 정지` / `자율 재개` — 모든 자동 멈춤/재개 · `봇 비용` — 이번 주 사용량',
     '• `X 토론하자` — 팀 토론(기획 핑퐁)',
     '',
     '🔭 *운영·모니터링*',
@@ -1191,7 +1192,7 @@ function rulesCtx(channel) { const r = rules[channel] || []; return r.length ? `
 // ── 설정(권한/승인) + 태스크보드 (영구) ──
 const SET_FILE = process.env.SETTINGS_FILE || '/data/settings.json';
 let settings = { commanders: [], approval: {}, autopilot: {} };
-function loadSettings() { try { if (fs.existsSync(SET_FILE)) settings = JSON.parse(fs.readFileSync(SET_FILE, 'utf8')) || settings; } catch {} settings.commanders = settings.commanders || []; settings.approval = settings.approval || {}; settings.autopilot = settings.autopilot || {}; settings.repoChannel = settings.repoChannel || {}; settings.hqChannel = settings.hqChannel || null; settings.workRoute = settings.workRoute || {}; settings.sentinel = settings.sentinel || { enabled: true }; }
+function loadSettings() { try { if (fs.existsSync(SET_FILE)) settings = JSON.parse(fs.readFileSync(SET_FILE, 'utf8')) || settings; } catch {} settings.commanders = settings.commanders || []; settings.approval = settings.approval || {}; settings.autopilot = settings.autopilot || {}; settings.repoChannel = settings.repoChannel || {}; settings.hqChannel = settings.hqChannel || null; settings.workRoute = settings.workRoute || {}; settings.sentinel = settings.sentinel || { enabled: true }; if (settings.paused === undefined) settings.paused = false; if (settings.autoRecover === undefined) settings.autoRecover = true; }
 // 텍스트에서 등록된 사업 서비스(repo) 찾기 — 영문 레포명 + 한글 별칭
 function repoFromText(raw) { const t = String(raw || ''); for (const rp of Object.keys(bizData)) { const nm = rp.split('/').pop(); if (nm && new RegExp(nm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(t)) return rp; } if (/위원트피스|위피|wewantpeace/i.test(t)) return Object.keys(bizData).find(r => /wewantpeace/i.test(r)) || null; if (/스포노노|스포논|sponono/i.test(t)) return Object.keys(bizData).find(r => /sponono/i.test(r)) || null; return null; }
 function persistSettings() { try { fs.writeFileSync(SET_FILE, JSON.stringify(settings)); } catch {} }
@@ -2086,14 +2087,39 @@ async function guardBusy(client, channel, thread_ts) {
   await postAs(client, channel, thread_ts, LEAD, `지금 "${(activeWork[channel].task || '').slice(0, 40)}" 하는 중이라 그것부터 끝내고 할게. 급하면 "중단"이라고 해줘.`);
   return true;
 }
+// 작업 실패 시: 표시(채널+OWNER) + 재개 컨텍스트 보존 + 원인 진단 → 수정 지시 주입해 중단 지점부터 자동 재개(캡 내). #3/#4
+const RECOVER_CAP = parseInt(process.env.RECOVER_CAP || '2', 10);
+async function onWorkFailed(client, channel, thread_ts, jobId, err, ctx) {
+  try {
+    const repo = ctx.repo, attempt = ctx.recoverAttempt || 0;
+    pausedWork[channel] = { ...ctx, recoverAttempt: attempt }; // "이어서"로 수동 재개 가능하게 보존
+    await postAs(client, channel, thread_ts, LEAD, `작업 실패 — #${jobId}${repo ? ' (' + repo.split('/').pop() + ')' : ''}\n${err.slice(0, 220)}`);
+    if (OWNER_USER_ID && botClient && channel !== OWNER_USER_ID) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`[작업 실패] #${jobId} ${repo || ''}\n${err.slice(0, 300)}`) }).catch(() => {});
+    if (settings.autoRecover === false || settings.paused || attempt >= RECOVER_CAP || isDestructive(ctx.task) || isDestructive(err)) {
+      await postAs(client, channel, thread_ts, LEAD, attempt >= RECOVER_CAP ? `자동 복구 ${attempt}회 했는데도 막혀. 사람이 봐야 할 듯 — 로그 확인하거나 "이어서"로 다시 시도해.` : '"이어서"라고 하면 중단된 지점부터 다시 이어갈게.');
+      return;
+    }
+    await postAs(client, channel, thread_ts, byName('윈터') || LEAD, '원인 파악해서 고치고 중단된 지점부터 다시 돌려볼게.');
+    const diag = await runClaude(`코드 작업이 실패했다. 아래 에러와 작업을 보고 (1)원인 1~2줄 (2)다음 시도에 반영할 구체 수정 지시 1~2줄. 한국어, 추측 말고 에러 근거로. 마크다운 금지.\n[작업]\n${String(ctx.task).slice(0, 700)}\n[에러]\n${err}`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 90000);
+    const fix = (deMd((diag.text || '').trim()) || '에러 로그 기준 재시도').slice(0, 600);
+    await postAs(client, channel, thread_ts, byName('윈터') || LEAD, `실패 진단\n${fix}`);
+    delete pausedWork[channel];
+    const recoverTask = `${ctx.task}\n\n[직전 시도 실패 — 원인·수정 지시(반드시 반영)]\n${fix}\n[중단된 그 시점부터 같은 레포(${repo || '기존'})에 이어서 계속해라. 처음부터 다시 만들지 말고, 남은 것·고칠 것만.]`;
+    await postAs(client, channel, thread_ts, LEAD, `자동 복구 ${attempt + 1}/${RECOVER_CAP} — 고쳐서 이어 돌릴게.`);
+    launchWork(client, channel, thread_ts, repo, recoverTask, false, ctx.forcePR, ctx.projName, attempt + 1); // newProject=false(레포 존재) → 재개
+  } catch (e) { try { log('error', 'recover-err', { e: String(e).slice(0, 120) }); } catch (_) {} }
+}
+// #3: 모든 작업 실패를 OWNER에게도 표시(조사·토론 등 비빌드 작업용 — 빌드 작업은 onWorkFailed가 처리)
+function failNotifyOwner(label, repo, err) { try { if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`[작업 실패] ${label}${repo ? ' (' + repo.split('/').pop() + ')' : ''}\n${String(err).slice(0, 300)}`) }).catch(() => {}); } catch (_) {} }
 // 작업 실행(activeWork 세팅 + runWork + 정리) 공통
-function launchWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName) {
-  feedback[channel] = []; delete pausedWork[channel]; // 새 작업 시작 → 묵은 피드백·옛 중단작업 정리(스테일 "이어서" 방지)
+function launchWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName, recoverAttempt = 0) {
+  feedback[channel] = []; if (!recoverAttempt) delete pausedWork[channel]; // 새 작업이면 옛 중단작업 정리(복구 재개는 유지)
   const job = createJob(channel, newProject ? 'build' : 'work', task, repo, lastRequester[channel]); // R1: 작업 보드에 기록
-  activeWork[channel] = { task, started: Date.now(), beat: Date.now(), by: lastRequester[channel], repo, newProject, forcePR, projName, jobId: job.id }; // 재개(이어서)용 컨텍스트 포함
+  const ctx = { task, started: Date.now(), beat: Date.now(), by: lastRequester[channel], repo, newProject, forcePR, projName, jobId: job.id, recoverAttempt }; // 재개·복구용 컨텍스트
+  activeWork[channel] = ctx;
   runWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName)
-    .catch(e => { jobUpdateById(job.id, { status: 'failed', error: String(e).slice(0, 200) }); postAs(client, channel, thread_ts, LEAD, '작업 오류: ' + String(e).slice(0, 300)); })
-    .finally(() => { if (jobs[job.id] && jobs[job.id].status === 'running') jobUpdateById(job.id, { status: 'done' }); activeWork[channel] = null; }); // runWork가 정확한 종료상태 안 박았으면 done 처리
+    .catch(e => { const err = String(e).slice(0, 300); jobUpdateById(job.id, { status: 'failed', error: err.slice(0, 200) }); const fctx = { ...ctx, repo: (activeWork[channel] && activeWork[channel].repo) || repo }; onWorkFailed(client, channel, thread_ts, job.id, err, fctx).catch(() => {}); }) // #3/#4: 실패 표시+자동복구
+    .finally(() => { if (jobs[job.id] && jobs[job.id].status === 'running') jobUpdateById(job.id, { status: 'done' }); if (activeWork[channel] && activeWork[channel].jobId === job.id) activeWork[channel] = null; }); // 이 잡 것만 정리(복구 재개가 새로 잡은 건 안 건드림)
 }
 // 작업(신규 제작이든 기존 수정이든) 시작 전, 정말 방향이 갈리는 중요한 결정이 있으면 사용자에게 먼저 물어봄 (없으면 그냥 진행)
 async function planQuestions(task, newProject) {
@@ -2552,6 +2578,18 @@ async function handle(event, client) {
     }
     if (/선제\s*감시\s*(켜|on|활성)/i.test(raw) && canCommand(event.user)) { settings.sentinel = { enabled: true }; persistSettings(); await postAs(client, channel, thread_ts, LEAD, '선제 감시 켰어 — 4시간마다 사업 지표 이상을 자동으로 보고 임계치 넘으면 바로 경보할게.'); return; }
     if (/선제\s*감시\s*(꺼|off|중지|끄)/i.test(raw) && canCommand(event.user)) { settings.sentinel = { enabled: false }; persistSettings(); await postAs(client, channel, thread_ts, LEAD, '선제 감시 껐어. "선제 점검"으로 수동으론 여전히 돌릴 수 있어.'); return; }
+    // 전역 자율 정지/재개 — 모든 자동(정기업무·선제감시·브리핑·경영회의)을 한 번에 멈춤/재개. 수동 명령·헬스감시는 유지.
+    if (/(전체|전역|모든\s*자율|자율|다)\s*(정지|멈춰|멈춤|중지|꺼|스톱|stop|일시정지)/i.test(raw) && canCommand(event.user)) { settings.paused = true; persistSettings(); logDecision(channel, 'global-pause', 'ON'); await postAs(client, channel, thread_ts, LEAD, '전체 자율 활동 멈췄어 — 정기 업무·선제 감시·브리핑·경영회의 다 안 돌아. (수동 명령이랑 서비스 다운 감시는 그대로.) "자율 재개"로 다시 켜.'); return; }
+    if (/(전체|전역|모든\s*자율|자율|다)\s*(재개|다시|시작|켜|resume|풀어)/i.test(raw) && canCommand(event.user)) { settings.paused = false; persistSettings(); logDecision(channel, 'global-pause', 'OFF'); await postAs(client, channel, thread_ts, LEAD, '전체 자율 활동 다시 켰어 — 정기 업무·선제 감시 정상 가동.'); return; }
+    if (/자동\s*복구\s*(꺼|off|중지|끄)/i.test(raw) && canCommand(event.user)) { settings.autoRecover = false; persistSettings(); await postAs(client, channel, thread_ts, LEAD, '자동 복구 껐어 — 작업 실패해도 알아서 안 고치고 "이어서" 안내만 할게.'); return; }
+    if (/자동\s*복구\s*(켜|on|활성)/i.test(raw) && canCommand(event.user)) { settings.autoRecover = true; persistSettings(); await postAs(client, channel, thread_ts, LEAD, `자동 복구 켰어 — 작업 실패하면 원인 진단해서 고치고 중단 지점부터 ${RECOVER_CAP}회까지 자동 재시도할게.`); return; }
+    // 이번 주 봇 비용/사용량 — 구독제라 추가비용은 없고 활동량 참고용
+    if (/(봇\s*비용|이번\s*주\s*비용|비용\s*현황|사용\s*비용|토큰\s*비용)/i.test(raw)) {
+      const days = [...usageHist, usageStat].filter(d => d && d.day).slice(-7);
+      const tot = days.reduce((a, d) => ({ c: a.c + (d.calls || 0), t: a.t + (d.outTokens || 0), l: a.l + (d.limitedHits || 0) }), { c: 0, t: 0, l: 0 });
+      const perDay = days.map(d => `  ${String(d.day).slice(4, 6)}/${String(d.day).slice(6, 8)}: 호출 ${d.calls || 0} · 토큰 ~${Math.round((d.outTokens || 0) / 1000)}k`).join('\n');
+      await postAs(client, channel, thread_ts, LEAD, `이번 주 봇 사용량 (최근 ${days.length}일) — 구독제라 추가 과금은 없고 활동량 참고용\n총 호출 ${tot.c}회 · 출력토큰 ~${Math.round(tot.t / 1000)}k · 한도걸림 ${tot.l}회\n\n[일별]\n${perDay || '  데이터 없음'}`); return;
+    }
     // Phase C: 전략 경영회의 — 부서 제안 수렴 → CEO 우선순위 + Critic 반박 → 게이트 발의
     if (/(경영\s*회의|이사회|전략\s*회의|주간\s*회의|board\s*meeting|위클리\s*리뷰)/i.test(raw)) {
       if (await guardBusy(client, channel, thread_ts)) return;
@@ -2744,7 +2782,7 @@ async function handle(event, client) {
       if (await guardBusy(client, channel, thread_ts)) return;
       const reporter = pickPersona(raw) || LEAD;
       activeWork[channel] = { task: raw, started: Date.now(), by: lastRequester[channel] };
-      runReport(client, channel, event.thread_ts || event.ts, reporter, projRepo, raw).catch(e => { jobUpdate(channel, { status: 'failed', error: String(e).slice(0, 150) }); postAs(client, channel, thread_ts, LEAD, '조사 오류: ' + String(e).slice(0, 300)); }).finally(() => { endJob(channel); activeWork[channel] = null; });
+      runReport(client, channel, event.thread_ts || event.ts, reporter, projRepo, raw).catch(e => { jobUpdate(channel, { status: 'failed', error: String(e).slice(0, 150) }); failNotifyOwner('조사', null, e); postAs(client, channel, thread_ts, LEAD, '조사 오류: ' + String(e).slice(0, 300)); }).finally(() => { endJob(channel); activeWork[channel] = null; });
       return;
     }
     // 특정 단어 없어도 AI가 의도 판단 → 작업이면 알아서 수행
@@ -2792,13 +2830,13 @@ async function handle(event, client) {
     if (intent && intent.action === 'report' && intent.task) {
       const reporter = pickPersona(event.text || '') || LEAD;
       activeWork[channel] = { task: intent.task, started: Date.now() };
-      runReport(client, channel, event.thread_ts || event.ts, reporter, resolveR(intent.repo), intent.task).catch(e => { jobUpdate(channel, { status: 'failed', error: String(e).slice(0, 150) }); postAs(client, channel, thread_ts, LEAD, '조사 오류: ' + String(e).slice(0, 300)); }).finally(() => { endJob(channel); activeWork[channel] = null; });
+      runReport(client, channel, event.thread_ts || event.ts, reporter, resolveR(intent.repo), intent.task).catch(e => { jobUpdate(channel, { status: 'failed', error: String(e).slice(0, 150) }); failNotifyOwner('조사', null, e); postAs(client, channel, thread_ts, LEAD, '조사 오류: ' + String(e).slice(0, 300)); }).finally(() => { endJob(channel); activeWork[channel] = null; });
       return;
     }
     if (intent && intent.action === 'debate' && intent.task) {
       const drepo = (intent.repo && intent.repo !== 'new') ? resolveR(intent.repo) : null;
       activeWork[channel] = { task: intent.task, started: Date.now() };
-      runDebate(client, channel, event.thread_ts || event.ts, intent.task, drepo).catch(e => { jobUpdate(channel, { status: 'failed', error: String(e).slice(0, 150) }); postAs(client, channel, thread_ts, LEAD, '토론 오류: ' + String(e).slice(0, 300)); }).finally(() => { endJob(channel); activeWork[channel] = null; });
+      runDebate(client, channel, event.thread_ts || event.ts, intent.task, drepo).catch(e => { jobUpdate(channel, { status: 'failed', error: String(e).slice(0, 150) }); failNotifyOwner('토론', null, e); postAs(client, channel, thread_ts, LEAD, '토론 오류: ' + String(e).slice(0, 300)); }).finally(() => { endJob(channel); activeWork[channel] = null; });
       return;
     }
     const targeted = pickPersona(event.text || '');
@@ -2844,6 +2882,7 @@ function buildHomeBlocksNew() {
   B.push({ type: 'header', text: { type: 'plain_text', text: '도핑연구소 운영 콘솔', emoji: true } });
   B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `서비스 ${svcs.length}개(정상 ${upN}) · 진행 작업 ${active.length} · 승인 대기 ${pendCount} · 추적 ${experiments.length}` }] });
   B.push({ type: 'actions', elements: [hbtn('경영회의 열기', 'home_run_board', { style: 'primary' }), hbtn('사업 브리핑', 'home_run_bizbrief'), hbtn('헬스체크', 'home_run_health'), hbtn('운영 브리핑', 'home_run_opsbrief'), hbtn('새로고침', 'home_refresh')] });
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: settings.paused ? '*전체 자율: 멈춤* — 모든 자동(정기업무·선제감시·브리핑·경영회의) 정지됨' : '*전체 자율: 가동 중* — 자동 운영 작동 중' }, accessory: hbtn(settings.paused ? '자율 재개' : '전체 정지', 'home_pause_toggle', { style: settings.paused ? 'primary' : 'danger' }) });
   const senOn = !settings.sentinel || settings.sentinel.enabled !== false;
   const senCh = settings.sentinel && settings.sentinel.channel;
   B.push({ type: 'section', text: { type: 'mrkdwn', text: `*선제 감시* — ${senOn ? '켜짐 · 4시간마다 사업 지표 이상(매출·구독·회원·DAU 급변, 매출0 등) 자동 경보' : '꺼짐'}\n경보 채널: ${senCh ? `<#${senCh}>` : '서비스별 기본 채널'}` } });
@@ -2926,7 +2965,8 @@ function buildHomeBlocksNew() {
   const mtot = mdays.reduce((a, d) => ({ c: a.c + (d.calls || 0), t: a.t + (d.outTokens || 0), l: a.l + (d.limitedHits || 0) }), { c: 0, t: 0, l: 0 });
   const rj = Object.values(jobs).filter(j => Date.now() - (j.createdAt || 0) < 7 * 86400000);
   const dN = rj.filter(j => j.status === 'done').length, fN = rj.filter(j => j.status === 'failed').length; const sr = (dN + fN) ? Math.round(dN / (dN + fN) * 100) : null;
-  B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `운영 메트릭 (최근 ${mdays.length}일): 호출 ${mtot.c} · 실토큰 ~${Math.round(mtot.t / 1000)}k · 한도걸림 ${mtot.l} · 잡 완료 ${dN}/실패 ${fN}${sr !== null ? ` (성공 ${sr}%)` : ''}` }] });
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*이번 주 봇 비용/사용량* (최근 ${mdays.length}일)\n호출 ${mtot.c}회 · 출력토큰 ~${Math.round(mtot.t / 1000)}k · 한도걸림 ${mtot.l}회  _(구독제라 추가 과금 없음, 활동량 참고)_` } });
+  B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `잡 완료 ${dN} / 실패 ${fN}${sr !== null ? ` (성공 ${sr}%)` : ''} · 채널에서 "봇 비용"·"전체 정지"로도 가능` }] });
   return B.slice(0, 98); // 블록 상한 안전
 }
 async function publishHome(client, userId) { try { await client.views.publish({ user_id: userId, view: { type: 'home', blocks: buildHomeBlocksNew() } }); } catch (e) { try { console.log('[home] publish 실패(앱설정에서 Home 탭 켜야 함?):', String(e && e.data && e.data.error || e).slice(0, 120)); } catch (_) {} } }
@@ -2950,6 +2990,7 @@ app.action(/^(home_|opscfg_|svcroute_)/, async ({ ack, body, action, client }) =
     const userId = body.user && body.user.id; const aid = action.action_id;
     if (aid === 'home_refresh') { await publishHome(client, userId); return; }
     if (aid === 'home_board_archive') { archiveDoneInitiatives(); await publishHome(client, userId); return; }
+    if (aid === 'home_pause_toggle') { settings.paused = !settings.paused; persistSettings(); logDecision('home', 'global-pause', settings.paused ? 'ON' : 'OFF'); await publishHome(client, userId); return; }
     if (aid === 'home_sentinel_ch') { settings.sentinel = settings.sentinel || { enabled: true }; settings.sentinel.channel = action.selected_conversation || null; persistSettings(); await publishHome(client, userId); return; }
     if (aid === 'home_sentinel_toggle') { const on = !settings.sentinel || settings.sentinel.enabled !== false; settings.sentinel = { enabled: !on }; persistSettings(); await publishHome(client, userId); return; }
     if (aid === 'home_sentinel_run') { const ch = homeTargetChannel(userId); try { await client.chat.postMessage({ channel: userId, text: `선제 점검 돌렸어 — 이상 있으면 ${ch === userId ? '여기' : '<#' + ch + '>'}나 해당 서비스 채널로 경보가 가.` }); } catch (_) {} runBizSentinel(app.client, ch, true).catch(() => {}); setTimeout(() => publishHome(client, userId).catch(() => {}), 1500); return; }
@@ -3068,8 +3109,8 @@ async function postButtons(channel, thread_ts, buttons) {
         }
       }
     }
-    // D5/D2: 정기 업무 — opsConfig(홈에서 편집) 기반 스케줄러. 한 틱에 due+한가한 작업 1건만 → 자연 스태거(와르르 방지).
-    {
+    // D5/D2: 정기 업무 — opsConfig(홈에서 편집) 기반 스케줄러. 한 틱에 due+한가한 작업 1건만 → 자연 스태거(와르르 방지). 전역정지 시 스킵.
+    if (!settings.paused) {
       const defCh = settings.hqChannel || [...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))][0] || Object.keys(lastRequester)[0] || null;
       for (const id of OPS_ORDER) {
         const o = opsConfig[id]; if (!o || !o.enabled || o.lastRunDay === n.day) continue;
@@ -3096,7 +3137,7 @@ async function postButtons(channel, thread_ts, buttons) {
       (async () => { for (const rp of Object.keys(bizData)) { try { await bizFetch(rp); } catch (_) {} } })();
     }
     // D3: 사업 선제 감시 — 4시간마다 지표 이상 자동 체크(임계치 돌파 시 즉시 경보·긴급제안). 하루 1회/지표 쿨다운 내장.
-    if (n.m === 0 && n.h % 4 === 0 && (!settings.sentinel || settings.sentinel.enabled !== false) && Object.keys(bizData).length) {
+    if (n.m === 0 && n.h % 4 === 0 && !settings.paused && (!settings.sentinel || settings.sentinel.enabled !== false) && Object.keys(bizData).length) {
       runBizSentinel(botClient, null, false).catch(() => {});
     }
     // 매시 정각엔 조용히 감시하다가 새로 죽은 게 있으면 즉시 알림 (실시간 다운 감지)
