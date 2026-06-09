@@ -175,7 +175,7 @@ function commandMenuText() {
     '',
     '사업(비즈니스)',
     '• `사업 지표` — 실수치 스코어카드 · `사업 브리핑` — AARRR 해석·측정갭',
-    '• `그로스 제안` — 타겟지표+가설 실험 발의 · `실행 결과`(실험 현황) — 승인·실행한 과제의 지표 이동 추적',
+    '• `그로스 제안` — 타겟지표+가설 실험 발의 · `실행 결과` — 지표 이동 · `진척 보드` — 약속 vs 실행 상태',
     '• 부서 검토: `고객 검토`(리뷰) · `마케팅 검토` · `재무 검토` · `경쟁 동향`',
     '• `경영회의` — 부서 제안 수렴→집중 과제 결정 · `목표`/`목표 등록` — OKR',
     '• `선제 점검` — 지표 이상 즉시 감시(평소 4시간마다 자동) · `선제 감시 끄기`',
@@ -1598,6 +1598,24 @@ function measureExperiments(repo) {
     return { ...e, now: null };
   });
 }
+// ── D4: 책임·진척 보드 — 승인·실행한 과제의 상태(발의/진행/지연/적중/역효과)를 추적. "약속 vs 실행"을 책임지게. ──
+const SRC_KO = { board: '경영회의', dept: '부서', growth: '그로스', sentinel: '선제대응', undefined: '그로스' };
+function progressBoard() {
+  const today = kstNow().day;
+  const all = Object.keys(bizData).flatMap(rp => measureExperiments(rp)).filter(e => !e.archived);
+  return all.map(e => {
+    const age = Math.max(0, daysBetweenDay(e.startDay || today, today));
+    let state, label;
+    if (e.status === 'proposed') { state = 'proposed'; label = '발의(승인 대기)'; }
+    else if (e.status === 'measured' || (e.pct != null && e.pct >= 10)) { state = 'hit'; label = '적중(효과 확인)'; }
+    else if (e.pct != null && e.pct <= -10) { state = 'bad'; label = '역효과'; }
+    else if (age >= 14) { state = 'stale'; label = `진행 ${age}일·효과 미확인`; }
+    else { state = 'progress'; label = `진행 ${age}일`; }
+    return { ...e, age, state, label, srcKo: SRC_KO[e.source] || '그로스' };
+  });
+}
+function progressMove(e) { if (e.targetKey && e.now != null && typeof e.baseline === 'number') { const lbl = BIZ_LABELS[e.targetKey] ? BIZ_LABELS[e.targetKey].ko : e.targetKey; return `${lbl} ${e.baseline.toLocaleString()}→${e.now.toLocaleString()}${e.pct != null ? ` (${e.pct > 0 ? '+' : ''}${e.pct}%)` : ''}`; } return e.targetKey ? `${BIZ_LABELS[e.targetKey] ? BIZ_LABELS[e.targetKey].ko : e.targetKey} 측정 대기` : '지표 미측정'; }
+function archiveDoneInitiatives() { let n = 0; for (const e of experiments) { if (!e.archived && (e.status === 'measured' || (e.pct != null && e.pct <= -10))) { e.archived = true; n++; } } if (n) persistExperiments(); return n; }
 let bizGrowthAt = 0;
 async function runBizGrowth(client, channel, manual = false) {
   if (!manual && Date.now() - bizGrowthAt < 6 * 86400000) return; bizGrowthAt = Date.now();
@@ -1774,8 +1792,10 @@ async function runBoardMeeting(client, channel, manual = false) {
     const measured = Object.keys(bizData).flatMap(rp => measureExperiments(rp)).filter(e => e.targetKey);
     const resultLines = measured.slice(-8).map(e => { const lbl = BIZ_LABELS[e.targetKey] ? BIZ_LABELS[e.targetKey].ko : e.targetKey; const mv = (e.now != null && typeof e.baseline === 'number') ? `${e.baseline.toLocaleString()}→${e.now.toLocaleString()}${e.pct != null ? ` (${e.pct > 0 ? '+' : ''}${e.pct}%${e.pct >= 10 ? ' 적중' : e.pct <= -10 ? ' 역효과' : ' 미미'})` : ''}` : '측정 대기(다음 수집 후)'; return `#${e.id} [${e.repo.split('/').pop()}] ${e.focus} — ${lbl}: ${mv}`; });
     const resultsCtx = resultLines.length ? resultLines.join('\n') : '(아직 추적·측정된 실행 결과 없음 — 첫 회의거나 승인·실행한 추적 과제가 없음)';
+    const staleItems = progressBoard().filter(b => b.state === 'stale'); // D4: 2주+ 진행인데 효과 미확인 — 책임지고 짚을 것
+    const staleCtx = staleItems.length ? '\n\n[지연 과제(2주+ 진행, 효과 미확인 — 계속할지 접을지 결정)]\n' + staleItems.slice(0, 6).map(b => `#${b.id} [${b.repo.split('/').pop()}] ${b.focus} (진행 ${b.age}일)`).join('\n') : '';
     const deptCtx = collected.map(c => `<<${c.name}>>\n진단: ${(c.prose || '').slice(0, 450)}\n제안: ${(c.items || []).map(x => `${x.task}[${x.kind}]`).join(' / ') || '없음'}`).join('\n\n');
-    const agenda = `[지난 실행 결과(닫힌 루프)]\n${resultsCtx}\n\n[서비스 지표]\n${scoreCtx}\n\n[분기 목표]\n${goalCtx}\n\n[부서별 진단·제안]\n${deptCtx}`;
+    const agenda = `[지난 실행 결과(닫힌 루프)]\n${resultsCtx}${staleCtx}\n\n[서비스 지표]\n${scoreCtx}\n\n[분기 목표]\n${goalCtx}\n\n[부서별 진단·제안]\n${deptCtx}`;
     // CEO(한로로) 우선순위
     const ceoOut = await runClaude(`너는 도핑연구소 CEO(한로로)다. 아래는 이번 주 경영회의 안건 — 지난 실행 결과, 서비스 지표, 분기 목표, 각 부서장 진단·제안이다.${STYLE}${UNTRUSTED_PREAMBLE}\n${wrapUntrusted(agenda)}\n\n먼저 [지난 실행 결과]부터 봐라 — 효과 본 건(적중)은 이어가거나 다음 단계로, 효과 없던 건(미미/역효과)은 접거나 접근을 바꿔라. 그 다음 부서 제안 중 이번 주에 진짜 집중할 1~3개만 골라라(서비스 고도화·수익 기여 크고 데이터가 급하다는 것). 회의록 요약 4~7줄(반말): 첫 줄에 지난 결과를 한 줄로 짚고, 왜 이걸 골랐는지 지표 근거로, 안 고른 건 왜 미뤘는지. 그 다음 줄에 JSON으로만: {"focus":[{"repo":"sponono|wewantpeace|bot","task":"한 문장","kind":"investigate|build","target":"올릴 지표(사람말)","target_key":"아래 지표키 중 1개 또는 null","why":"한줄 근거"}]}\n측정가능 지표키: ${measurableKeysHint()}`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 200000);
     const craw = ceoOut.text || ''; const cjm = craw.match(/\{[\s\S]*"focus"[\s\S]*\}/);
@@ -2450,6 +2470,17 @@ async function handle(event, client) {
       if (!goals.length) { await postAs(client, channel, thread_ts, LEAD, '아직 설정된 목표(OKR)가 없어. "목표 등록 <서비스> <내용>"으로 추가해줘. 경영회의가 이 목표 기준으로 우선순위를 정해.'); return; }
       await postAs(client, channel, thread_ts, LEAD, '분기 목표(OKR)\n' + goals.map(g => `#${g.id} [${g.repo.split('/').pop()}] ${g.text}`).join('\n')); return;
     }
+    // D4: 책임·진척 보드 — 약속 vs 실행 + 상태별
+    if (/(진척\s*보드|진척\s*현황|책임\s*보드|진행\s*보드|약속.*실행|진척$)/i.test(raw)) {
+      const board = progressBoard();
+      if (!board.length) { await postAs(client, channel, thread_ts, byName('김채원') || LEAD, '아직 추적 중인 과제가 없어. 경영회의·그로스·부서 검토에서 타겟지표 붙은 과제를 승인·실행하면 여기 쌓이고 상태가 추적돼.'); return; }
+      const cnt = { proposed: 0, progress: 0, stale: 0, hit: 0, bad: 0 }; board.forEach(b => cnt[b.state]++);
+      const ic = { proposed: '발의', progress: '진행', stale: '지연', hit: '적중', bad: '역효과' };
+      const lines = board.slice(-15).reverse().map(b => `[${ic[b.state]}] #${b.id} ${b.repo.split('/').pop()}·${b.srcKo} — ${String(b.focus).slice(0, 44)}\n   ${b.label} / ${progressMove(b)}`);
+      const stale = board.filter(b => b.state === 'stale');
+      await postAs(client, channel, thread_ts, byName('김채원') || LEAD, `책임·진척 보드 (약속 vs 실행)\n발의 ${cnt.proposed} · 진행 ${cnt.progress + cnt.stale} · 적중 ${cnt.hit} · 역효과 ${cnt.bad}\n\n${lines.join('\n')}${stale.length ? `\n\n지연 ${stale.length}건 — 2주 넘게 진행인데 효과 미확인. 짚고 갈 것.` : ''}`);
+      return;
+    }
     if (/(실험\s*현황|실험\s*목록|그로스\s*현황|실험\s*상태|실행\s*결과|추적\s*현황|성과\s*현황)/i.test(raw)) {
       const all = Object.keys(bizData).flatMap(rp => measureExperiments(rp)).slice(-15);
       if (!all.length) { await postAs(client, channel, thread_ts, byName('김채원') || LEAD, '아직 추적 중인 실행 과제가 없어. "그로스 제안"이나 "경영회의"에서 타겟지표가 붙은 과제를 승인·실행하면, 그때부터 baseline을 잡고 다음 수집에서 지표가 움직였는지 측정해줄게.'); return; }
@@ -2784,9 +2815,18 @@ function buildHomeBlocksNew() {
     ] });
   });
   B.push({ type: 'divider' });
-  // 실행 추적(지표 이동)
-  const tracked = Object.keys(bizData).flatMap(rp => measureExperiments(rp)).filter(e => e.targetKey).slice(-6);
-  if (tracked.length) { const tline = e => { const lbl = BIZ_LABELS[e.targetKey] ? BIZ_LABELS[e.targetKey].ko : e.targetKey; const mv = (e.now != null && typeof e.baseline === 'number' && e.pct != null) ? `${e.pct > 0 ? '+' : ''}${e.pct}%${e.pct >= 10 ? ' 적중' : e.pct <= -10 ? ' 역효과' : ''}` : '측정대기'; return `• #${e.id} ${String(e.focus).slice(0, 40)} — ${lbl}: ${mv}`; }; B.push({ type: 'section', text: { type: 'mrkdwn', text: '*실행 추적 (지표 이동)*\n' + tracked.map(tline).join('\n').slice(0, 2600) } }); B.push({ type: 'divider' }); }
+  // D4: 책임·진척 보드 — 승인·실행한 과제 상태(발의/진행/지연/적중/역효과) + 약속 vs 실행
+  const board = progressBoard();
+  B.push({ type: 'header', text: { type: 'plain_text', text: '책임·진척 보드', emoji: true } });
+  if (board.length) {
+    const cnt = { proposed: 0, progress: 0, stale: 0, hit: 0, bad: 0 }; board.forEach(b => cnt[b.state]++);
+    B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `발의 ${cnt.proposed} · 진행 ${cnt.progress + cnt.stale}${cnt.stale ? `(지연 ${cnt.stale})` : ''} · 적중 ${cnt.hit} · 역효과 ${cnt.bad}` }] });
+    const ic = { proposed: '🟡', progress: '🔵', stale: '⏳', hit: '✅', bad: '🔴' };
+    const lines = board.slice(-10).reverse().map(b => `${ic[b.state]} *#${b.id}* [${b.repo.split('/').pop()}·${b.srcKo}] ${String(b.focus).slice(0, 36)}\n    ${b.label} · ${progressMove(b)}`);
+    B.push({ type: 'section', text: { type: 'mrkdwn', text: lines.join('\n').slice(0, 2900) } });
+    if (cnt.hit + cnt.bad) B.push({ type: 'actions', elements: [hbtn('완료된 것 정리', 'home_board_archive')] });
+  } else B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '_아직 추적 중인 과제 없음 — 경영회의·그로스·부서 검토에서 타겟지표 붙은 과제를 승인·실행하면 여기 쌓여_' }] });
+  B.push({ type: 'divider' });
   // 라이브 서비스 + 운영 메트릭
   const sLine = s => { const last = (s.history || [])[s.history.length - 1]; const ms = last && last.ms != null ? `${last.ms}ms` : '—'; return `${s.lastStatus === 'down' ? '🔴' : '🟢'} ${s.repo.split('/').pop()} (${ms})`; };
   B.push({ type: 'section', text: { type: 'mrkdwn', text: `*라이브 서비스* (${svcs.length})\n` + (svcs.length ? svcs.map(sLine).join('\n').slice(0, 2600) : '_등록된 서비스 없음_') } });
@@ -2806,6 +2846,7 @@ app.action(/^(home_|opscfg_|svcroute_)/, async ({ ack, body, action, client }) =
   try {
     const userId = body.user && body.user.id; const aid = action.action_id;
     if (aid === 'home_refresh') { await publishHome(client, userId); return; }
+    if (aid === 'home_board_archive') { archiveDoneInitiatives(); await publishHome(client, userId); return; }
     if (aid === 'home_sentinel_toggle') { const on = !settings.sentinel || settings.sentinel.enabled !== false; settings.sentinel = { enabled: !on }; persistSettings(); await publishHome(client, userId); return; }
     if (aid === 'home_sentinel_run') { const ch = homeTargetChannel(userId); try { await client.chat.postMessage({ channel: userId, text: `선제 점검 돌렸어 — 이상 있으면 ${ch === userId ? '여기' : '<#' + ch + '>'}나 해당 서비스 채널로 경보가 가.` }); } catch (_) {} runBizSentinel(app.client, ch, true).catch(() => {}); setTimeout(() => publishHome(client, userId).catch(() => {}), 1500); return; }
     let m;
