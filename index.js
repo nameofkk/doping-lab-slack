@@ -1938,11 +1938,15 @@ async function checkServices(client, channel, announce = true, onlyAlert = false
   if (!list.length) { if (announce && !onlyAlert) await postAs(client, channel, undefined, sre, '아직 등록된 라이브 서비스가 없어. 뭐 하나 만들어서 배포되면 여기 대장에 올라가.'); return; }
   const lines = [];
   for (const s of list) {
-    const r = await sh(`curl -s -o /dev/null -w "%{http_code} %{time_total}s" --max-time 15 '${String(s.url).replace(/'/g, '')}' 2>/dev/null || echo "000"`);
+    const r = await sh(`curl -s -o /dev/null -w "%{http_code} %{time_total}s %{size_download}" --max-time 15 '${String(s.url).replace(/'/g, '')}' 2>/dev/null || echo "000 0 0"`);
     const out = (r.out || '').trim();
-    const m = out.match(/^(\d{3})\s+([\d.]+)s?/); // A1: 상태코드 + 응답지연(s) 파싱
-    const code = m ? m[1] : '000'; const ms = m ? Math.round(parseFloat(m[2]) * 1000) : null;
-    const up = /^2\d\d|^3\d\d/.test(code);
+    const m = out.match(/^(\d{3})\s+([\d.]+)s?\s+(\d+)?/); // 상태코드 + 응답지연(s) + 응답크기(byte)
+    const code = m ? m[1] : '000'; const ms = m ? Math.round(parseFloat(m[2]) * 1000) : null; const size = m && m[3] != null ? parseInt(m[3], 10) : null;
+    let up = /^2\d\d|^3\d\d/.test(code); const issues = []; // up이지만 문제 있으면 degraded — 매 체크마다(실시간), SSL만 일1회 캐시
+    if (up && size != null && size < 200) issues.push('응답 내용 거의 빈(껍데기·에러페이지 의심)');
+    if (/^https:/i.test(s.url)) { const today = kstNow().day; if (s.sslDay !== today) { s.sslDay = today; try { const host = s.url.replace(/^https?:\/\//i, '').split('/')[0]; const so = await sh(`echo | timeout 12 openssl s_client -servername ${host} -connect ${host}:443 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null`); const me = (so.out || '').match(/notAfter=(.+)/); if (me) s.sslDays = Math.round((new Date(me[1]).getTime() - Date.now()) / 86400000); } catch (_) {} } if (typeof s.sslDays === 'number' && s.sslDays <= 14) issues.push(`SSL 인증서 ${s.sslDays}일 남음(갱신 필요)`); }
+    if (s.healthUrl) { try { const hr = await sh(`curl -s --max-time 12 -w "\\n%{http_code}" '${String(s.healthUrl).replace(/'/g, '')}' 2>/dev/null`); const ho = (hr.out || '').trim(); const hc = ((ho.match(/(\d{3})\s*$/) || [])[1]) || '000'; const hbody = ho.replace(/\d{3}\s*$/, ''); if (!/^2/.test(hc) || (s.healthKeyword && !hbody.includes(s.healthKeyword))) issues.push(`헬스 엔드포인트 이상(${hc}${s.healthKeyword ? ', 기대문구 없음' : ''})`); } catch (_) {} }
+    const degraded = up && issues.length; s.issues = issues;
     const wasUp = s.lastStatus !== 'down';
     s.lastStatus = up ? 'up' : 'down'; s.lastCheck = Date.now(); s.wasUp = wasUp;
     s.failStreak = up ? 0 : ((s.failStreak || 0) + 1); // A1: 연속 실패수
@@ -1956,7 +1960,8 @@ async function checkServices(client, channel, announce = true, onlyAlert = false
       s.downSince = null; s.downCode = null;
     }
     const tr = svcTrend(s);
-    lines.push(`${up ? '🟢' : '🔴'} ${s.repo} · ${s.url} (${code}${ms != null ? ', ' + ms + 'ms' : ', no response'})${tr ? ' ' + tr : ''}`);
+    const sslTxt = (typeof s.sslDays === 'number') ? ` · SSL ${s.sslDays}일` : '';
+    lines.push(`${degraded ? '🟡' : up ? '🟢' : '🔴'} ${s.repo} · ${s.url} (${code}${ms != null ? ', ' + ms + 'ms' : ', no response'}${size != null ? ', ' + (size > 1024 ? Math.round(size / 1024) + 'KB' : size + 'B') : ''})${sslTxt}${s.healthUrl ? ' · 헬스EP' : ''}${tr ? ' ' + tr : ''}${issues.length ? '\n    주의: ' + issues.join(' / ') : ''}`);
   }
   persistServices();
   const down = list.filter(s => s.lastStatus === 'down');
@@ -1965,7 +1970,18 @@ async function checkServices(client, channel, announce = true, onlyAlert = false
     const newlyDown = down.filter(s => s.wasUp);
     if (newlyDown.length) {
       const past = newlyDown.map(s => { const h = recallFacts('svc:' + s.repo, '인시던트 다운 복구'); return h ? `\n   ↳ ${s.repo} 과거 이력:${h.replace(/\n+/g, ' ').slice(0, 300)}` : ''; }).join('');
-      await postAs(client, channel, undefined, byName('윈터') || LEAD, `🔴 방금 다운 감지: ${newlyDown.map(s => s.repo).join(', ')}. 라이브가 죽었어, 확인할게.${past}`);
+      await postAs(client, channel, undefined, byName('윈터') || LEAD, `🔴 방금 다운 감지: ${newlyDown.map(s => `${s.repo}(HTTP ${s.downCode || '?'})`).join(', ')}. 라이브가 죽었어, 바로 확인할게.${past}`);
+      if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`🔴 [다운] ${newlyDown.map(s => s.repo).join(', ')}`) }).catch(() => {});
+    }
+    // 새로 degraded(up이지만 이상: 빈응답·SSL임박·헬스EP이상) — 처음 감지 시 1회 공유
+    for (const s of list) { const has = (s.issues || []).length; if (s.lastStatus !== 'down' && has && !s.degAlerted) { s.degAlerted = true; await postAs(client, channel, undefined, byName('윈터') || LEAD, `🟡 ${s.repo} 이상 감지(다운은 아닌데): ${s.issues.join(' / ')}. 확인 필요.`); } if (!has) s.degAlerted = false; }
+    // 지속 다운(2연속) → 자동 진단·픽스 제안 1회 (프로드 픽스는 게이트, 봇이 알아서 안 머지)
+    for (const s of list) {
+      if (s.lastStatus === 'down' && s.failStreak === 2 && s.repo && s.repo !== SELF_REPO && s.channel && !activeWork[s.channel] && !settings.paused && GITHUB_TOKEN) {
+        await postAs(botClient, s.channel, undefined, byName('윈터') || LEAD, `${s.repo} 2연속 다운 — 원인 진단하고 고칠 수 있는 건 제안할게.`);
+        activeWork[s.channel] = { task: '다운 진단', started: Date.now() };
+        runReport(botClient, s.channel, undefined, byName('윈터') || LEAD, s.repo, `이 서비스가 방금 다운됐어(HTTP ${s.downCode || '?'}). 배포·환경변수·의존성·런타임 에러·최근 변경 관점에서 가능한 원인을 코드 근거로 진단하고, 즉시 조치할 수 있는 구체 액션(설정 수정·핫픽스 등)을 제안해. 추측 말고 코드/로그 근거로.`).catch(() => {}).finally(() => { activeWork[s.channel] = null; });
+      }
     }
     return;
   }
@@ -2589,6 +2605,16 @@ async function handle(event, client) {
         await postAs(client, channel, thread_ts, byName('윈터') || LEAD, `대장에 올렸어: ${repoKey} · ${urlArg}\n이제 헬스체크·운영 센티넬이 이 서비스를 추적해. "헬스체크" 치면 바로 상태·지연 잡아줄게.`);
         await onboardNewService(client, channel, thread_ts, repoKey, urlArg.replace(/[)>,]+$/, '')); // 수동 등록도 사업 운영 루프 편입(멱등)
         return;
+      }
+      // 앱 헬스 엔드포인트 지정 — "헬스 항목 <서비스> <url> [기대문구]" (DB·앱레벨 상태까지 확인). 해제: "헬스 항목 해제 <서비스>"
+      const hc = rawU.match(/^헬스\s*(?:항목|엔드포인트|체크\s*항목)\s+(?:(해제|삭제)\s+)?(\S+)(?:\s+(https?:\/\/\S+))?(?:\s+(.+))?$/i);
+      if (hc) {
+        const rp = (extractRepo(hc[2]) || '').startsWith('alias:') ? resolveRepo(hc[2]) : (extractRepo(hc[2]) || resolveRepo(hc[2]));
+        if (!rp || !services[rp]) { await postAs(client, channel, thread_ts, byName('윈터') || LEAD, '그 서비스가 대장에 없어. "서비스 등록"으로 먼저 올려줘.'); return; }
+        if (hc[1]) { delete services[rp].healthUrl; delete services[rp].healthKeyword; persistServices(); await postAs(client, channel, thread_ts, byName('윈터') || LEAD, `${rp.split('/').pop()} 헬스 엔드포인트 해제했어.`); return; }
+        if (!hc[3]) { await postAs(client, channel, thread_ts, byName('윈터') || LEAD, '형식: 헬스 항목 <서비스> <헬스URL> [정상일 때 들어있어야 할 문구]. 예) 헬스 항목 wewantpeace https://api.wewantpeace.live/health ok'); return; }
+        services[rp].healthUrl = hc[3]; if (hc[4]) services[rp].healthKeyword = hc[4].trim(); else delete services[rp].healthKeyword; persistServices();
+        await postAs(client, channel, thread_ts, byName('윈터') || LEAD, `${rp.split('/').pop()} 헬스 엔드포인트 지정: ${hc[3]}${hc[4] ? ` (기대 문구: "${hc[4].trim()}")` : ''}. 이제 2분마다 이것도 확인해서 200+문구면 정상, 아니면 경보.`); return;
       }
       if (/^서비스\s*(목록|리스트|대장|상태)\s*\??$/.test(raw)) {
         const ls = svcList().filter(s => s.url);
@@ -3248,12 +3274,9 @@ async function postButtons(channel, thread_ts, buttons) {
         break; // 한 틱에 하나만 — 다음 due는 다음 틱(1분 뒤), 자연 스태거
       }
     }
-    // A4: 능동 강화 — 악화(2연속 다운+) 서비스는 시간 기다리지 말고 다음 틱에 즉시 재확인(빠른 복구·다운 감지)
-    if (n.m % 5 === 0) {
-      for (const s of svcList()) {
-        if (s.url && s.channel && (s.failStreak || 0) >= 2) checkServices(botClient, s.channel, false, true).catch(() => {});
-      }
-    }
+    // 실시간 헬스 감시 — 전체는 2분마다 onlyAlert(다운·이상 즉시 공유), 이미 실패/이상난 서비스는 매분 즉시 재확인(빠른 확정·복구·자동진단)
+    if (n.m % 2 === 0) { for (const ch of [...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))]) checkServices(botClient, ch, false, true).catch(() => {}); }
+    else { for (const ch of [...new Set(svcList().filter(s => s.url && s.channel && ((s.failStreak || 0) >= 1 || (s.issues || []).length)).map(s => s.channel))]) checkServices(botClient, ch, false, true).catch(() => {}); }
     // M3: 일별 사업 지표 수집 전용(경보·LLM 없이 history만 쌓음) — 선제감시 "전일 대비" prev/cur 일관 확보. 매일 새벽 첫 틱 1회.
     if (bizFetchDay !== n.day && n.h >= 5 && Object.keys(bizData).length) {
       bizFetchDay = n.day;
@@ -3262,11 +3285,6 @@ async function postButtons(channel, thread_ts, buttons) {
     // D3: 사업 선제 감시 — 4시간마다 지표 이상 자동 체크(임계치 돌파 시 즉시 경보·긴급제안). 하루 1회/지표 쿨다운 내장.
     if (n.m === 0 && n.h % 4 === 0 && !settings.paused && (!settings.sentinel || settings.sentinel.enabled !== false) && Object.keys(bizData).length) {
       runBizSentinel(botClient, null, false).catch(() => {});
-    }
-    // 매시 정각엔 조용히 감시하다가 새로 죽은 게 있으면 즉시 알림 (실시간 다운 감지)
-    if (n.m === 0 && n.h !== OPS_HOUR) {
-      const chans = [...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))];
-      for (const ch of chans) checkServices(botClient, ch, false, true).catch(() => {});
     }
     // Q3: 드리프트 알림 — 최근 1시간 잡 실패율 급증 / 한도걸림 스파이크 시 OWNER에게 1회 DM(쿨다운 1h). OWNER_USER_ID 없으면 스킵.
     if (OWNER_USER_ID && Date.now() - driftAt > 3600000) {
