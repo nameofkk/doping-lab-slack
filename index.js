@@ -1290,6 +1290,8 @@ function recallSkills(key, taskText) {
   rel.forEach(s => { s.uses = (s.uses || 0) + 1; }); persistSkills(); // 재사용 카운트
   return '\n\n[전에 비슷한 작업에서 통한 방식(스킬) — 맞으면 재사용, 안 맞으면 무시]\n' + rel.map(s => `· ${s.name}: ${s.recipe}`).join('\n');
 }
+// 사업 추론(부서검토·경영회의·그로스·브리핑·선제)용 학습 주입 — 서비스별 스킬+사실 + 전역. 닫힌 루프의 "학습→다음 제안 반영"을 사업 쪽도 닫음.
+function recallForBiz(repos, taskText) { const rs = (Array.isArray(repos) ? repos : [repos]).filter(Boolean); let out = ''; for (const rp of rs) out += recallSkills(rp, taskText) + recallFacts(rp, taskText); out += recallSkills('global', taskText); return out; }
 async function extractSkill(key, contextText) { // 성공한 작업에서 재사용 레시피 0~2개 추출
   if (!key) return;
   try {
@@ -1570,7 +1572,7 @@ async function runBizBriefing(client, channel, manual = false) {
       const metricsTxt = Object.entries(m).map(([k, v]) => `${(BIZ_LABELS[k] ? BIZ_LABELS[k].ko : k)}: ${v}${tr[k] ? ' ' + tr[k] : ''}`).join('\n');
       const name = rp.split('/').pop();
       const prod = productOf(rp) ? `\n[이 서비스가 뭐냐]\n${productOf(rp)}` : '';
-      const gen = async () => { const r = await runClaude(`너는 도핑연구소 사업 책임자(PM/그로스)다. 아래는 "${name}" 서비스 하나의 실제 사업 지표(직전 대비 추세 포함)다. 다른 서비스랑 섞지 말고 이 서비스만 분석해라.${prod}${UNTRUSTED_PREAMBLE}\n[${name} 지표]\n${wrapUntrusted(metricsTxt)}\n\n${BIZ_RUBRIC}\n\n친근한 한국어 반말로(절대 마크다운·별표(*)·#·이모지·영어약어남발 금지, 쉬운 말, 그냥 문장으로). 구성: 1)지금 상태(AARRR 단계별, 있는 데이터만) 2)눈에 띄는 변화·특이사항(전일/전주/전달 대비 변동 크면 왜 중요한지 설명) 3)측정 갭(중요한데 안 보이는 지표+어떻게 계측) 4)지금 하면 효과 클 개선 1~3개(각각 어떤 지표 올리려는지 타겟). 데이터에 없는 수치는 절대 지어내지 마.`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 180000); const t = deMd((r.text || '').trim()) || '(이 서비스 브리핑 생성 실패 — 데이터부족/한도)'; return { ok: r.ok !== false, text: t }; };
+      const gen = async () => { const r = await runClaude(`너는 도핑연구소 사업 책임자(PM/그로스)다. 아래는 "${name}" 서비스 하나의 실제 사업 지표(직전 대비 추세 포함)다. 다른 서비스랑 섞지 말고 이 서비스만 분석해라.${prod}${UNTRUSTED_PREAMBLE}\n[${name} 지표]\n${wrapUntrusted(metricsTxt)}${recallForBiz(rp, name)}\n\n${BIZ_RUBRIC}\n\n친근한 한국어 반말로(절대 마크다운·별표(*)·#·이모지·영어약어남발 금지, 쉬운 말, 그냥 문장으로). 구성: 1)지금 상태(AARRR 단계별, 있는 데이터만) 2)눈에 띄는 변화·특이사항(전일/전주/전달 대비 변동 크면 왜 중요한지 설명) 3)측정 갭(중요한데 안 보이는 지표+어떻게 계측) 4)지금 하면 효과 클 개선 1~3개(각각 어떤 지표 올리려는지 타겟). 데이터에 없는 수치는 절대 지어내지 마.`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 180000); const t = deMd((r.text || '').trim()) || '(이 서비스 브리핑 생성 실패 — 데이터부족/한도)'; return { ok: r.ok !== false, text: t }; };
       const postCh = manual ? channel : channelForWork(rp, 'bizbrief', channel); // D5: 자동이면 서비스×기능 담당 채널로 라우팅
       log('info', 'biz-briefing', { manual, repo: rp, ch: postCh });
       let text;
@@ -1656,7 +1658,7 @@ async function runBizGrowth(client, channel, manual = false) {
       const cur = await bizFetch(rp); const m = cur || bizLatest(rp); if (!m) continue;
       const name = rp.split('/').pop(); const sc = bizScorecard(rp); const availKeys = Object.keys(m).filter(k => typeof m[k] === 'number');
       const prod = productOf(rp) ? `\n제품: ${productOf(rp)}` : '';
-      const out = await runClaude(`너는 "${name}" 그로스 책임자다.${prod}\n아래 사업 스코어카드를 보고, 지금 하면 효과 클 그로스 실험 1~2개를 제안해라. 각 실험은 반드시 "어떤 지표를 올리려는지(타겟)"가 명확하고, 측정 가능하면 아래 키 중 하나를 target_key로.${UNTRUSTED_PREAMBLE}\n${wrapUntrusted(sc)}\n\n측정가능 타겟키(이 중 하나 또는 null): ${availKeys.join(', ') || '(없음)'}\n\nJSON만: {"experiments":[{"focus":"한줄 요약","target_key":"위 키중 하나 or null","hypothesis":"이걸 하면 ~될 거란 가설","action":{"task":"구체적으로 뭘 할지 한 문장","kind":"investigate|build"}}]}. 데이터 근거로만, 측정갭 메우기(계측 추가)도 좋은 실험.`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 150000);
+      const out = await runClaude(`너는 "${name}" 그로스 책임자다.${prod}\n아래 사업 스코어카드를 보고, 지금 하면 효과 클 그로스 실험 1~2개를 제안해라. 각 실험은 반드시 "어떤 지표를 올리려는지(타겟)"가 명확하고, 측정 가능하면 아래 키 중 하나를 target_key로.${UNTRUSTED_PREAMBLE}\n${wrapUntrusted(sc)}${recallForBiz(rp, 'growth ' + name)}\n\n측정가능 타겟키(이 중 하나 또는 null): ${availKeys.join(', ') || '(없음)'}\n\nJSON만: {"experiments":[{"focus":"한줄 요약","target_key":"위 키중 하나 or null","hypothesis":"이걸 하면 ~될 거란 가설","action":{"task":"구체적으로 뭘 할지 한 문장","kind":"investigate|build"}}]}. 데이터 근거로만, 측정갭 메우기(계측 추가)도 좋은 실험.`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 150000);
       const mm = (out.text || '').match(/\{[\s\S]*\}/); if (!mm) continue;
       let obj; try { obj = JSON.parse(mm[0]); } catch { continue; }
       for (const e of (obj.experiments || []).slice(0, 2)) { if (!e || !e.action || !e.action.task) continue; const tk = (e.target_key && e.target_key !== 'null') ? e.target_key : null; const eid = addExperiment(rp, e.focus, tk, e.hypothesis); const tgtLabel = tk ? (BIZ_LABELS[tk] ? BIZ_LABELS[tk].ko : tk) : (e.focus || '지표'); allItems.push({ who: '그로스', repo: resolveRepo(rp), task: `[${name}·실험#${eid}] ${e.action.task} (타겟: ${tgtLabel} / 가설: ${String(e.hypothesis || '').slice(0, 60)})`, kind: ['investigate', 'build'].includes(e.action.kind) ? e.action.kind : 'investigate', targetKey: validMetricKey(tk), source: 'growth', _exp: eid }); } // H2: 아이템에 targetKey·source·_exp 부착 → 승인 시 proposed→executing 전이
@@ -1720,7 +1722,7 @@ async function runBizSentinel(client, channel, manual = false) {
 async function runSentinelMini(client, channel, repo, breaches) {
   try {
     const name = repo.split('/').pop(); const sc = bizScorecard(repo); const bl = breaches.map(b => `${b.label}: ${b.why}`).join(' / ');
-    const out = await runClaude(`너는 "${name}" 그로스/운영 책임자다. 방금 선제 감시에서 이상 신호가 잡혔다: ${bl}.${UNTRUSTED_PREAMBLE}\n[현재 지표]\n${wrapUntrusted(sc)}\n\n이 이상의 가장 가능성 높은 원인 가설과, 지금 바로 확인/대응할 액션을 제안해라. 진단 2~4줄(반말, 지문 금지). 그 다음 JSON만: {"proposals":[{"repo":"${name}","task":"구체 한 문장","kind":"investigate|build","target":"정상화할 지표","target_key":"아래 키 또는 null"}]} (최대 2개).\n측정가능 지표키: ${measurableKeysHint()}`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 150000);
+    const out = await runClaude(`너는 "${name}" 그로스/운영 책임자다. 방금 선제 감시에서 이상 신호가 잡혔다: ${bl}.${UNTRUSTED_PREAMBLE}\n[현재 지표]\n${wrapUntrusted(sc)}${recallForBiz(repo, 'sentinel ' + name)}\n\n이 이상의 가장 가능성 높은 원인 가설과, 지금 바로 확인/대응할 액션을 제안해라. 진단 2~4줄(반말, 지문 금지). 그 다음 JSON만: {"proposals":[{"repo":"${name}","task":"구체 한 문장","kind":"investigate|build","target":"정상화할 지표","target_key":"아래 키 또는 null"}]} (최대 2개).\n측정가능 지표키: ${measurableKeysHint()}`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 150000);
     const raw = out.text || ''; const jm = raw.match(/\{[\s\S]*"proposals"[\s\S]*\}/);
     const prose = deMd(raw.replace(/```[\s\S]*?```/g, '').replace(/\{[\s\S]*"proposals"[\s\S]*\}/, '').trim());
     if (prose) await postAs(client, channel, undefined, byName('김채원') || LEAD, `긴급 진단 — ${name}\n${prose.slice(0, 1500)}`);
@@ -1785,7 +1787,7 @@ async function runDeptLoop(client, channel, deptKey, manual = false, collect = f
     const finCtx = deptKey === 'finance' ? `\n[우리 봇 운영비용 신호] 최근 ${days.length}일 출력토큰 ~${Math.round(tot / 1000)}k(클로드 사용비 비례)` : '';
     const dp = byName(d.persona); const pp = dp ? dp.prompt : '';
     const scopeLine = focusName ? `너는 지금 "${focusName}" 서비스 하나만 ${d.name} 관점에서 검토한다. 다른 서비스는 섞지 마라.` : `너는 지금 ${d.role} 역할로 우리가 운영하는 서비스들을 ${d.name} 관점에서 검토한다.`;
-    const out = await runClaude(`${pp}\n${scopeLine}${STYLE}\n${d.prompt}${UNTRUSTED_PREAMBLE}\n[서비스 현황]\n${wrapUntrusted(svcCtx)}${finCtx}\n\n먼저 진단 3~6줄(반말, 메타서술·지문 금지 — "진단하겠다" 같은 말 말고 바로 본론). 그 다음 줄에 액션을 JSON으로만: {"proposals":[{"repo":"${focusName || 'sponono|wewantpeace|bot'}","task":"구체적으로 뭘 할지 한 문장","kind":"investigate|build","target":"올리려는 지표/기대효과(사람말)","target_key":"아래 측정가능 지표키 중 이 과제로 움직일 지표 1개(없으면 null)"}]} (최대 3개, 데이터·웹서치 근거로. 발행계정·결제 등 사람만 가능한 건 빼고).\n측정가능 지표키: ${measurableKeysHint()}`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 220000, true);
+    const out = await runClaude(`${pp}\n${scopeLine}${STYLE}\n${d.prompt}${UNTRUSTED_PREAMBLE}\n[서비스 현황]\n${wrapUntrusted(svcCtx)}${finCtx}${recallForBiz(repos, d.name + ' ' + (focusName || ''))}\n\n먼저 진단 3~6줄(반말, 메타서술·지문 금지 — "진단하겠다" 같은 말 말고 바로 본론). 그 다음 줄에 액션을 JSON으로만: {"proposals":[{"repo":"${focusName || 'sponono|wewantpeace|bot'}","task":"구체적으로 뭘 할지 한 문장","kind":"investigate|build","target":"올리려는 지표/기대효과(사람말)","target_key":"아래 측정가능 지표키 중 이 과제로 움직일 지표 1개(없으면 null)"}]} (최대 3개, 데이터·웹서치 근거로. 발행계정·결제 등 사람만 가능한 건 빼고).\n측정가능 지표키: ${measurableKeysHint()}`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 220000, true);
     const raw = out.text || '';
     const jm = raw.match(/\{[\s\S]*"proposals"[\s\S]*\}/);
     const prose = deMd(raw.replace(/```[\s\S]*?```/g, '').replace(/\{[\s\S]*"proposals"[\s\S]*\}/, '').trim()) || '(검토 생성 실패 — 데이터부족/한도)';
@@ -1866,7 +1868,7 @@ async function runBoardMeeting(client, channel, manual = false) {
     const deptCtx = collected.map(c => `<<${c.name}>>\n진단: ${(c.prose || '').slice(0, 450)}\n제안: ${(c.items || []).map(x => `${x.task}[${x.kind}]`).join(' / ') || '없음'}`).join('\n\n');
     const agenda = `[지난 실행 결과(닫힌 루프)]\n${resultsCtx}${staleCtx}\n\n[서비스 지표]\n${scoreCtx}\n\n[분기 목표]\n${goalCtx}\n\n[부서별 진단·제안]\n${deptCtx}`;
     // CEO(한로로) 우선순위
-    const ceoOut = await runClaude(`너는 도핑연구소 CEO(한로로)다. 아래는 이번 주 경영회의 안건 — 지난 실행 결과, 서비스 지표, 분기 목표, 각 부서장 진단·제안이다.${STYLE}${UNTRUSTED_PREAMBLE}\n${wrapUntrusted(agenda)}\n\n먼저 [지난 실행 결과]부터 봐라 — 효과 본 건(적중)은 이어가거나 다음 단계로, 효과 없던 건(미미/역효과)은 접거나 접근을 바꿔라. 그 다음 부서 제안 중 이번 주에 진짜 집중할 1~3개만 골라라(서비스 고도화·수익 기여 크고 데이터가 급하다는 것). 회의록 요약 4~7줄(반말): 첫 줄에 지난 결과를 한 줄로 짚고, 왜 이걸 골랐는지 지표 근거로, 안 고른 건 왜 미뤘는지. 그 다음 줄에 JSON으로만: {"focus":[{"repo":"sponono|wewantpeace|bot","task":"한 문장","kind":"investigate|build","target":"올릴 지표(사람말)","target_key":"아래 지표키 중 1개 또는 null","why":"한줄 근거"}]}\n측정가능 지표키: ${measurableKeysHint()}`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 200000);
+    const ceoOut = await runClaude(`너는 도핑연구소 CEO(한로로)다. 아래는 이번 주 경영회의 안건 — 지난 실행 결과, 서비스 지표, 분기 목표, 각 부서장 진단·제안이다.${STYLE}${UNTRUSTED_PREAMBLE}\n${wrapUntrusted(agenda)}${recallForBiz(Object.keys(bizData), 'board 경영')}\n\n먼저 [지난 실행 결과]부터 봐라 — 효과 본 건(적중)은 이어가거나 다음 단계로, 효과 없던 건(미미/역효과)은 접거나 접근을 바꿔라. 그 다음 부서 제안 중 이번 주에 진짜 집중할 1~3개만 골라라(서비스 고도화·수익 기여 크고 데이터가 급하다는 것). 회의록 요약 4~7줄(반말): 첫 줄에 지난 결과를 한 줄로 짚고, 왜 이걸 골랐는지 지표 근거로, 안 고른 건 왜 미뤘는지. 그 다음 줄에 JSON으로만: {"focus":[{"repo":"sponono|wewantpeace|bot","task":"한 문장","kind":"investigate|build","target":"올릴 지표(사람말)","target_key":"아래 지표키 중 1개 또는 null","why":"한줄 근거"}]}\n측정가능 지표키: ${measurableKeysHint()}`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 200000);
     const craw = ceoOut.text || ''; const cjm = craw.match(/\{[\s\S]*"focus"[\s\S]*\}/);
     const digest = deMd(craw.replace(/```[\s\S]*?```/g, '').replace(/\{[\s\S]*"focus"[\s\S]*\}/, '').trim()) || '(회의록 생성 실패)';
     let focus = [];
