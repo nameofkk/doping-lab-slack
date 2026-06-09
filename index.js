@@ -178,6 +178,7 @@ function commandMenuText() {
     '• `그로스 제안` — 타겟지표+가설 실험 발의 · `실행 결과`(실험 현황) — 승인·실행한 과제의 지표 이동 추적',
     '• 부서 검토: `고객 검토`(리뷰) · `마케팅 검토` · `재무 검토` · `경쟁 동향`',
     '• `경영회의` — 부서 제안 수렴→집중 과제 결정 · `목표`/`목표 등록` — OKR',
+    '• `선제 점검` — 지표 이상 즉시 감시(평소 4시간마다 자동) · `선제 감시 끄기`',
     '',
     '🤖 *자율(오토파일럿)*',
     '• `오토파일럿 켜` / `끄` / `상태` — 위험도별 자동실행',
@@ -1188,7 +1189,7 @@ function rulesCtx(channel) { const r = rules[channel] || []; return r.length ? `
 // ── 설정(권한/승인) + 태스크보드 (영구) ──
 const SET_FILE = process.env.SETTINGS_FILE || '/data/settings.json';
 let settings = { commanders: [], approval: {}, autopilot: {} };
-function loadSettings() { try { if (fs.existsSync(SET_FILE)) settings = JSON.parse(fs.readFileSync(SET_FILE, 'utf8')) || settings; } catch {} settings.commanders = settings.commanders || []; settings.approval = settings.approval || {}; settings.autopilot = settings.autopilot || {}; settings.repoChannel = settings.repoChannel || {}; settings.hqChannel = settings.hqChannel || null; settings.workRoute = settings.workRoute || {}; }
+function loadSettings() { try { if (fs.existsSync(SET_FILE)) settings = JSON.parse(fs.readFileSync(SET_FILE, 'utf8')) || settings; } catch {} settings.commanders = settings.commanders || []; settings.approval = settings.approval || {}; settings.autopilot = settings.autopilot || {}; settings.repoChannel = settings.repoChannel || {}; settings.hqChannel = settings.hqChannel || null; settings.workRoute = settings.workRoute || {}; settings.sentinel = settings.sentinel || { enabled: true }; }
 // D5: 서비스(repo)별 담당 채널 — 자동 브리핑·알림을 그 서비스 채널로 라우팅(없으면 기본 채널). hqChannel=경영회의 등 전사 업무 채널.
 function channelForRepo(repo, fallback) { try { return (settings.repoChannel && settings.repoChannel[repo]) || fallback || null; } catch { return fallback || null; } }
 // 텍스트에서 등록된 사업 서비스(repo) 찾기 — 영문 레포명 + 한글 별칭
@@ -1624,6 +1625,61 @@ async function runBizGrowth(client, channel, manual = false) {
   } catch (e) { try { stopTyping(channel); log('error', 'biz-growth-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
 }
 
+// ── D3: 사업 선제 감시 — 지표 임계치 돌파 시 금요일 안 기다리고 즉시 경보 + 그 자리 긴급 미니 진단·제안 ──
+const BIZ_WATCH = [
+  { key: 'admin.monthly_revenue', dir: 'down', pct: 30, crit: true, why: '매출 급감' },
+  { key: 'admin.subscribers', dir: 'down', pct: 20, crit: true, why: '유료 구독자 이탈' },
+  { key: 'admin.total_users', dir: 'down', pct: 5, why: '회원수 감소(탈퇴 신호)' },
+  { key: 'admin.dau', dir: 'down', pct: 50, why: 'DAU 급락' },
+  { key: 'newsletter.subscriber_count', dir: 'down', pct: 15, why: '뉴스레터 구독 이탈' },
+];
+const bizAlertSeen = {}; // repo|key → day (하루 1회 경보 쿨다운)
+function bizBreaches(repo) {
+  const h = (bizData[repo] && bizData[repo].history) || []; if (h.length < 2) return [];
+  const cur = h[h.length - 1].metrics || {}, prev = h[h.length - 2].metrics || {}; const out = [];
+  for (const w of BIZ_WATCH) {
+    const cv = cur[w.key], pv = prev[w.key]; if (typeof cv !== 'number' || typeof pv !== 'number') continue;
+    const d = cv - pv, pct = pv ? Math.round(d / pv * 100) : null; if (pct === null) continue;
+    if (w.dir === 'down' ? (pct <= -w.pct) : (pct >= w.pct)) out.push({ key: w.key, label: (BIZ_LABELS[w.key] ? BIZ_LABELS[w.key].ko : w.key), why: w.why, crit: !!w.crit, from: pv, to: cv, pct });
+  }
+  const rev = cur['admin.monthly_revenue'], subs = cur['admin.subscribers']; // 특수 임계: 유료 있는데 매출 0
+  if (typeof rev === 'number' && rev === 0 && typeof subs === 'number' && subs > 0) out.push({ key: 'admin.monthly_revenue', label: '이번달 매출', why: `유료 ${subs}명인데 매출 0`, crit: true, from: null, to: 0, pct: null });
+  return out;
+}
+let bizSentinelRunning = false;
+async function runBizSentinel(client, channel, manual = false) {
+  if (bizSentinelRunning) return; bizSentinelRunning = true;
+  try {
+    const day = kstNow().day; const defCh = settings.hqChannel || channel || [...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))][0] || null;
+    let anyAlert = false;
+    for (const rp of Object.keys(bizData)) {
+      try { await bizFetch(rp); } catch (_) {}
+      const breaches = bizBreaches(rp);
+      const fresh = manual ? breaches : breaches.filter(b => bizAlertSeen[rp + '|' + b.key] !== day);
+      if (!fresh.length) continue;
+      fresh.forEach(b => { bizAlertSeen[rp + '|' + b.key] = day; });
+      anyAlert = true;
+      const name = rp.split('/').pop(); const ch = channelForWork(rp, 'default', defCh);
+      const lines = fresh.map(b => `- ${b.crit ? '[긴급] ' : ''}${b.label}: ${b.why}${b.pct != null ? ` (${(b.from != null ? b.from.toLocaleString() : '?')}→${b.to.toLocaleString()}, ${b.pct > 0 ? '+' : ''}${b.pct}%)` : ''}`).join('\n');
+      if (ch) await postAs(client, ch, undefined, byName('김채원') || LEAD, `선제 경보 — ${name}\n지표 이상이 잡혀서 정기 회의 안 기다리고 바로 올려.\n${lines}`);
+      if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: `[선제 경보] ${name}\n${lines}` }).catch(() => {});
+      logDecision(ch || defCh || 'sentinel', 'biz-sentinel', `${name}: ${fresh.map(b => b.label).join(', ')}`);
+      if (ch) await runSentinelMini(client, ch, rp, fresh); // 긴급 미니 진단·제안(게이트)
+    }
+    if (manual && !anyAlert && channel) await postAs(client, channel, undefined, byName('김채원') || LEAD, '지금은 임계치 넘은 사업 지표 이상이 없어. (감시: 매출·구독·회원·DAU 급변, 유료 있는데 매출0 등)');
+  } catch (e) { try { log('error', 'biz-sentinel-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
+  finally { bizSentinelRunning = false; }
+}
+async function runSentinelMini(client, channel, repo, breaches) {
+  try {
+    const name = repo.split('/').pop(); const sc = bizScorecard(repo); const bl = breaches.map(b => `${b.label}: ${b.why}`).join(' / ');
+    const out = await runClaude(`너는 "${name}" 그로스/운영 책임자다. 방금 선제 감시에서 이상 신호가 잡혔다: ${bl}.${UNTRUSTED_PREAMBLE}\n[현재 지표]\n${wrapUntrusted(sc)}\n\n이 이상의 가장 가능성 높은 원인 가설과, 지금 바로 확인/대응할 액션을 제안해라. 진단 2~4줄(반말, 지문 금지). 그 다음 JSON만: {"proposals":[{"repo":"${name}","task":"구체 한 문장","kind":"investigate|build","target":"정상화할 지표","target_key":"아래 키 또는 null"}]} (최대 2개).\n측정가능 지표키: ${measurableKeysHint()}`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 150000);
+    const raw = out.text || ''; const jm = raw.match(/\{[\s\S]*"proposals"[\s\S]*\}/);
+    const prose = deMd(raw.replace(/```[\s\S]*?```/g, '').replace(/\{[\s\S]*"proposals"[\s\S]*\}/, '').trim());
+    if (prose) await postAs(client, channel, undefined, byName('김채원') || LEAD, `긴급 진단 — ${name}\n${prose.slice(0, 1500)}`);
+    if (jm) { try { const items = (JSON.parse(jm[0]).proposals || []).filter(p => p && p.task && ['investigate', 'build'].includes(p.kind)).slice(0, 2).map(p => ({ who: '선제대응', repo: resolveRepo(p.repo || repo), task: `[${name}] ${p.task}${p.target ? ` (타겟: ${p.target})` : ''}`, kind: p.kind, targetKey: validMetricKey(p.target_key), source: 'sentinel' })); if (items.length) await proposeOrAuto(client, channel, items[0].repo, items, `선제 대응 제안 — ${name}`, { forceGate: true }); } catch (_) {} }
+  } catch (_) {}
+}
 // ── Phase B: 부서별 운영 루프 — 각 부서가 실데이터를 자기 관점으로 검토→진단+개선 제안(게이트). 4개가 같은 골격이라 제네릭. 페르소나=부서장. ──
 const DEPTS = {
   cx: { name: '고객(CX)', persona: '우정잉', role: '고객 경험(CX) 책임자', prompt: '아래에 "인앱 피드백"(우리 서비스가 직접 받은 진짜 사용자 의견)과 "스토어 실데이터"(평점·설치수·실제 리뷰 본문 — 이미 정확한 앱에서 가져온 진짜 데이터)가 주어진다. 그 실제 내용만 근거로(절대 기억·검색으로 추정 금지) 반복되는 불만·요청·칭찬을 테마별로 묶고, 평점/리뷰가 말해주는 제품 개선을 제안해라. "수집 실패/제한"이라고 적힌 건 데이터 없는 것이니 지어내지 말고 그 사실만 짚어라.' },
@@ -2369,6 +2425,14 @@ async function handle(event, client) {
       else if (/(경쟁\s*동향|경쟁사|시장\s*분석|시장\s*동향|경쟁\s*검토|트렌드\s*조사)/i.test(raw)) dk = 'market';
       if (dk) { if (await guardBusy(client, channel, thread_ts)) return; const fr = repoFromText(raw); runDeptLoop(client, channel, dk, true, false, fr || null).catch(() => {}); return; } // 서비스명 있으면 그 서비스만(예: "스포노노 마케팅 검토")
     }
+    // D3: 선제 감시 수동 실행 / 켜기·끄기
+    if (/(선제\s*점검|긴급\s*점검|이상\s*점검|지표\s*점검|선제\s*감시\s*(실행|점검|돌려)?)/i.test(raw) && !/(켜|꺼|on|off|상태)/i.test(raw)) {
+      if (await guardBusy(client, channel, thread_ts)) return;
+      await postAs(client, channel, thread_ts, byName('김채원') || LEAD, '사업 지표 이상 없나 지금 한 번 훑어볼게.');
+      runBizSentinel(client, channel, true).catch(() => {}); return;
+    }
+    if (/선제\s*감시\s*(켜|on|활성)/i.test(raw) && canCommand(event.user)) { settings.sentinel = { enabled: true }; persistSettings(); await postAs(client, channel, thread_ts, LEAD, '선제 감시 켰어 — 4시간마다 사업 지표 이상을 자동으로 보고 임계치 넘으면 바로 경보할게.'); return; }
+    if (/선제\s*감시\s*(꺼|off|중지|끄)/i.test(raw) && canCommand(event.user)) { settings.sentinel = { enabled: false }; persistSettings(); await postAs(client, channel, thread_ts, LEAD, '선제 감시 껐어. "선제 점검"으로 수동으론 여전히 돌릴 수 있어.'); return; }
     // Phase C: 전략 경영회의 — 부서 제안 수렴 → CEO 우선순위 + Critic 반박 → 게이트 발의
     if (/(경영\s*회의|이사회|전략\s*회의|주간\s*회의|board\s*meeting|위클리\s*리뷰)/i.test(raw)) {
       if (await guardBusy(client, channel, thread_ts)) return;
@@ -2658,6 +2722,9 @@ function buildHomeBlocksNew() {
   B.push({ type: 'header', text: { type: 'plain_text', text: '도핑연구소 운영 콘솔', emoji: true } });
   B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `서비스 ${svcs.length}개(정상 ${upN}) · 진행 작업 ${active.length} · 승인 대기 ${pendCount} · 추적 ${experiments.length}` }] });
   B.push({ type: 'actions', elements: [hbtn('경영회의 열기', 'home_run_board', { style: 'primary' }), hbtn('사업 브리핑', 'home_run_bizbrief'), hbtn('헬스체크', 'home_run_health'), hbtn('운영 브리핑', 'home_run_opsbrief'), hbtn('새로고침', 'home_refresh')] });
+  const senOn = !settings.sentinel || settings.sentinel.enabled !== false;
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*선제 감시* — ${senOn ? '켜짐 · 4시간마다 사업 지표 이상(매출·구독·회원·DAU 급변, 매출0 등) 자동 경보' : '꺼짐'}` } });
+  B.push({ type: 'actions', elements: [hbtn('지금 점검', 'home_sentinel_run'), hbtn(senOn ? '감시 끄기' : '감시 켜기', 'home_sentinel_toggle', { style: senOn ? 'danger' : 'primary' })] });
   B.push({ type: 'divider' });
   // 승인 대기 — 홈에서 바로 승인/넘어가
   B.push({ type: 'section', text: { type: 'mrkdwn', text: `*승인 대기* (${pendCount})` } });
@@ -2739,6 +2806,8 @@ app.action(/^(home_|opscfg_|svcroute_)/, async ({ ack, body, action, client }) =
   try {
     const userId = body.user && body.user.id; const aid = action.action_id;
     if (aid === 'home_refresh') { await publishHome(client, userId); return; }
+    if (aid === 'home_sentinel_toggle') { const on = !settings.sentinel || settings.sentinel.enabled !== false; settings.sentinel = { enabled: !on }; persistSettings(); await publishHome(client, userId); return; }
+    if (aid === 'home_sentinel_run') { const ch = homeTargetChannel(userId); try { await client.chat.postMessage({ channel: userId, text: `선제 점검 돌렸어 — 이상 있으면 ${ch === userId ? '여기' : '<#' + ch + '>'}나 해당 서비스 채널로 경보가 가.` }); } catch (_) {} runBizSentinel(app.client, ch, true).catch(() => {}); setTimeout(() => publishHome(client, userId).catch(() => {}), 1500); return; }
     let m;
     // D5: 정기 업무 설정 변경(주기/요일/시각/채널/켜기)
     if (m = aid.match(/^opscfg_(cad|day|time|ch|tog)_(.+)$/)) {
@@ -2873,6 +2942,10 @@ async function postButtons(channel, thread_ts, buttons) {
       for (const s of svcList()) {
         if (s.url && s.channel && (s.failStreak || 0) >= 2) checkServices(botClient, s.channel, false, true).catch(() => {});
       }
+    }
+    // D3: 사업 선제 감시 — 4시간마다 지표 이상 자동 체크(임계치 돌파 시 즉시 경보·긴급제안). 하루 1회/지표 쿨다운 내장.
+    if (n.m === 0 && n.h % 4 === 0 && (!settings.sentinel || settings.sentinel.enabled !== false) && Object.keys(bizData).length) {
+      runBizSentinel(botClient, null, false).catch(() => {});
     }
     // 매시 정각엔 조용히 감시하다가 새로 죽은 게 있으면 즉시 알림 (실시간 다운 감지)
     if (n.m === 0 && n.h !== OPS_HOUR) {
