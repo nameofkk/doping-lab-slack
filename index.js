@@ -79,7 +79,7 @@ const DESIGN_RULE = `
    컬러: 하나의 일관된 무드에 올인. CSS 변수로 통일. 균등하게 퍼진 소심한 팔레트 말고 '지배색 + 날카로운 강조색'. 흰 배경에 보라 그라데이션 같은 제일 흔한 AI 티는 절대 금지.
    모션: 흩뿌리지 말고 임팩트 한 방. 페이지 로드 때 staggered reveal(animation-delay)이 자잘한 마이크로인터랙션 여러개보다 낫다. HTML은 CSS-only, React는 Motion 라이브러리.
    배경: 단색만 깔지 말고 분위기/깊이를 줘라. 은은한 CSS 그라데이션 레이어, 기하 패턴, 맥락에 맞는 효과.
-3) AI slop 안티패턴 금지(impeccable.style): 이모지를 아이콘으로 쓰기 금지(Lucide 등 실제 아이콘), nested cards 금지, 예측가능한 3카드 그리드 같은 뻔한 레이아웃 금지, 텍스트 대비 4.5:1 이상, 모든 클릭요소 cursor-pointer, 한국어 UI(브랜드명 제외), 빈 상태 화면엔 캐릭터/안내, prefers-reduced-motion 존중, 반응형 375/768/1024/1440px.
+3) AI slop 안티패턴 금지(impeccable.style): 이모지를 아이콘으로 쓰기 금지(Lucide 등 실제 아이콘), nested cards 금지, 예측가능한 3카드 그리드 같은 뻔한 레이아웃 금지, 텍스트 대비 4.5:1 이상, 모든 클릭요소 cursor-pointer, 한국어·영어 병행 UI(i18n, 기본 한국어, 브랜드명 제외), 빈 상태 화면엔 캐릭터/안내, prefers-reduced-motion 존중, 반응형 375/768/1024/1440px.
 4) 컴포넌트 라이브러리 우선(맨바닥 금지): React면 shadcn/ui를 기본으로 — 버튼·카드·폼·다이얼로그 같은 걸 직접 손으로 그리지 말고 shadcn 컴포넌트/블록을 가져다 조합하고 토큰·패턴을 따른다(검증된 컴포넌트가 from-scratch보다 항상 낫다. shadcn MCP/21st.dev Magic MCP 연결돼 있으면 그걸로 실제 컴포넌트 가져와 쓰기). 정적 HTML이면 잘 만든 레퍼런스 패턴을 따른다. 한 번에 다 만들지 말고 컴포넌트 단위로(히어로 → 카드 → 가격/기능 → 푸터).
 5) Polish 패스(필수): 다 만든 뒤 hover/focus/active·loading·empty·error 상태를 빠짐없이 넣고, transition으로 미세 모션을 더한다. gradient·box-shadow 남용은 빼서 premium하게. 그리고 Playwright로 실제 스크린샷 찍어 눈으로 확인 — "될 것이다/잘 나왔을 것이다" 금지, 못 본 건 미확인이라고 말해라.`;
 
@@ -94,12 +94,13 @@ const MONITORING_RULE = `
 const LAUNCH_RULE = `
 
 [출시·마케팅 준비 — 웹/사이트/앱 신규 제작이면 코드에 같이 넣어라]
-1) SEO/공유 메타: 모든 페이지에 title, meta description, Open Graph(og:title/description/image/url), 트위터 카드, lang=ko, 시맨틱 HTML(h1 하나만), 적절하면 JSON-LD. public에 sitemap.xml, robots.txt, favicon 넣어.
-2) 출시 필수 페이지: 개인정보처리방침(/privacy)과 이용약관(/terms)을 한국어 기본 틀로 작성. 연락처 자리는 비워두고 "TODO 연락처" 표시.
+0) 다국어 — 항상 한국어+영어 병행(i18n): UI 텍스트·메타·법무페이지·에러·빈상태 전부 ko/en 두 언어로. 텍스트는 코드에 박지 말고 i18n 구조(예: locales/ko.json·en.json, 또는 next-intl/i18next)로 분리하고, 언어 전환 토글 + 브라우저 언어 자동 감지(기본 ko). 메타에 hreflang alternate(ko/en) 태그. 새 텍스트 추가 시 두 언어 다 채워라.
+1) 검색 최적화 — SEO + GEO 둘 다 싹: (a) SEO: 모든 페이지에 title, meta description, Open Graph(og:title/description/image/url), 트위터 카드, lang=ko, 시맨틱 HTML(h1 하나만), JSON-LD 구조화데이터(Organization/Product/FAQ 등 맞는 타입), public에 sitemap.xml·robots.txt·favicon, canonical 태그. (b) GEO(생성형 엔진 최적화 — ChatGPT·Claude·구글 AI개요 같은 AI검색이 우리를 "인용"하게): 핵심 질문에 직답하는 명료한 문장, FAQ 섹션, 통계·정의·인용가능한 사실을 구조화, llms.txt(사이트 요약·핵심페이지)를 루트에 추가, robots.txt에서 AI 크롤러(GPTBot 등) 허용. 한 문단=한 주장으로 발췌되기 쉽게.
+2) 출시 필수 법무 페이지(법률 근거): 개인정보처리방침(/privacy)·이용약관(/terms)을 그 서비스에 실제 적용되는 법에 근거해 작성 — 한국 대상이면 개인정보보호법·정보통신망법·전자상거래법(해당 시), 글로벌이면 GDPR·CCPA. korean-law MCP가 연결돼 있으면 관련 조문을 찾아 근거로 삼아라. 법정 필수 항목 빠짐없이(수집 개인정보 항목·수집목적·보유기간·제3자 제공·처리위탁·이용자 권리·파기절차·개인정보보호책임자 자리). 중요: AI가 만든 법무문서는 법적 책임이 따르니 페이지에 "이 문서는 초안 — 시행 전 변호사 검토 권장" 명시하고, 사업자 정보·연락처는 "TODO"로. 한국어·영어 둘 다 만들어라.
 3) 성능·접근성: 이미지 최적화랑 lazy-load, 의미있는 alt, 키보드 접근, 기본적인 Lighthouse 신경.
 ${process.env.ANALYTICS_SNIPPET ? '4) 접속 통계(애널리틱스): 다음 스니펫을 head에 그대로 넣어라:\n' + process.env.ANALYTICS_SNIPPET + '\n' : '4) 접속 통계(애널리틱스): 아직 키가 안 주어졌으니 들어갈 자리만 주석 TODO로 잡아두고 실제 코드는 비워둬.'}
 5) 문의/CS: 문의폼 제출은 ${process.env.CONTACT_ENDPOINT ? '다음 주소로 POST 보내게 해(Slack Incoming Webhook이면 브라우저 CORS 때문에 fetch에 mode:"no-cors" 쓰고 본문은 {text: ...} JSON으로): ' + process.env.CONTACT_ENDPOINT : '동작하는 폼 서비스(예: Formspree) 자리표시자로 두고, 제출하면 "접수됐어요" 안내 화면을 보여주게'}. 개인정보 받는 폼이니까 최소한 스팸 막는 허니팟 한 개랑 제출 후 확인 안내는 꼭 넣어.
-6) 결제(유료 기능 있을 때만): 결제는 도도페이먼츠(DodoPayments)를 쓴다. ${process.env.DODO_API_KEY ? 'DODO_API_KEY가 환경변수로 있으니 DodoPayments 체크아웃/구독 연동을 실제로 붙여라(서버에서 키 사용, 클라이언트 노출 금지).' : 'DODO_API_KEY가 아직 없으니, 결제 버튼·플랜 UI까지만 만들고 실제 연동부는 DodoPayments SDK 자리만 TODO 주석으로 잡아둬(키는 비워둠).'} 결제 키는 절대 프론트 코드에 하드코딩하지 마라.`;
+6) 결제(유료 기능 있을 때만): 특정 결제사를 임의로 박지 말고, 이 서비스 성격(국내/해외 사용자, 구독/일회성, 앱/웹, 정산·수수료)에 가장 적합한 결제 서비스 2~3개를 웹서치로 비교해서 장단점과 함께 추천하고 사용자 선택을 받아라(자동 선택 금지 — 추천 후 사용자가 고름). ${process.env.DODO_API_KEY ? 'DODO_API_KEY가 이미 있으니 도도페이먼츠도 후보로(키 있으면 바로 연동 가능).' : ''} 선택되면 그 결제사로 연동하되, 키는 env에서만 쓰고 프론트 코드에 절대 하드코딩하지 마라. 아직 못 정했으면 결제 버튼·플랜 UI까지만 만들고 연동부는 TODO.`;
 
 // 게임/비주얼 많은 프로젝트 — 에셋을 상용 수준으로 (대충 도형 금지)
 const ASSET_RULE = `
