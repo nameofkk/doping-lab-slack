@@ -369,7 +369,7 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
 }
 
 // ── 실제 작업 모드: 레포 클론 → claude 코드 작업 → 브랜치 push → PR → 보고 ──
-let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {}; const pendingPlan = {}; const pendingSchedule = {}; const pendingMcp = {}; const pendingRhythm = {}; const pendingDesign = {}; const limitedResume = {}; // 한도로 멈춘 작업 자동 재개 대기
+let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {}; const pendingPlan = {}; const pendingSchedule = {}; const pendingMcp = {}; const pendingRhythm = {}; const pendingDesign = {}; const pendingPayment = {}; const limitedResume = {}; // 한도로 멈춘 작업 자동 재개 대기
 // B3: 검증된 MCP 후보를 승인 게이트로 제안(자동설치 금지). 승인 시 config 추가+핫리로드, 키 필요하면 👤 안내.
 async function proposeMcp(client, channel, cand, why) {
   if (!cand || pendingMcp[channel]) return;
@@ -2178,7 +2178,7 @@ function launchWork(client, channel, thread_ts, repo, task, newProject, forcePR,
 // 작업(신규 제작이든 기존 수정이든) 시작 전, 정말 방향이 갈리는 중요한 결정이 있으면 사용자에게 먼저 물어봄 (없으면 그냥 진행)
 async function planQuestions(task, newProject) {
   try {
-    const r = await runClaude(`${newProject ? '새 프로젝트' : '기존 프로젝트 수정/작업'} 요청: ${JSON.stringify(task)}\n\n이걸 ${newProject ? '만들기' : '작업하기'} 전에 사용자한테 꼭 확인해야 할 중요한 결정이 있으면 1~3개만 질문으로 뽑아. 정말 방향이 크게 갈려서 잘못 정하면 다시 해야 하는 것만(예: 핵심 컨셉/타겟, 꼭 필요한 기능 범위, 톤·스타일, 플랫폼, 어떤 방식으로 구현할지 갈리는 선택). 요청에 이미 답이 있거나 사소하면 절대 묻지 마(빈 배열).\n\n[중요·반드시 지켜] 오직 위 요청 텍스트만 보고 판단해라. 파일시스템·현재 디렉토리·주변 코드를 들여다보지 마라(거기 뭐가 있든 무관). 그리고 다음은 절대 묻지 마라: 어떤 프로젝트/레포인지, 파일·폴더 경로, 현재 코드가 뭔지, 어디에 있는지 — 그건 시스템이 이미 정했고 너가 물을 게 아니다. 질문은 반드시 한국어로 자연스럽게(영어 금지). JSON만 출력: {"questions":["한국어 질문","..."]}`, MODEL.FAST);
+    const r = await runClaude(`${newProject ? '새 프로젝트' : '기존 프로젝트 수정/작업'} 요청: ${JSON.stringify(task)}\n\n이걸 ${newProject ? '만들기' : '작업하기'} 전에 사용자한테 꼭 확인해야 할 중요한 결정이 있으면 1~3개만 질문으로 뽑아. 정말 방향이 크게 갈려서 잘못 정하면 다시 해야 하는 것만(예: 핵심 컨셉/타겟, 꼭 필요한 기능 범위, 톤·스타일, 플랫폼, 어떤 방식으로 구현할지 갈리는 선택). 특히 "봇이 임의로 정하면 안 되고 사용자만 정할 수 있는 사업·취향 결정"이 있으면 우선 물어라 — 예: 로그인/인증 방식(이메일·구글·카카오·네이버·애플 중 뭐), 유료면 가격·플랜 구조, 핵심 외부 서비스/연동 선택(지도·알림·이메일 등), 브랜드명·톤. (결제사 선택은 따로 물으니 여기선 빼) 요청에 이미 답이 있거나 사소하면 절대 묻지 마(빈 배열).\n\n[중요·반드시 지켜] 오직 위 요청 텍스트만 보고 판단해라. 파일시스템·현재 디렉토리·주변 코드를 들여다보지 마라(거기 뭐가 있든 무관). 그리고 다음은 절대 묻지 마라: 어떤 프로젝트/레포인지, 파일·폴더 경로, 현재 코드가 뭔지, 어디에 있는지 — 그건 시스템이 이미 정했고 너가 물을 게 아니다. 질문은 반드시 한국어로 자연스럽게(영어 금지). JSON만 출력: {"questions":["한국어 질문","..."]}`, MODEL.FAST);
     const m = (r.text || '').match(/\{[\s\S]*\}/);
     const o = m ? JSON.parse(m[0]) : {};
     return Array.isArray(o.questions) ? o.questions.filter(q => typeof q === 'string' && q.trim()).slice(0, 3) : [];
@@ -2228,6 +2228,30 @@ async function runDesignPreview(client, channel, thread_ts, pd, fb) {
     delete pendingDesign[channel]; launchWork(client, channel, thread_ts, pd.repo, pd.task, true, pd.forcePR, pd.projName);
   } finally { try { await sh(`rm -rf ${dir}`); } catch {} }
 }
+// 유료 기능 있는 프로젝트인지(결제 게이트 대상)
+function isPaid(task) { return /유료|결제|구독|프리미엄|페이|pay(ment|wall)?|subscription|premium|월\s*요금|인앱\s*결제|과금|플랜|티어|크레딧\s*구매|paid\s*plan/i.test(String(task || '')); }
+// 시안·결제 게이트 다 거친 뒤 본 빌드로 — 결제 선택 후 호출. UI면 시안 게이트, 아니면 바로 빌드.
+function proceedAfterPaymentGate(client, channel, thread_ts, pd) {
+  const task = pd.payment ? `${pd.task}\n\n[선택된 결제사 — 이걸로 실제 연동(키 없으면 TODO)]\n${pd.payment}` : pd.task;
+  if (settings.designGate !== false && isUIish(pd.task)) runDesignPreview(client, channel, thread_ts, { repo: pd.repo, task, forcePR: pd.forcePR, projName: pd.projName }).catch(() => {});
+  else launchWork(client, channel, thread_ts, pd.repo, task, true, pd.forcePR, pd.projName);
+}
+// ── 결제 게이트: 유료 신규 프로젝트면 빌드 전에 적합한 결제사 2~3개 웹서치 추천 → 버튼으로 사용자 선택 ──
+async function runPaymentGate(client, channel, thread_ts, pd) {
+  const arch = byName('윈터') || LEAD;
+  startTyping(channel);
+  try {
+    const r = await runClaude(`너는 도핑연구소 아키텍트(윈터)다. 아래 서비스에 유료 기능이 있어 결제 연동이 필요하다. 이 서비스 성격(국내/해외 사용자·구독/일회성·앱/웹·정산/수수료)에 가장 적합한 결제 서비스 2~3개를 웹서치로 비교해 추천해라. 한국 위주면 토스페이먼츠·포트원(아임포트)·도도페이먼츠 같은 국내, 글로벌이면 Stripe·Paddle·Lemon Squeezy 등도 고려.${STYLE}${UNTRUSTED_PREAMBLE}\n[서비스]\n${wrapUntrusted(pd.task)}\n\n먼저 추천 이유 2~4줄(반말, 각 후보 수수료·장단점). 그 다음 줄에 JSON으로만: {"options":[{"name":"결제사명(짧게)","why":"왜 적합 한줄"}]} (2~3개).`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 150000, true);
+    stopTyping(channel);
+    const raw = r.text || ''; const jm = raw.match(/\{[\s\S]*"options"[\s\S]*\}/);
+    let opts = []; if (jm) { try { opts = (JSON.parse(jm[0]).options || []).filter(o => o && o.name).slice(0, 3); } catch (_) {} }
+    const prose = deMd(raw.replace(/```[\s\S]*?```/g, '').replace(/\{[\s\S]*"options"[\s\S]*\}/, '').trim());
+    if (!opts.length) { await postAs(client, channel, thread_ts, arch, '결제사 추천을 못 뽑았어 — 일단 결제 UI까지만 만들고 결제사는 나중에 정하자.'); proceedAfterPaymentGate(client, channel, thread_ts, { ...pd, payment: null }); return; }
+    pendingPayment[channel] = { ...pd, options: opts, at: Date.now() };
+    await postAs(client, channel, thread_ts, arch, `결제 들어가니까 결제사부터 골라줘.${prose ? '\n' + prose.slice(0, 900) : ''}\n\n${opts.map((o, i) => `${i + 1}. ${o.name} — ${o.why || ''}`).join('\n')}\n\n번호 버튼 누르거나 "1"처럼 말해. 다른 거 쓰려면 그 이름 말해도 돼. 결제 빼려면 "결제 없이".`);
+    await postButtons(channel, thread_ts, opts.map((o, i) => ({ text: o.name.slice(0, 70), id: 'pay_' + (i + 1), style: i === 0 ? 'primary' : undefined })).concat([{ text: '결제 없이', id: 'pay_skip' }]));
+  } catch (e) { try { stopTyping(channel); } catch (_) {} proceedAfterPaymentGate(client, channel, thread_ts, { ...pd, payment: null }); }
+}
 async function startWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName) {
   // 이미 질문 던져놓고 답 기다리는 중이면 똑같은 질문 또 안 함 (같은 요청 재전송 시 무한 질문 방지)
   if (pendingProject[channel]) { await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}아까 물어본 거에 답해주면 바로 들어갈게. 알아서 정해도 되면 "알아서 해"라고 해도 돼.`); return; }
@@ -2251,6 +2275,8 @@ async function startWork(client, channel, thread_ts, repo, task, newProject, for
     await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오 좋다. ${newProject ? '만들기' : '작업'} 전에 이것만 먼저 정해주라:\n${qs.map((q, i) => `${i + 1}. ${q}`).join('\n')}\n\n답 주면 그대로 들어갈게. 알아서 정해도 되면 "알아서 해"라고 해도 돼.`);
     return;
   }
+  // 결제 게이트: 유료 신규 프로젝트면 빌드 전에 적합한 결제사를 추천·선택받음(→ 끝나면 시안 게이트/빌드로 체이닝). 오토파일럿이면 위에서 리턴됨.
+  if (newProject && isPaid(task)) { runPaymentGate(client, channel, thread_ts, { repo, task, forcePR, projName }).catch(() => {}); return; }
   // 시안 게이트: 신규 UI 프로젝트면 본 빌드 전에 디자인 목업(메인화면)을 먼저 보여주고 승인/피드백. (오토파일럿이면 위에서 이미 리턴됨 — 게이트 없이 직행)
   if (newProject && settings.designGate !== false && isUIish(task)) {
     runDesignPreview(client, channel, thread_ts, { repo, task, forcePR, projName }).catch(() => {});
@@ -2373,6 +2399,18 @@ async function handle(event, client) {
         const missing = (c.needs || []).filter(k => !process.env[k]);
         await postAs(client, channel, thread_ts, byName('윈터') || LEAD, ok ? `🔌 ${c.name} MCP 설정 추가하고 핫리로드했어.${missing.length ? `\n⚠️ 근데 키가 아직 없어(👤): ${missing.join(', ')} — Railway env에 넣고 "MCP 리로드"하면 그때부터 진짜로 작동해.` : ' 키도 다 있어서 바로 쓸 수 있어.'}\n지금 연결: ${mcpServerNames().join(', ')}` : `${c.name} 추가하다 오류났어. 수동으로 ${USER_MCP_FILE}에 넣어줘.`);
         return;
+      }
+    }
+    // 결제 게이트 응답 — 번호/이름 선택, "결제 없이"로 스킵
+    if (pendingPayment[channel]) {
+      const pp = pendingPayment[channel];
+      if (pp.at && Date.now() - pp.at > 30 * 60 * 1000) { delete pendingPayment[channel]; }
+      else if (/^(넘어가|취소|결제\s*없이|결제\s*빼|스킵|나중에|안\s?해)/.test(raw) && canCommand(event.user)) { delete pendingPayment[channel]; await postAs(client, channel, thread_ts, byName('윈터') || LEAD, '결제는 나중에 정할게 — UI까지만 만들고 연동은 TODO로 둘게.'); proceedAfterPaymentGate(client, channel, thread_ts, { repo: pp.repo, task: pp.task, forcePR: pp.forcePR, projName: pp.projName, payment: null }); return; }
+      else if (canCommand(event.user)) {
+        const nums = (raw.match(/\d+/g) || []).map(Number); let chosen = null;
+        if (nums.length && pp.options[nums[0] - 1]) chosen = pp.options[nums[0] - 1].name;
+        else { const byNm = pp.options.find(o => raw.includes(o.name) || raw.toLowerCase().includes(String(o.name).toLowerCase())); if (byNm) chosen = byNm.name; else if (raw.length > 2 && raw.length < 40 && !/\?\s*$/.test(raw)) chosen = raw.trim(); } // 직접 입력한 결제사명
+        if (chosen) { delete pendingPayment[channel]; await postAs(client, channel, thread_ts, byName('윈터') || LEAD, `오케이, ${chosen}로 연동할게.`); proceedAfterPaymentGate(client, channel, thread_ts, { repo: pp.repo, task: pp.task, forcePR: pp.forcePR, projName: pp.projName, payment: chosen }); return; }
       }
     }
     // 시안 게이트 응답 — 진행/시안다시/넘어가/피드백
@@ -3167,20 +3205,22 @@ app.action(/^(home_|opscfg_|svcroute_)/, async ({ ack, body, action, client }) =
   } catch (e) { try { console.log('[home-action] err', String(e).slice(0, 120)); } catch (_) {} }
 });
 // L3: Block Kit 버튼 클릭 → 동등한 텍스트 명령을 합성해 handle() 재사용(로직 무리팩터·텍스트 폴백 유지). 메인앱(botClient)이 올린 버튼만 여기로 라우팅됨.
-app.action(/^(dispatch|plan|sched|mcp|design)_/, async ({ ack, body, action }) => {
+app.action(/^(dispatch|plan|sched|mcp|design|pay)_/, async ({ ack, body, action }) => {
   await ack();
   try {
-    const map = { dispatch_run: '실행', dispatch_skip: '넘어가', plan_go: '진행', plan_skip: '넘어가', sched_register: '스케줄 등록', sched_once: '1회만', sched_cancel: '취소', mcp_add: '붙여', mcp_skip: '넘어가', design_go: '진행', design_redo: '시안 다시', design_skip: '넘어가' };
-    const label = { dispatch_run: '실행', dispatch_skip: '넘어가기', plan_go: '진행', plan_skip: '넘어가기', sched_register: '스케줄 등록', sched_once: '1회만', sched_cancel: '취소', mcp_add: 'MCP 붙이기', mcp_skip: '넘어가기', design_go: '이 방향 진행', design_redo: '시안 다시', design_skip: '넘어가기' };
+    const map = { dispatch_run: '실행', dispatch_skip: '넘어가', plan_go: '진행', plan_skip: '넘어가', sched_register: '스케줄 등록', sched_once: '1회만', sched_cancel: '취소', mcp_add: '붙여', mcp_skip: '넘어가', design_go: '진행', design_redo: '시안 다시', design_skip: '넘어가', pay_skip: '결제 없이' };
+    const label = { dispatch_run: '실행', dispatch_skip: '넘어가기', plan_go: '진행', plan_skip: '넘어가기', sched_register: '스케줄 등록', sched_once: '1회만', sched_cancel: '취소', mcp_add: 'MCP 붙이기', mcp_skip: '넘어가기', design_go: '이 방향 진행', design_redo: '시안 다시', design_skip: '넘어가기', pay_skip: '결제 없이' };
     const pick = action.action_id.match(/^dispatch_n(\d+)$/); // 개별 번호 버튼
-    const text = pick ? `실행 ${pick[1]}` : map[action.action_id]; if (!text) return;
+    const payPick = action.action_id.match(/^pay_(\d+)$/); // 결제사 번호 선택
+    const text = pick ? `실행 ${pick[1]}` : payPick ? payPick[1] : map[action.action_id]; if (!text) return;
     if (pick) { label[action.action_id] = `${pick[1]}번 실행`; }
+    if (payPick) { label[action.action_id] = `${payPick[1]}번 결제사`; }
     const channel = (body.channel && body.channel.id) || (body.container && body.container.channel_id); if (!channel) return;
     // 1회용: 클릭 즉시 버튼 메시지를 결과 텍스트로 교체(연타로 중복 작업·전역중단 터지던 버그). botClient가 올린 메시지라 botClient로 교체.
     const msgTs = body.message && body.message.ts;
     if (msgTs) { try { await botClient.chat.update({ channel, ts: msgTs, text: `✅ ${label[action.action_id] || text}`, blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `✅ 선택: *${label[action.action_id] || text}*` } }] }); } catch (_) {} }
     // 스테일 클릭 가드: 해당 대기 결정이 이미 처리됐으면(없으면) 무시 — 늦게/중복 눌러도 엉뚱한 동작 안 함.
-    const pend = action.action_id.startsWith('dispatch') ? pendingDispatch : action.action_id.startsWith('plan') ? pendingPlan : action.action_id.startsWith('mcp') ? pendingMcp : action.action_id.startsWith('design') ? pendingDesign : pendingSchedule;
+    const pend = action.action_id.startsWith('dispatch') ? pendingDispatch : action.action_id.startsWith('plan') ? pendingPlan : action.action_id.startsWith('mcp') ? pendingMcp : action.action_id.startsWith('design') ? pendingDesign : action.action_id.startsWith('pay') ? pendingPayment : pendingSchedule;
     if (!pend[channel]) { try { console.log('[action] stale', action.action_id, channel); } catch (_) {} return; }
     await handle({ channel, user: body.user && body.user.id, ts: 'btn-' + (action.action_ts || (body.actions && body.actions[0] && body.actions[0].action_ts) || '0'), text }, app.client);
   } catch (e) { try { console.log('[action] err', String(e).slice(0, 120)); } catch (_) {} }
