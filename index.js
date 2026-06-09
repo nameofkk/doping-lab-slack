@@ -52,7 +52,7 @@ const TEAM = [
   { name: '윈터 (아키텍트)', kw: ['윈터', '아키텍트', '아키', '배포', '운영', '데브옵스', 'devops', '인프라', '빌드', '서버'], emoji: ':building_construction:', model: MODEL.TEAM, tokenEnv: 'SLACK_TOKEN_ARCHITECT',
     prompt: '너는 도핑연구소 아키텍트 겸 엔지니어이고 이름은 윈터다. 시크하고 군더더기 없이 구조·스택을 정하고, 빌드·테스트·배포·인프라·운영(헬스체크/장애대응/재시작)·의존성 관리까지 직접 책임진다. 기술/배포 리스크를 깔끔하게 정리한다.' },
   { name: '우정잉 (보안)', kw: ['우정잉', '정잉', '보안', '취약점', '시크릿'], emoji: ':lock:', model: MODEL.TEAM, tokenEnv: 'SLACK_TOKEN_SECURITY',
-    prompt: '너는 도핑연구소 보안 엔지니어이고 이름은 우정잉이다. 꼼꼼하고 의심 많게 인증·권한·시크릿·개인정보·규제 리스크와 코드 취약점(보안 리뷰·의존성 취약점 스캔)을 파고들고 완화책을 댄다.' },
+    prompt: '너는 도핑연구소 보안·법무 엔지니어이고 이름은 우정잉이다. 꼼꼼하고 의심 많게 인증·권한·시크릿·개인정보·규제 리스크와 코드 취약점(보안 리뷰·의존성 취약점 스캔)을 파고들고 완화책을 댄다. 법무 검토도 네 일이다 — 개인정보처리방침·이용약관이 실제 법(한국이면 개인정보보호법·정보통신망법·전자상거래법, 글로벌이면 GDPR·CCPA)의 법정 필수 항목(수집항목·목적·보유기간·제3자제공·이용자권리·파기·책임자)을 갖췄는지 점검한다. korean-law MCP가 연결돼 있으면 실제 조문을 검색해 근거로 댄다. 단 AI가 만든 법무문서는 법적 책임이 따르니 "변호사 검토 권장"을 반드시 명시하고, 단정적 법률자문은 피한다.' },
   { name: '영듀 (마케터)', kw: ['영듀', '마케터', '마케팅'], emoji: ':mega:', model: MODEL.TEAM, tokenEnv: 'SLACK_TOKEN_MARKETING',
     prompt: '너는 도핑연구소 마케터이고 이름은 영듀다. 텐션 높고 유쾌하게 바이럴·차별점·타깃·GTM을 재밌게 풀어낸다.' },
   { name: '안다연 (반론자)', kw: ['안다연','다연'], emoji: ':smiling_imp:', model: MODEL.TEAM, tokenEnv: 'SLACK_TOKEN_DEVIL',
@@ -232,11 +232,10 @@ const USER_MCP_FILE = process.env.USER_MCP_FILE || '/data/mcp.json';
 let mcpPath = null;
 function buildMcpConfig() {
   try {
-    const hasUser = fs.existsSync(USER_MCP_FILE);
-    if (!hasUser) { mcpPath = process.env.FIGMA_API_KEY ? '/app/.mcp.json' : null; return; } // 사용자 설정 없으면 기존 figma 단독(검증된 경로)
     const servers = {};
     if (process.env.FIGMA_API_KEY) servers.figma = { command: 'figma-developer-mcp', args: ['--stdio'], env: { FIGMA_API_KEY: process.env.FIGMA_API_KEY } };
-    try { const u = JSON.parse(fs.readFileSync(USER_MCP_FILE, 'utf8')); Object.assign(servers, u.mcpServers || u || {}); } catch {}
+    if (process.env.LAW_OC) servers['korean-law'] = { command: 'npx', args: ['-y', 'korean-law-mcp'], env: { LAW_OC: process.env.LAW_OC } }; // 법무검토용 한국 법령 MCP — LAW_OC(law.go.kr 무료키, 👤) 있으면 자동 연결
+    try { if (fs.existsSync(USER_MCP_FILE)) { const u = JSON.parse(fs.readFileSync(USER_MCP_FILE, 'utf8')); Object.assign(servers, u.mcpServers || u || {}); } } catch {}
     if (!Object.keys(servers).length) { mcpPath = null; return; }
     fs.writeFileSync('/tmp/mcp-merged.json', JSON.stringify({ mcpServers: servers }), { mode: 0o644 }); // claude는 uid1000으로 읽으니 world-readable
     mcpPath = '/tmp/mcp-merged.json';
@@ -263,6 +262,7 @@ const MCP_REGISTRY = [
   { name: 'fetch', desc: '웹페이지 가져와 읽기(키 불필요)', triggers: /웹페이지\s*(가져|읽)|url\s*가져|크롤링|스크랩|페이지\s*긁/i, needs: [], config: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-fetch'] } },
   { name: 'shadcn', desc: 'shadcn/ui 실제 컴포넌트·블록 검색/사용 — 맨바닥 UI 방지(키 불필요)', triggers: /shadcn|ui\s*컴포넌트|컴포넌트\s*(라이브러리|가져|만들)|화면\s*(만들|디자인)|프론트\s*(만들|작업)|랜딩\s*페이지|대시보드\s*(만들|디자인)|디자인\s*(개선|퀄|예쁘)/i, needs: [], config: { command: 'npx', args: ['-y', '@jpisnice/shadcn-ui-mcp-server'] } },
   { name: '21st-magic', desc: '21st.dev Magic — 디자인 엔지니어 감각의 고퀄 UI 컴포넌트 생성', triggers: /21st|magic\s*ui|고퀄\s*(ui|컴포넌트)|예쁜\s*(ui|컴포넌트|화면|디자인)|세련된\s*(ui|디자인)/i, needs: ['TWENTYFIRST_API_KEY'], config: { command: 'npx', args: ['-y', '@21st-dev/magic@latest'], env: { API_KEY: '${TWENTYFIRST_API_KEY}' } } },
+  { name: 'korean-law', desc: '한국 법령·판례·조문 검색+인용검증(법무 검토용)', triggers: /법령|법률|판례|개인정보보호법|약관|개인정보처리방침|법무|규제\s*검토|조문/i, needs: ['LAW_OC'], config: { command: 'npx', args: ['-y', 'korean-law-mcp'], env: { LAW_OC: '${LAW_OC}' } } },
 ];
 function suggestMcp(taskText) { const connected = mcpServerNames(); return MCP_REGISTRY.filter(m => m.triggers.test(String(taskText || '')) && !connected.includes(m.name)); }
 // Q4: 서킷브레이커 — claude 연속 실패(N=5) 시 60s 회로 개방. 개방 동안 3×재시도 난타 대신 즉시 강등 응답(장애 증폭 방지).
@@ -368,6 +368,20 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
   }
 }
 
+// 규제 건드리는 작업인지(법무 검토 트리거 — 기존 레포 작업용)
+function regulatedTask(task) { return /개인정보|회원|가입|로그인|인증|수집|결제|구독|금융|송금|환전|코인|투자|의료|건강|병원|약|성인|19금|미성년|아동|청소년|연령|게임\s*등급|도박|베팅|복권|크롤|스크랩|저작권|콘텐츠\s*수집|리뷰\s*수집|광고|마케팅\s*문구|추천\s*보상|위치정보|얼굴|생체|민감정보/i.test(String(task || '')); }
+// 법무·규제 적합성 검토 — (1)서비스 개념·기능이 법/규제 위배 소지 (2)개인정보처리방침·약관 법정 필수항목. korean-law MCP 있으면 조문 근거. 변호사 검토 권장 명시.
+async function runLegalReview(client, channel, thread_ts, dir, repo, task) {
+  try {
+    const sec = byName('우정잉') || LEAD;
+    const grep = await sh(`grep -rliE "privacy|terms|개인정보|이용약관|약관" ${dir} --include=*.tsx --include=*.ts --include=*.jsx --include=*.js --include=*.html --include=*.md 2>/dev/null | grep -viE "node_modules|\\.git" | head -5`, dir);
+    const hasPages = /privacy|terms|개인정보|약관/i.test((grep && grep.out) || '');
+    await postAs(client, channel, thread_ts, sec, '법무·규제 적합성 검토할게.');
+    const r = await runClaude(`${sec.prompt}${STYLE}\n이 서비스/작업을 법무·규제 관점에서 검토해라. 두 가지를 본다.\n[작업·서비스]\n${wrapUntrusted(String(task || repo))}\n\n1) 규제 적합성: 이 서비스의 개념·기능이 법/규제에 위배될 소지가 있는지 — 개인정보(개인정보보호법·정보통신망법·GDPR), 전자상거래(전자상거래법·표시광고법), 금융/결제(전자금융거래법), 콘텐츠·연령(청소년보호법·게임산업법·등급), 저작권·플랫폼 약관(크롤링·리뷰/콘텐츠 수집 시 타 플랫폼 ToS·저작권), 위치/생체/민감정보, 다크패턴·허위광고. 해당되는 것만 구체 리스크 + 완화책.\n2) 법무 페이지: ${hasPages ? '레포의 개인정보처리방침·이용약관을 실제로 열어 법정 필수항목(수집항목·목적·보유기간·제3자제공·처리위탁·이용자권리·파기·책임자) 누락·위험문구 점검.' : '법무 페이지가 없으면 개인정보 수집 여부 등에 따라 뭐가 필요한지 짚어라.'}\nkorean-law MCP가 연결돼 있으면 관련 조문을 검색해 근거로 대라(없으면 일반 법지식 + "조문 미확인" 표시). 위배 소지 없으면 "큰 규제 이슈는 안 보임"이라고 분명히. 끝에 "이건 초안 수준 검토 — 실제 출시 전 변호사 검토 권장" 명시. 단정적 법률자문 금지. 마크다운 금지, 반말, 핵심만.`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 220000, true);
+    if (r.limited) return;
+    if (r.text && r.ok !== false) await postAs(client, channel, thread_ts, sec, `법무·규제 검토\n${deMd(r.text.trim()).slice(0, 4000)}`);
+  } catch (_) {}
+}
 // ── 실제 작업 모드: 레포 클론 → claude 코드 작업 → 브랜치 push → PR → 보고 ──
 let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {}; const pendingPlan = {}; const pendingSchedule = {}; const pendingMcp = {}; const pendingRhythm = {}; const pendingDesign = {}; const pendingPayment = {}; const limitedResume = {}; // 한도로 멈춘 작업 자동 재개 대기
 // B3: 검증된 MCP 후보를 승인 게이트로 제안(자동설치 금지). 승인 시 config 추가+핫리로드, 키 필요하면 👤 안내.
@@ -928,6 +942,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   await sh(`git commit -m "도핑연구소: ${cmsg}"`, dir);
   jobUpdate(channel, { stage: '빌드·배포' }); // R9: 체크포인트
   prog.phase('빌드 되나 돌려보고 라이브로 띄우는 중');
+  if (!workCancel[channel] && (newProject || regulatedTask(task))) await runLegalReview(client, channel, thread_ts, dir, repo, task).catch(() => {}); // C: 법무·규제 검토 — 신규 빌드 OR 규제 건드리는 기존작업(개인정보·결제·콘텐츠수집 등)
   const finalGaps = (newProject || uiish) ? await checkAppGaps(dir) : []; // 최종 빈구멍 — "다 끝냈어 상용수준" 거짓완료 방지
   const incomplete = finalGaps.length > 0 || !criticPass; // R3: 심사 미통과도 미완성으로
   const doneHead = incomplete ? `⚠️ 초안은 올렸는데 아직 미완성이야 — ${finalGaps.length ? finalGaps.join(', ') : '심사에서 일부 미충족(위 지적 확인)'}. 이대로는 상용 아니고, 더 채워야 진짜 동작해. ("이어서"라고 하면 계속 채울게)` : '다 끝냈어! (심사 통과)';
@@ -2715,6 +2730,14 @@ async function handle(event, client) {
       else if (/(재무\s*검토|재무\s*제안|cfo|런웨이|번레이트|유닛이코노믹스|비용\s*검토)/i.test(raw)) dk = 'finance';
       else if (/(경쟁\s*동향|경쟁사|시장\s*분석|시장\s*동향|경쟁\s*검토|트렌드\s*조사)/i.test(raw)) dk = 'market';
       if (dk) { if (await guardBusy(client, channel, thread_ts)) return; const fr = repoFromText(raw); activeWork[channel] = { task: '부서 검토', started: Date.now() }; runDeptLoop(client, channel, dk, true, false, fr || null).catch(() => {}).finally(() => { activeWork[channel] = null; }); return; } // #5 중복방지 + 서비스명 있으면 그 서비스만
+    }
+    // 법무·규제 사전 검토 — 아이디어/기능을 클론 없이 개념 검토(우정잉)
+    if (/(법무|규제|법률)\s*(검토|체크|점검|괜찮|문제\s*없|적법|위배|위반)/i.test(raw) && !/오류|에러/i.test(raw)) {
+      if (await guardBusy(client, channel, thread_ts)) return;
+      const sec = byName('우정잉') || LEAD;
+      activeWork[channel] = { task: '법무 검토', started: Date.now() };
+      (async () => { try { await postAs(client, channel, thread_ts, sec, '법무·규제 관점에서 봐줄게.'); const r = await runClaude(`${sec.prompt}${STYLE}\n아래 서비스/기능 아이디어가 법·규제에 위배될 소지가 있는지 검토해라(개인정보보호법·정보통신망법·전자상거래법·표시광고법·저작권·청소년/연령·금융·플랫폼 약관 등 해당되는 것만). 구체 리스크 + 완화책 + 끝에 "초안 수준 검토 — 출시 전 변호사 검토 권장". korean-law MCP 연결돼 있으면 조문 근거로. 위배 소지 없으면 분명히 그렇게. 마크다운 금지 반말 핵심만.${UNTRUSTED_PREAMBLE}\n\n${wrapUntrusted(raw)}`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 150000, true); if (!r.limited) await postAs(client, channel, thread_ts, sec, `법무·규제 검토\n${deMd((r.text || '').trim()).slice(0, 3000)}`); } finally { activeWork[channel] = null; } })();
+      return;
     }
     // D2: 운영 리듬 제안 수동 실행
     if (/(운영\s*리듬|리듬\s*점검|리듬\s*제안|스케줄\s*제안|스케줄\s*조정\s*제안)/i.test(raw)) {
