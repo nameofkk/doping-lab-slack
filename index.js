@@ -119,10 +119,12 @@ async function postAs(defaultClient, channel, thread_ts, persona, text) {
     try { stopTyping(channel); } catch (_) {} // 답 나가면 입력중 스피너 제거
     text = scrubOutput(text); // Q2: 발신 직전 시크릿 마스킹(모든 발신 단일 통로)
     const wc = clientFor(persona);
-    if (wc) await wc.chat.postMessage({ channel, thread_ts, text });          // 진짜 별도 멤버
-    else await defaultClient.chat.postMessage({ channel, thread_ts, text, username: persona.name, icon_emoji: persona.emoji });
+    let res;
+    if (wc) res = await wc.chat.postMessage({ channel, thread_ts, text });          // 진짜 별도 멤버
+    else res = await defaultClient.chat.postMessage({ channel, thread_ts, text, username: persona.name, icon_emoji: persona.emoji });
     recordMsg(channel, persona.name, text);
-  } catch (e) { /* not_in_channel 등 → 채널에 초대 안 된 봇은 조용히 패스 */ }
+    return res || null; // 스레드 앵커(ts) 필요 시 사용 — 기존 호출은 반환값 무시라 안전
+  } catch (e) { /* not_in_channel 등 → 채널에 초대 안 된 봇은 조용히 패스 */ return null; }
 }
 // 타이핑 연출 — 슬랙 네이티브 "작성 중"은 봇이 못 쓰니(RTM 폐기) "입력 중 ·" 임시 메시지를 1초마다 순환(로딩 스피너). 채널당 1개, 봇이 답(postAs)하면 자동 삭제. 모든 대화에 적용.
 const TYPING_FRAMES = ['입력 중', '입력 중 ·', '입력 중 · ·', '입력 중 · · ·'];
@@ -1636,13 +1638,22 @@ async function runBoardMeeting(client, channel, manual = false) {
     const digest = deMd(craw.replace(/```[\s\S]*?```/g, '').replace(/\{[\s\S]*"focus"[\s\S]*\}/, '').trim()) || '(회의록 생성 실패)';
     let focus = [];
     if (cjm) { try { focus = (JSON.parse(cjm[0]).focus || []).filter(f => f && f.task && ['investigate', 'build'].includes(f.kind)).slice(0, 3); } catch (_) {} }
-    await postAs(client, channel, undefined, byName('한로로') || LEAD, `경영회의 회의록\n${digest.slice(0, 2400)}`); // 스피너 정리
-    if (!focus.length) { await postAs(client, channel, undefined, LEAD, '이번 주 집중 과제로 묶을 만큼 확실한 게 없어서 발의는 보류할게. 부서 제안들은 위 회의록 참고.'); return; }
+    // 회의록 요약 = top-level(별도 글, 스레드 앵커). 실제 심의 대화는 이 글의 댓글(스레드)로.
+    const headRes = await postAs(client, channel, undefined, byName('한로로') || LEAD, `경영회의 회의록\n${digest.slice(0, 2400)}`); // 스피너 정리
+    const anchor = (headRes && headRes.ts) || undefined;
+    // 댓글: 각 부서가 실제로 뭘 보고 뭘 제안했는지 — 부서장 본인이 스레드에 발언(실제 대화)
+    for (const c of collected) {
+      const dp = (DEPTS[c.dept] && byName(DEPTS[c.dept].persona)) || LEAD;
+      const il = (c.items || []).map((x, i) => `  ${i + 1}. ${x.task} [${x.kind === 'build' ? '코드수정' : '조사'}]`).join('\n');
+      await postAs(client, channel, anchor, dp, `${c.name} 검토\n${(c.prose || '').slice(0, 1600)}${il ? `\n제안:\n${il}` : ''}`);
+    }
+    if (!focus.length) { await postAs(client, channel, undefined, LEAD, '이번 주 집중 과제로 묶을 만큼 확실한 게 없어서 발의는 보류할게. 부서 심의는 회의록 댓글 참고.'); return; }
     const focusText = focus.map((f, i) => `${i + 1}. [${f.repo}] ${f.task} (타겟: ${f.target || '?'} / 근거: ${f.why || '?'})`).join('\n');
-    // Critic(안다연) 반박
+    startTyping(channel); // 반론 생성 동안 생존표시
+    // Critic(안다연) 반박 — 회의록 댓글(심의의 일부). 본인이 말하므로 헤더에 이름 안 붙임.
     const critOut = await runClaude(`너는 도핑연구소 반론자(안다연)다. CEO가 이번 주 집중 과제로 아래를 골랐다. 각각 리스크·근거부족·놓친 점을 날카롭게 따지고, 정말 1순위가 맞는지 반박해라. 통과시킬 건 통과, 빼야 할 건 분명히 빼라고. 짧게 반말 3~6줄, 지문·메타서술 금지.${STYLE}${UNTRUSTED_PREAMBLE}\n[CEO가 고른 이번 주 집중]\n${wrapUntrusted(focusText)}\n\n[참고 지표]\n${wrapUntrusted(scoreCtx)}`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 150000);
     const critTxt = deMd((critOut.text || '').replace(/```[\s\S]*?```/g, '').trim());
-    if (critTxt) await postAs(client, channel, undefined, byName('안다연') || LEAD, `반론 검증 (안다연)\n${critTxt.slice(0, 1500)}`);
+    if (critTxt) await postAs(client, channel, anchor, byName('안다연') || LEAD, `반론 검증\n${critTxt.slice(0, 1500)}`); else stopTyping(channel);
     log('info', 'board-meeting', { focus: focus.length, depts: collected.length });
     logDecision(channel, 'board-meeting', `이번 주 집중 ${focus.length}건: ${focus.map(f => f.task.slice(0, 40)).join(' / ')}`);
     // 게이트 발의(전략 결정 = 프로드 다수 → 강제 게이트)
