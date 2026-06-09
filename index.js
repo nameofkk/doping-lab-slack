@@ -1677,7 +1677,7 @@ async function runBizSentinel(client, channel, manual = false) {
       if (!fresh.length) continue;
       fresh.forEach(b => { bizAlertSeen[rp + '|' + b.key] = day; });
       anyAlert = true;
-      const name = rp.split('/').pop(); const ch = channelForWork(rp, 'default', defCh);
+      const name = rp.split('/').pop(); const ch = channelForWork(rp, 'sentinel', (settings.sentinel && settings.sentinel.channel) || defCh); // 선제경보 전용 채널 > 서비스 sentinel override > 전사기본
       const lines = fresh.map(b => `- ${b.crit ? '[긴급] ' : ''}${b.label}: ${b.why}${b.pct != null ? ` (${(b.from != null ? b.from.toLocaleString() : '?')}→${b.to.toLocaleString()}, ${b.pct > 0 ? '+' : ''}${b.pct}%)` : ''}`).join('\n');
       if (ch) await postAs(client, ch, undefined, byName('김채원') || LEAD, `선제 경보 — ${name}\n지표 이상이 잡혀서 정기 회의 안 기다리고 바로 올려.\n${lines}`);
       if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: `[선제 경보] ${name}\n${lines}` }).catch(() => {});
@@ -2754,8 +2754,9 @@ function buildHomeBlocksNew() {
   B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `서비스 ${svcs.length}개(정상 ${upN}) · 진행 작업 ${active.length} · 승인 대기 ${pendCount} · 추적 ${experiments.length}` }] });
   B.push({ type: 'actions', elements: [hbtn('경영회의 열기', 'home_run_board', { style: 'primary' }), hbtn('사업 브리핑', 'home_run_bizbrief'), hbtn('헬스체크', 'home_run_health'), hbtn('운영 브리핑', 'home_run_opsbrief'), hbtn('새로고침', 'home_refresh')] });
   const senOn = !settings.sentinel || settings.sentinel.enabled !== false;
-  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*선제 감시* — ${senOn ? '켜짐 · 4시간마다 사업 지표 이상(매출·구독·회원·DAU 급변, 매출0 등) 자동 경보' : '꺼짐'}` } });
-  B.push({ type: 'actions', elements: [hbtn('지금 점검', 'home_sentinel_run'), hbtn(senOn ? '감시 끄기' : '감시 켜기', 'home_sentinel_toggle', { style: senOn ? 'danger' : 'primary' })] });
+  const senCh = settings.sentinel && settings.sentinel.channel;
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*선제 감시* — ${senOn ? '켜짐 · 4시간마다 사업 지표 이상(매출·구독·회원·DAU 급변, 매출0 등) 자동 경보' : '꺼짐'}\n경보 채널: ${senCh ? `<#${senCh}>` : '서비스별 기본 채널'}` } });
+  B.push({ type: 'actions', elements: [hbtn('지금 점검', 'home_sentinel_run'), hbtn(senOn ? '감시 끄기' : '감시 켜기', 'home_sentinel_toggle', { style: senOn ? 'danger' : 'primary' }), chanSel('home_sentinel_ch', senCh, '경보 채널')] });
   B.push({ type: 'divider' });
   // 승인 대기 — 홈에서 바로 승인/넘어가
   B.push({ type: 'section', text: { type: 'mrkdwn', text: `*승인 대기* (${pendCount})` } });
@@ -2839,6 +2840,17 @@ function buildHomeBlocksNew() {
 }
 async function publishHome(client, userId) { try { await client.views.publish({ user_id: userId, view: { type: 'home', blocks: buildHomeBlocksNew() } }); } catch (e) { try { console.log('[home] publish 실패(앱설정에서 Home 탭 켜야 함?):', String(e && e.data && e.data.error || e).slice(0, 120)); } catch (_) {} } }
 app.event('app_home_opened', async ({ event, client }) => { if (event.tab && event.tab !== 'home') return; await publishHome(client, event.user); });
+// 팀장(한로로) 봇이 새 채널에 초대되면 → 나머지 직원 봇 전부 자동 초대(채널마다 일일이 초대 안 해도 됨)
+app.event('member_joined_channel', async ({ event }) => {
+  try {
+    if (LEAD.userId && event.user === LEAD.userId && event.channel) {
+      joinedChannels.delete(event.channel); // 재초대 강제
+      await ensureMembers(event.channel);
+      log('info', 'team-auto-invite', { channel: event.channel });
+      try { await postAs(botClient, event.channel, undefined, LEAD, '안녕! 도핑연구소 팀 들어왔어. 나머지 직원들도 다 초대해놨고, 여기서 바로 일 시키면 돼. ("명령어"로 메뉴 봐.)'); } catch (_) {}
+    }
+  } catch (_) {}
+});
 // D5: 홈 버튼 액션 라우팅 — 채널 컨텍스트 없는 홈 클릭을 적절한 채널로 보냄(전사>서비스>DM)
 function homeTargetChannel(userId) { return settings.hqChannel || (Object.values(services).find(s => s.channel) || {}).channel || (Object.keys(bizData).map(rp => settings.repoChannel[rp]).find(Boolean)) || userId; }
 app.action(/^(home_|opscfg_|svcroute_)/, async ({ ack, body, action, client }) => {
@@ -2847,6 +2859,7 @@ app.action(/^(home_|opscfg_|svcroute_)/, async ({ ack, body, action, client }) =
     const userId = body.user && body.user.id; const aid = action.action_id;
     if (aid === 'home_refresh') { await publishHome(client, userId); return; }
     if (aid === 'home_board_archive') { archiveDoneInitiatives(); await publishHome(client, userId); return; }
+    if (aid === 'home_sentinel_ch') { settings.sentinel = settings.sentinel || { enabled: true }; settings.sentinel.channel = action.selected_conversation || null; persistSettings(); await publishHome(client, userId); return; }
     if (aid === 'home_sentinel_toggle') { const on = !settings.sentinel || settings.sentinel.enabled !== false; settings.sentinel = { enabled: !on }; persistSettings(); await publishHome(client, userId); return; }
     if (aid === 'home_sentinel_run') { const ch = homeTargetChannel(userId); try { await client.chat.postMessage({ channel: userId, text: `선제 점검 돌렸어 — 이상 있으면 ${ch === userId ? '여기' : '<#' + ch + '>'}나 해당 서비스 채널로 경보가 가.` }); } catch (_) {} runBizSentinel(app.client, ch, true).catch(() => {}); setTimeout(() => publishHome(client, userId).catch(() => {}), 1500); return; }
     let m;
