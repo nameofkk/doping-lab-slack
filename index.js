@@ -1126,7 +1126,7 @@ function loadSchedules() {
 }
 function kstNow() {
   const d = new Date(Date.now() + 9 * 3600000);
-  return { h: d.getUTCHours(), m: d.getUTCMinutes(), dow: d.getUTCDay(), day: d.getUTCFullYear() * 10000 + (d.getUTCMonth() + 1) * 100 + d.getUTCDate() };
+  return { h: d.getUTCHours(), m: d.getUTCMinutes(), dow: d.getUTCDay(), dom: d.getUTCDate(), day: d.getUTCFullYear() * 10000 + (d.getUTCMonth() + 1) * 100 + d.getUTCDate() };
 }
 function parseDaily(text) {
   if (/마다/.test(text)) return null;
@@ -1188,7 +1188,7 @@ function rulesCtx(channel) { const r = rules[channel] || []; return r.length ? `
 // ── 설정(권한/승인) + 태스크보드 (영구) ──
 const SET_FILE = process.env.SETTINGS_FILE || '/data/settings.json';
 let settings = { commanders: [], approval: {}, autopilot: {} };
-function loadSettings() { try { if (fs.existsSync(SET_FILE)) settings = JSON.parse(fs.readFileSync(SET_FILE, 'utf8')) || settings; } catch {} settings.commanders = settings.commanders || []; settings.approval = settings.approval || {}; settings.autopilot = settings.autopilot || {}; settings.repoChannel = settings.repoChannel || {}; settings.hqChannel = settings.hqChannel || null; }
+function loadSettings() { try { if (fs.existsSync(SET_FILE)) settings = JSON.parse(fs.readFileSync(SET_FILE, 'utf8')) || settings; } catch {} settings.commanders = settings.commanders || []; settings.approval = settings.approval || {}; settings.autopilot = settings.autopilot || {}; settings.repoChannel = settings.repoChannel || {}; settings.hqChannel = settings.hqChannel || null; settings.workRoute = settings.workRoute || {}; }
 // D5: 서비스(repo)별 담당 채널 — 자동 브리핑·알림을 그 서비스 채널로 라우팅(없으면 기본 채널). hqChannel=경영회의 등 전사 업무 채널.
 function channelForRepo(repo, fallback) { try { return (settings.repoChannel && settings.repoChannel[repo]) || fallback || null; } catch { return fallback || null; } }
 // 텍스트에서 등록된 사업 서비스(repo) 찾기 — 영문 레포명 + 한글 별칭
@@ -1546,7 +1546,7 @@ async function runBizBriefing(client, channel, manual = false) {
       const name = rp.split('/').pop();
       const prod = BIZ_PRODUCT[rp] ? `\n[이 서비스가 뭐냐]\n${BIZ_PRODUCT[rp]}` : '';
       const gen = async () => { const r = await runClaude(`너는 도핑연구소 사업 책임자(PM/그로스)다. 아래는 "${name}" 서비스 하나의 실제 사업 지표(직전 대비 추세 포함)다. 다른 서비스랑 섞지 말고 이 서비스만 분석해라.${prod}${UNTRUSTED_PREAMBLE}\n[${name} 지표]\n${wrapUntrusted(metricsTxt)}\n\n${BIZ_RUBRIC}\n\n친근한 한국어 반말로(절대 마크다운·별표(*)·#·이모지·영어약어남발 금지, 쉬운 말, 그냥 문장으로). 구성: 1)지금 상태(AARRR 단계별, 있는 데이터만) 2)눈에 띄는 변화·특이사항(전일/전주/전달 대비 변동 크면 왜 중요한지 설명) 3)측정 갭(중요한데 안 보이는 지표+어떻게 계측) 4)지금 하면 효과 클 개선 1~3개(각각 어떤 지표 올리려는지 타겟). 데이터에 없는 수치는 절대 지어내지 마.`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 180000); const t = deMd((r.text || '').trim()) || '(이 서비스 브리핑 생성 실패 — 데이터부족/한도)'; return { ok: r.ok !== false, text: t }; };
-      const postCh = manual ? channel : channelForRepo(rp, channel); // D5: 자동이면 서비스 담당 채널로 라우팅
+      const postCh = manual ? channel : channelForWork(rp, 'bizbrief', channel); // D5: 자동이면 서비스×기능 담당 채널로 라우팅
       log('info', 'biz-briefing', { manual, repo: rp, ch: postCh });
       let text;
       if (postCh) { const res = await replyTyping(client, postCh, undefined, byName('김채원') || LEAD, async () => { const g = await gen(); return { ...g, text: `사업 브리핑 — ${name}\n${g.text}` }; }); text = (res && res.text) || ''; }
@@ -1656,6 +1656,40 @@ let goals = [];
 try { goals = JSON.parse(fs.readFileSync(GOALS_FILE, 'utf8')) || []; } catch { goals = []; }
 function persistGoals() { try { fs.writeFileSync(GOALS_FILE, JSON.stringify(goals.slice(-50))); } catch (_) {} }
 function addGoal(repo, text) { const g = { id: goals.reduce((m, x) => Math.max(m, x.id || 0), 0) + 1, repo: resolveRepo(repo || 'bot'), text: String(text || '').slice(0, 200), createdAt: Date.now() }; goals.push(g); persistGoals(); return g; }
+// ── D5/D2: 정기 업무 설정(홈에서 주기·시간·채널·켜기 편집) — 고정 하드코딩 대신 편집 가능 저장소 ──
+const OPS_CONFIG_FILE = process.env.OPS_CONFIG_FILE || '/data/ops_config.json';
+const OPS_DEFS = { // id → 표시정보 + 기본값(주기/시각/요일)
+  health: { label: '헬스체크', desc: '라이브 서비스가 살아있나 확인, 다운이면 즉시 알림', defCad: 'daily', defHour: 10 },
+  opsbrief: { label: '운영 브리핑', desc: '서비스·작업·사용량 종합 진단(건강·악화·예측·개선후보)', defCad: 'daily', defHour: 10 },
+  bizbrief: { label: '사업 브리핑', desc: '서비스별 AARRR 지표 해석·측정갭·개선안 (서비스 담당 채널로 분배)', defCad: 'daily', defHour: 10 },
+  improve: { label: '운영 개선 제안', desc: '운영 데이터에서 개선점 발굴해 승인 게이트로 발의', defCad: 'weekly', defHour: 10, defDow: 1 },
+  growth: { label: '그로스 실험 제안', desc: '사업 데이터 기반 타겟지표+가설 실험을 승인 게이트로 발의', defCad: 'weekly', defHour: 10, defDow: 2 },
+  selfimprove: { label: '봇 자기개선 스캔', desc: '봇 자체 코드 개선점을 스캔해 승인 게이트로 발의', defCad: 'weekly', defHour: 10, defDow: 3 },
+  board: { label: '전략 경영회의', desc: '부서 검토 수렴→CEO 우선순위→반론→최종결정→승인. 회사 이사회', defCad: 'weekly', defHour: 10, defDow: 5 },
+};
+const OPS_ORDER = ['health', 'opsbrief', 'bizbrief', 'improve', 'growth', 'selfimprove', 'board'];
+let opsConfig = {};
+function seedOpsConfig() { for (const id of OPS_ORDER) { const d = OPS_DEFS[id]; if (!opsConfig[id]) opsConfig[id] = { cadence: d.defCad, hour: d.defHour, minute: 0, dow: d.defDow != null ? d.defDow : 1, dom: 1, channel: null, enabled: true, lastRunDay: null }; } }
+function loadOpsConfig() { try { if (fs.existsSync(OPS_CONFIG_FILE)) opsConfig = JSON.parse(fs.readFileSync(OPS_CONFIG_FILE, 'utf8')) || {}; } catch { opsConfig = {}; } seedOpsConfig(); }
+function persistOpsConfig() { try { fs.writeFileSync(OPS_CONFIG_FILE, JSON.stringify(opsConfig)); } catch (_) {} }
+// 업무 채널 라우팅 — 서비스×기능 단위 override(예: 스포노노 마케팅 → #스포노노-마케팅) > 서비스 기본(repoChannel) > fallback
+function channelForWork(repo, func, fallback) { try { return (settings.workRoute && settings.workRoute[repo + ':' + func]) || (settings.repoChannel && settings.repoChannel[repo]) || fallback || null; } catch { return fallback || null; } }
+const CADENCE_KO = { daily: '매일', weekly: '매주', monthly: '매월' };
+const DOW_KO = ['일', '월', '화', '수', '목', '금', '토'];
+function opsWhen(o) { const t = `${o.hour < 12 ? '오전' : '오후'} ${((o.hour % 12) === 0 ? 12 : o.hour % 12)}시${o.minute ? ' ' + o.minute + '분' : ''}`; if (o.cadence === 'weekly') return `매주 ${DOW_KO[o.dow] || '월'}요일 ${t}`; if (o.cadence === 'monthly') return `매월 ${o.dom || 1}일 ${t}`; return `매일 ${t}`; }
+// 정기 업무 1건 디스패치(채널 ch로). 자동 틱에서 호출.
+function runOpsTask(id, ch) {
+  try {
+    log('info', 'ops-task', { id, ch });
+    if (id === 'health') { const chans = [...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))]; (chans.length ? chans : [ch]).forEach(c => checkServices(botClient, c, false).catch(() => {})); return; }
+    if (id === 'opsbrief') return void runOpsBriefing(botClient, ch, false).catch(() => {});
+    if (id === 'bizbrief') return void runBizBriefing(botClient, ch, false).catch(() => {});
+    if (id === 'improve') return void runImprovementProposal(botClient, ch, false).catch(() => {});
+    if (id === 'growth') return void runBizGrowth(botClient, ch, false).catch(() => {});
+    if (id === 'selfimprove') return void runSelfImproveScan(botClient, ch, false).catch(() => {});
+    if (id === 'board') { if (!activeWork[ch]) { activeWork[ch] = { task: '경영회의', started: Date.now() }; runBoardMeeting(botClient, ch, false).catch(() => {}).finally(() => { activeWork[ch] = null; }); } return; }
+  } catch (e) { try { log('error', 'ops-task-err', { id, e: String(e).slice(0, 120) }); } catch (_) {} }
+}
 let boardAt = 0;
 async function runBoardMeeting(client, channel, manual = false) {
   if (!channel) return;
@@ -2599,6 +2633,10 @@ const BUILTIN_OPS = [
   { when: '매주 금요일', what: '전략 경영회의 (부서 수렴 → 승인)' },
 ];
 function hbtn(text, action_id, opts) { const b = { type: 'button', text: { type: 'plain_text', text, emoji: true }, action_id }; if (opts && opts.value) b.value = opts.value; if (opts && opts.style) b.style = opts.style; return b; }
+function selOpt(text, value) { return { text: { type: 'plain_text', text: String(text).slice(0, 75), emoji: true }, value: String(value) }; }
+function staticSel(action_id, options, current, ph) { const el = { type: 'static_select', action_id, placeholder: { type: 'plain_text', text: ph, emoji: true }, options }; const init = options.find(o => o.value === String(current)); if (init) el.initial_option = init; return el; }
+function timeSel(action_id, hour, minute) { return { type: 'timepicker', action_id, initial_time: `${String(hour).padStart(2, '0')}:${String(minute || 0).padStart(2, '0')}`, placeholder: { type: 'plain_text', text: '시각', emoji: true } }; }
+function chanSel(action_id, channel, ph) { const el = { type: 'conversations_select', action_id, placeholder: { type: 'plain_text', text: ph || '채널 선택', emoji: true }, filter: { include: ['public', 'private'], exclude_bot_users: true } }; if (channel) el.initial_conversation = channel; return el; }
 function buildHomeBlocksNew() {
   const B = [];
   const js = Object.values(jobs).sort((a, b) => b.id - a.id);
@@ -2629,13 +2667,36 @@ function buildHomeBlocksNew() {
   B.push({ type: 'section', text: { type: 'mrkdwn', text: '*부서 검토 돌리기* — 각 부서가 실데이터로 진단·개선 제안' } });
   B.push({ type: 'actions', elements: [hbtn('고객(CX)', 'home_dept_cx'), hbtn('마케팅', 'home_dept_marketing'), hbtn('재무', 'home_dept_finance'), hbtn('시장·경쟁', 'home_dept_market'), hbtn('그로스 제안', 'home_run_growth')] });
   B.push({ type: 'divider' });
-  // 정기 업무(자동) — 내장 + 사용자 스케줄
-  B.push({ type: 'section', text: { type: 'mrkdwn', text: '*정기 업무 (자동)*\n' + BUILTIN_OPS.map(o => `• ${o.when} — ${o.what}`).join('\n') } });
-  if (schedules.length) B.push({ type: 'section', text: { type: 'mrkdwn', text: '*내가 등록한 스케줄*\n' + schedules.map(s => `• #${s.id} ${homeSchedTime(s)} — ${String(s.label || s.task || '').slice(0, 44)}`).join('\n').slice(0, 2600) } });
-  // 서비스 담당 채널
-  const chMap = Object.keys(bizData).map(rp => `• ${rp.split('/').pop()} → ${settings.repoChannel[rp] ? '<#' + settings.repoChannel[rp] + '>' : '_미지정_'}`);
-  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*서비스 담당 채널*\n${chMap.join('\n') || '_등록된 서비스 없음_'}\n전사(경영): ${settings.hqChannel ? '<#' + settings.hqChannel + '>' : '_미지정_'}` } });
-  B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '지정: 원하는 채널에서 "이 채널 wewantpeace 담당" / "이 채널 경영 담당"' }] });
+  // 정기 업무(자동) — 주기·시각·요일·채널·켜기를 홈에서 직접 편집
+  B.push({ type: 'header', text: { type: 'plain_text', text: '정기 업무 (자동) — 주기·시각·채널 설정', emoji: true } });
+  const cadOpts = [selOpt('매일', 'daily'), selOpt('매주', 'weekly'), selOpt('매월', 'monthly')];
+  const dowOpts = DOW_KO.map((d, i) => selOpt(d + '요일', i));
+  for (const id of OPS_ORDER) {
+    const o = opsConfig[id], def = OPS_DEFS[id]; if (!o) continue;
+    const chTxt = id === 'bizbrief' ? '서비스별 담당 채널(아래)' : (o.channel ? `<#${o.channel}>` : (settings.hqChannel ? `<#${settings.hqChannel}>(기본)` : '기본 채널'));
+    B.push({ type: 'section', text: { type: 'mrkdwn', text: `*${def.label}*${o.enabled ? '' : '  _(꺼짐)_'}\n_${def.desc}_\n현재: ${opsWhen(o)} · ${chTxt}` } });
+    const els = [staticSel('opscfg_cad_' + id, cadOpts, o.cadence, '주기')];
+    if (o.cadence === 'weekly') els.push(staticSel('opscfg_day_' + id, dowOpts, o.dow, '요일'));
+    els.push(timeSel('opscfg_time_' + id, o.hour, o.minute));
+    if (id !== 'bizbrief') els.push(chanSel('opscfg_ch_' + id, o.channel, '실행 채널'));
+    els.push(hbtn(o.enabled ? '끄기' : '켜기', 'opscfg_tog_' + id, { value: id, style: o.enabled ? 'danger' : 'primary' }));
+    B.push({ type: 'actions', elements: els.slice(0, 5) });
+  }
+  if (schedules.length) B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '내가 등록한 스케줄: ' + schedules.map(s => `#${s.id} ${homeSchedTime(s)} ${String(s.label || s.task || '').slice(0, 20)}`).join('  ·  ').slice(0, 1900) }] });
+  B.push({ type: 'divider' });
+  // 서비스별 업무 채널 — 기능별로 다른 채널 라우팅(예: 스포노노 마케팅 → 마케팅 채널)
+  B.push({ type: 'header', text: { type: 'plain_text', text: '서비스별 업무 채널', emoji: true } });
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*전사(경영회의·회사 전체)*`, }, accessory: chanSel('svcroute_hq_x', settings.hqChannel, '전사 채널') });
+  const FUNCS = [['default', '기본(사업 브리핑·전반)'], ['marketing', '마케팅'], ['cx', '고객(CX)'], ['finance', '재무'], ['market', '시장·경쟁']];
+  const homeRepos = Object.keys(bizData);
+  homeRepos.forEach((rp, ri) => {
+    B.push({ type: 'section', text: { type: 'mrkdwn', text: `*${rp.split('/').pop()}*` } });
+    for (const [fn, flabel] of FUNCS) {
+      const cur = fn === 'default' ? settings.repoChannel[rp] : settings.workRoute[rp + ':' + fn];
+      B.push({ type: 'section', text: { type: 'mrkdwn', text: `· ${flabel}` }, accessory: chanSel('svcroute_' + ri + '_' + fn, cur, '채널 선택') });
+    }
+  });
+  B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '채널 선택 = 그 업무가 그 채널에서 수행돼. 봇을 그 채널에 먼저 초대해야 글이 가. (해제는 채널에서 "담당 해제")' }] });
   B.push({ type: 'divider' });
   // 실행 추적(지표 이동)
   const tracked = Object.keys(bizData).flatMap(rp => measureExperiments(rp)).filter(e => e.targetKey).slice(-6);
@@ -2654,12 +2715,29 @@ async function publishHome(client, userId) { try { await client.views.publish({ 
 app.event('app_home_opened', async ({ event, client }) => { if (event.tab && event.tab !== 'home') return; await publishHome(client, event.user); });
 // D5: 홈 버튼 액션 라우팅 — 채널 컨텍스트 없는 홈 클릭을 적절한 채널로 보냄(전사>서비스>DM)
 function homeTargetChannel(userId) { return settings.hqChannel || (Object.values(services).find(s => s.channel) || {}).channel || (Object.keys(bizData).map(rp => settings.repoChannel[rp]).find(Boolean)) || userId; }
-app.action(/^home_/, async ({ ack, body, action, client }) => {
+app.action(/^(home_|opscfg_|svcroute_)/, async ({ ack, body, action, client }) => {
   await ack();
   try {
     const userId = body.user && body.user.id; const aid = action.action_id;
     if (aid === 'home_refresh') { await publishHome(client, userId); return; }
     let m;
+    // D5: 정기 업무 설정 변경(주기/요일/시각/채널/켜기)
+    if (m = aid.match(/^opscfg_(cad|day|time|ch|tog)_(.+)$/)) {
+      const field = m[1], id = m[2], o = opsConfig[id]; if (!o) { await publishHome(client, userId); return; }
+      if (field === 'cad') o.cadence = (action.selected_option && action.selected_option.value) || o.cadence;
+      else if (field === 'day') o.dow = parseInt((action.selected_option && action.selected_option.value) || o.dow, 10);
+      else if (field === 'time') { const p = (action.selected_time || '10:00').split(':'); o.hour = parseInt(p[0], 10); o.minute = parseInt(p[1], 10); }
+      else if (field === 'ch') o.channel = action.selected_conversation || null;
+      else if (field === 'tog') o.enabled = !o.enabled;
+      persistOpsConfig(); await publishHome(client, userId); return;
+    }
+    // D5: 서비스×기능 채널 라우팅 변경
+    if (m = aid.match(/^svcroute_(hq|\d+)_(\w+)$/)) {
+      const chosen = action.selected_conversation || null;
+      if (m[1] === 'hq') { settings.hqChannel = chosen; }
+      else { const rp = Object.keys(bizData)[parseInt(m[1], 10)]; if (rp) { if (m[2] === 'default') { if (chosen) settings.repoChannel[rp] = chosen; else delete settings.repoChannel[rp]; } else { const key = rp + ':' + m[2]; if (chosen) settings.workRoute[key] = chosen; else delete settings.workRoute[key]; } } }
+      persistSettings(); await publishHome(client, userId); return;
+    }
     if (m = aid.match(/^home_disp_(run|skip)_(.+)$/)) { // 특정 채널 대기제안 승인/넘어가
       const ch = m[2], text = m[1] === 'run' ? '실행' : '넘어가';
       if (pendingDispatch[ch]) await handle({ channel: ch, user: userId, ts: 'home-' + Date.now(), text }, app.client);
@@ -2712,14 +2790,13 @@ async function postButtons(channel, thread_ts, buttons) {
   loadMemory();
   loadRules();
   loadSettings();
-  loadTasks(); loadJobs(); loadFacts(); loadSkills(); buildMcpConfig(); loadDecisions(); loadUsage(); loadBiz(); loadExperiments(); loadPendingDispatch();
+  loadTasks(); loadJobs(); loadFacts(); loadSkills(); buildMcpConfig(); loadDecisions(); loadUsage(); loadBiz(); loadExperiments(); loadPendingDispatch(); loadOpsConfig();
   loadLastRepo();
   loadServices();
   loadPending();
   setInterval(persistMemory, 15000);
   setInterval(persistPendingDispatch, 8000); // 대기 제안 주기 플러시(재배포 생존)
-  let opsHealthDay = null, opsBriefDay = null;
-  const OPS_HOUR = parseInt(process.env.OPS_HOUR || '10', 10); // 매일 이 시각(KST)에 운영 헬스체크 자동
+  const OPS_HOUR = parseInt(process.env.OPS_HOUR || '10', 10); // (레거시) 일부 분기에서 사용
   let driftAt = 0; // Q3 드리프트 알림 쿨다운
   setInterval(() => {
     // 워치독: 생존신호(beat)가 25분 넘게 끊긴 작업만 풀어줌 → 영구 블록 방지. 정상적으로 오래 도는 작업(PRD 핑퐁+빌드 등)은 beat가 계속 갱신되니 안 끊음(예전엔 시작시각 기준이라 살아있는 작업을 죽여서 "풀어둘게" 쏘고 실제론 완성되는 레이스가 있었음)
@@ -2741,25 +2818,20 @@ async function postButtons(channel, thread_ts, buttons) {
         }
       }
     }
-    // 매일 OPS_HOUR 정각: 헬스체크(가벼움) — 항상 1회
-    if (n.h === OPS_HOUR && n.m === 0 && opsHealthDay !== n.day) {
-      opsHealthDay = n.day;
-      const chans = [...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))];
-      for (const ch of chans) checkServices(botClient, ch, false).catch(() => {});
-    }
-    // 무거운 일일 자동(브리핑·주간 제안)은 OPS_HOUR 시간대에 채널이 "한가할 때만" 1회 — 작업/대기제안 중이면 안 쏟고 다음 틱(같은 시간대 내) 재시도. 와르르 방지로 텀 두고 순차.
-    if (n.h === OPS_HOUR && opsBriefDay !== n.day) {
-      const chans = [...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))];
-      const briefCh = chans[0] || Object.keys(lastRequester)[0] || null;
-      if (briefCh && !activeWork[briefCh] && !pendingDispatch[briefCh]) { // 한가할 때만 — 안 그러면 opsBriefDay 안 박고 다음 틱 재시도
-        opsBriefDay = n.day; const dow = n.dow;
-        const idle = () => !activeWork[briefCh] && !pendingDispatch[briefCh]; // 순차 사이에 또 바빠지면 뒤엣것 양보
-        runOpsBriefing(botClient, briefCh, false).catch(() => {}); // 운영 브리핑 먼저
-        setTimeout(() => { if (!activeWork[briefCh]) runBizBriefing(botClient, briefCh, false).catch(() => {}); }, 180000); // 3분 뒤 사업 브리핑
-        if (dow === 1) setTimeout(() => { if (idle()) runImprovementProposal(botClient, briefCh, false).catch(() => {}); }, 360000); // 월: 개선 제안
-        if (dow === 2) setTimeout(() => { if (idle()) runBizGrowth(botClient, briefCh, false).catch(() => {}); }, 360000); // 화: 그로스 제안
-        if (dow === 3) setTimeout(() => { if (idle()) runSelfImproveScan(botClient, briefCh, false).catch(() => {}); }, 360000); // 수: 자기개선
-        if (dow === 5) { const hq = settings.hqChannel || briefCh; setTimeout(() => { if (!activeWork[hq]) { activeWork[hq] = { task: '경영회의', started: Date.now() }; runBoardMeeting(botClient, hq, false).catch(() => {}).finally(() => { activeWork[hq] = null; }); } }, 360000); } // 금: 경영회의(전사 채널)
+    // D5/D2: 정기 업무 — opsConfig(홈에서 편집) 기반 스케줄러. 한 틱에 due+한가한 작업 1건만 → 자연 스태거(와르르 방지).
+    {
+      const defCh = settings.hqChannel || [...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))][0] || Object.keys(lastRequester)[0] || null;
+      for (const id of OPS_ORDER) {
+        const o = opsConfig[id]; if (!o || !o.enabled || o.lastRunDay === n.day) continue;
+        const due = o.cadence === 'weekly' ? (n.dow === (o.dow != null ? o.dow : 1)) : o.cadence === 'monthly' ? (n.dom === (o.dom || 1)) : true;
+        if (!due) continue;
+        const schMin = (o.hour != null ? o.hour : 10) * 60 + (o.minute || 0), nowMin = n.h * 60 + n.m;
+        if (nowMin < schMin || nowMin - schMin > 30) continue; // 예정시각~30분 따라잡기 윈도우
+        const ch = o.channel || defCh; if (!ch) continue;
+        if (activeWork[ch] || pendingDispatch[ch]) continue; // 바쁘면 lastRunDay 안 박고 다음 틱 재시도(양보)
+        o.lastRunDay = n.day; persistOpsConfig();
+        runOpsTask(id, ch);
+        break; // 한 틱에 하나만 — 다음 due는 다음 틱(1분 뒤), 자연 스태거
       }
     }
     // A4: 능동 강화 — 악화(2연속 다운+) 서비스는 시간 기다리지 말고 다음 틱에 즉시 재확인(빠른 복구·다운 감지)

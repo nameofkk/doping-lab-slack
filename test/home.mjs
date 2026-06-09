@@ -40,5 +40,42 @@ ok(b1.text.text.length <= 75, '버튼 라벨 75자 이내');
 const BUILTIN_OPS = [{ when: '매일 오전 10시', what: 'x' }, { when: '매주 금요일', what: '전략 경영회의' }];
 ok(BUILTIN_OPS.length >= 2 && BUILTIN_OPS.some(o => /경영회의/.test(o.what)), '내장 정기업무에 경영회의 포함');
 
+// 7) opsConfig due 판정 (매일/매주/매월 + 시각 윈도우)
+function isDue(o, n) {
+  if (!o.enabled || o.lastRunDay === n.day) return false;
+  const due = o.cadence === 'weekly' ? (n.dow === (o.dow != null ? o.dow : 1)) : o.cadence === 'monthly' ? (n.dom === (o.dom || 1)) : true;
+  if (!due) return false;
+  const schMin = (o.hour != null ? o.hour : 10) * 60 + (o.minute || 0), nowMin = n.h * 60 + n.m;
+  return nowMin >= schMin && nowMin - schMin <= 30;
+}
+ok(isDue({ enabled: true, cadence: 'daily', hour: 10, minute: 0, lastRunDay: null }, { day: 20260609, dow: 2, dom: 9, h: 10, m: 5 }), '매일 10시 윈도우 내 due');
+ok(!isDue({ enabled: true, cadence: 'daily', hour: 10, minute: 0, lastRunDay: 20260609 }, { day: 20260609, dow: 2, dom: 9, h: 10, m: 5 }), '오늘 이미 실행했으면 not due');
+ok(!isDue({ enabled: true, cadence: 'daily', hour: 10, minute: 0, lastRunDay: null }, { day: 20260609, dow: 2, dom: 9, h: 11, m: 0 }), '윈도우(30분) 지나면 not due');
+ok(isDue({ enabled: true, cadence: 'weekly', dow: 5, hour: 10, lastRunDay: null }, { day: 20260612, dow: 5, dom: 12, h: 10, m: 0 }), '매주 금요일 due');
+ok(!isDue({ enabled: true, cadence: 'weekly', dow: 5, hour: 10, lastRunDay: null }, { day: 20260609, dow: 2, dom: 9, h: 10, m: 0 }), '금요일 업무는 화요일 not due');
+ok(isDue({ enabled: true, cadence: 'monthly', dom: 1, hour: 9, lastRunDay: null }, { day: 20260701, dow: 3, dom: 1, h: 9, m: 0 }), '매월 1일 due');
+ok(!isDue({ enabled: false, cadence: 'daily', hour: 10, lastRunDay: null }, { day: 20260609, dow: 2, dom: 9, h: 10, m: 0 }), '꺼진 업무 not due');
+
+// 8) opscfg / svcroute 액션 파싱
+ok('opscfg_cad_board'.match(/^opscfg_(cad|day|time|ch|tog)_(.+)$/)[2] === 'board', 'opscfg 필드·id 파싱');
+ok('opscfg_time_bizbrief'.match(/^opscfg_(cad|day|time|ch|tog)_(.+)$/)[1] === 'time', 'opscfg time 필드');
+let sm = 'svcroute_1_marketing'.match(/^svcroute_(hq|\d+)_(\w+)$/);
+ok(sm && sm[1] === '1' && sm[2] === 'marketing', 'svcroute 서비스idx·기능 파싱');
+ok('svcroute_hq_x'.match(/^svcroute_(hq|\d+)_(\w+)$/)[1] === 'hq', 'svcroute 전사(hq) 파싱');
+
+// 9) channelForWork — 기능override > 서비스기본 > fallback
+const settings = { workRoute: { 'o/sponono:marketing': 'CMKT' }, repoChannel: { 'o/sponono': 'CSPO' } };
+function channelForWork(repo, func, fallback) { return (settings.workRoute[repo + ':' + func]) || (settings.repoChannel[repo]) || fallback || null; }
+ok(channelForWork('o/sponono', 'marketing', 'CDEF') === 'CMKT', '기능별 채널 override 우선');
+ok(channelForWork('o/sponono', 'cx', 'CDEF') === 'CSPO', '기능 미지정이면 서비스 기본');
+ok(channelForWork('o/other', 'cx', 'CDEF') === 'CDEF', '둘 다 없으면 fallback');
+
+// 10) opsWhen 표기
+const DOW_KO = ['일', '월', '화', '수', '목', '금', '토'];
+function opsWhen(o) { const t = `${o.hour < 12 ? '오전' : '오후'} ${((o.hour % 12) === 0 ? 12 : o.hour % 12)}시${o.minute ? ' ' + o.minute + '분' : ''}`; if (o.cadence === 'weekly') return `매주 ${DOW_KO[o.dow] || '월'}요일 ${t}`; if (o.cadence === 'monthly') return `매월 ${o.dom || 1}일 ${t}`; return `매일 ${t}`; }
+ok(opsWhen({ cadence: 'daily', hour: 10, minute: 0 }) === '매일 오전 10시', 'opsWhen 매일');
+ok(opsWhen({ cadence: 'weekly', dow: 5, hour: 14, minute: 30 }) === '매주 금요일 오후 2시 30분', 'opsWhen 매주 금 오후');
+ok(opsWhen({ cadence: 'monthly', dom: 1, hour: 9, minute: 0 }) === '매월 1일 오전 9시', 'opsWhen 매월');
+
 console.log(fail ? '\n❌ home 실패 ' + fail : '\n✅ home 전부 통과');
 process.exit(fail ? 1 : 0);
