@@ -3041,6 +3041,7 @@ async function postButtons(channel, thread_ts, buttons) {
   setInterval(persistMemory, 15000);
   setInterval(persistPendingDispatch, 8000); // 대기 제안 주기 플러시(재배포 생존)
   const OPS_HOUR = parseInt(process.env.OPS_HOUR || '10', 10); // (레거시) 일부 분기에서 사용
+  let bizFetchDay = null; // M3: 일별 지표 수집 day-gate
   let driftAt = 0; // Q3 드리프트 알림 쿨다운
   setInterval(() => {
     // 워치독: 생존신호(beat)가 25분 넘게 끊긴 작업만 풀어줌 → 영구 블록 방지. 정상적으로 오래 도는 작업(PRD 핑퐁+빌드 등)은 beat가 계속 갱신되니 안 끊음(예전엔 시작시각 기준이라 살아있는 작업을 죽여서 "풀어둘게" 쏘고 실제론 완성되는 레이스가 있었음)
@@ -3083,6 +3084,11 @@ async function postButtons(channel, thread_ts, buttons) {
       for (const s of svcList()) {
         if (s.url && s.channel && (s.failStreak || 0) >= 2) checkServices(botClient, s.channel, false, true).catch(() => {});
       }
+    }
+    // M3: 일별 사업 지표 수집 전용(경보·LLM 없이 history만 쌓음) — 선제감시 "전일 대비" prev/cur 일관 확보. 매일 새벽 첫 틱 1회.
+    if (bizFetchDay !== n.day && n.h >= 5 && Object.keys(bizData).length) {
+      bizFetchDay = n.day;
+      (async () => { for (const rp of Object.keys(bizData)) { try { await bizFetch(rp); } catch (_) {} } })();
     }
     // D3: 사업 선제 감시 — 4시간마다 지표 이상 자동 체크(임계치 돌파 시 즉시 경보·긴급제안). 하루 1회/지표 쿨다운 내장.
     if (n.m === 0 && n.h % 4 === 0 && (!settings.sentinel || settings.sentinel.enabled !== false) && Object.keys(bizData).length) {
