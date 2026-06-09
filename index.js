@@ -168,7 +168,7 @@ function commandMenuText() {
     '',
     '사업(비즈니스)',
     '• `사업 지표` — 실수치 스코어카드 · `사업 브리핑` — AARRR 해석·측정갭',
-    '• `그로스 제안` — 타겟지표+가설 실험 발의 · `실험 현황` — 효과측정',
+    '• `그로스 제안` — 타겟지표+가설 실험 발의 · `실행 결과`(실험 현황) — 승인·실행한 과제의 지표 이동 추적',
     '• 부서 검토: `고객 검토`(리뷰) · `마케팅 검토` · `재무 검토` · `경쟁 동향`',
     '• `경영회의` — 부서 제안 수렴→집중 과제 결정 · `목표`/`목표 등록` — OKR',
     '',
@@ -1542,6 +1542,18 @@ function addExperiment(repo, focus, targetKey, hypothesis) {
   experiments.push({ id, repo, focus: String(focus || '').slice(0, 120), targetKey: targetKey || null, baseline, startDay: kstNow().day, hypothesis: String(hypothesis || '').slice(0, 200), status: 'proposed', at: Date.now() });
   persistExperiments(); return id;
 }
+// D1(닫힌 루프): 측정가능 지표키 메뉴(LLM이 제안에 진짜 지표키를 달게) + 키 검증 + 승인·실행 시점 추적 등록
+function validMetricKey(k) { return (k && typeof k === 'string' && BIZ_LABELS[k]) ? k : null; }
+function measurableKeysHint() { return Object.entries(BIZ_LABELS).map(([k, v]) => `${k}=${v.ko}`).join(', '); }
+// 승인·실행한 과제를 타겟지표 baseline과 함께 추적(experiments 저장소 공유 → measureExperiments가 다음 수집서 지표이동 측정·학습). 닫힌 루프의 핵심.
+function trackInitiative(repo, focus, targetKey, source) {
+  const cur = bizLatest(repo) || {};
+  const tk = validMetricKey(targetKey);
+  const baseline = (tk && typeof cur[tk] === 'number') ? cur[tk] : null;
+  const id = experiments.reduce((m, e) => Math.max(m, e.id || 0), 0) + 1;
+  experiments.push({ id, repo, focus: String(focus || '').slice(0, 120), targetKey: tk, baseline, startDay: kstNow().day, hypothesis: '', status: 'executing', source: source || 'board', at: Date.now() });
+  persistExperiments(); return id;
+}
 // 진행 실험의 타겟지표 baseline 대비 현재값 측정 + 효과 본 건 스킬로 학습
 function measureExperiments(repo) {
   const cur = bizLatest(repo) || {};
@@ -1594,12 +1606,12 @@ async function runDeptLoop(client, channel, deptKey, manual = false, collect = f
     const days = [...usageHist, usageStat].filter(x => x && x.day).slice(-7); const tot = days.reduce((a, x) => a + (x.outTokens || 0), 0);
     const finCtx = deptKey === 'finance' ? `\n[우리 봇 운영비용 신호] 최근 ${days.length}일 출력토큰 ~${Math.round(tot / 1000)}k(클로드 사용비 비례)` : '';
     const dp = byName(d.persona); const pp = dp ? dp.prompt : '';
-    const out = await runClaude(`${pp}\n너는 지금 ${d.role} 역할로 우리가 운영하는 서비스들을 ${d.name} 관점에서 검토한다.${STYLE}\n${d.prompt}${UNTRUSTED_PREAMBLE}\n[서비스 현황]\n${wrapUntrusted(svcCtx)}${finCtx}\n\n먼저 진단 3~6줄(반말, 메타서술·지문 금지 — "진단하겠다" 같은 말 말고 바로 본론). 그 다음 줄에 액션을 JSON으로만: {"proposals":[{"repo":"sponono|wewantpeace|bot","task":"구체적으로 뭘 할지 한 문장","kind":"investigate|build","target":"올리려는 지표/기대효과"}]} (최대 3개, 데이터·웹서치 근거로. 발행계정·결제 등 사람만 가능한 건 빼고).`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 220000, true);
+    const out = await runClaude(`${pp}\n너는 지금 ${d.role} 역할로 우리가 운영하는 서비스들을 ${d.name} 관점에서 검토한다.${STYLE}\n${d.prompt}${UNTRUSTED_PREAMBLE}\n[서비스 현황]\n${wrapUntrusted(svcCtx)}${finCtx}\n\n먼저 진단 3~6줄(반말, 메타서술·지문 금지 — "진단하겠다" 같은 말 말고 바로 본론). 그 다음 줄에 액션을 JSON으로만: {"proposals":[{"repo":"sponono|wewantpeace|bot","task":"구체적으로 뭘 할지 한 문장","kind":"investigate|build","target":"올리려는 지표/기대효과(사람말)","target_key":"아래 측정가능 지표키 중 이 과제로 움직일 지표 1개(없으면 null)"}]} (최대 3개, 데이터·웹서치 근거로. 발행계정·결제 등 사람만 가능한 건 빼고).\n측정가능 지표키: ${measurableKeysHint()}`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 220000, true);
     const raw = out.text || '';
     const jm = raw.match(/\{[\s\S]*"proposals"[\s\S]*\}/);
     const prose = deMd(raw.replace(/```[\s\S]*?```/g, '').replace(/\{[\s\S]*"proposals"[\s\S]*\}/, '').trim()) || '(검토 생성 실패 — 데이터부족/한도)';
     let items = [];
-    if (jm) { try { const obj = JSON.parse(jm[0]); items = (obj.proposals || []).filter(p => p && p.task && ['investigate', 'build'].includes(p.kind)).slice(0, 3).map(p => { const rr = resolveRepo(p.repo || 'bot'); const nm = rr === SELF_REPO ? '봇' : rr.split('/').pop(); return { who: d.name, repo: rr, task: `[${nm}] ${p.task}${p.target ? ` (타겟: ${p.target})` : ''}`, kind: p.kind }; }); } catch (_) {} }
+    if (jm) { try { const obj = JSON.parse(jm[0]); items = (obj.proposals || []).filter(p => p && p.task && ['investigate', 'build'].includes(p.kind)).slice(0, 3).map(p => { const rr = resolveRepo(p.repo || 'bot'); const nm = rr === SELF_REPO ? '봇' : rr.split('/').pop(); return { who: d.name, repo: rr, task: `[${nm}] ${p.task}${p.target ? ` (타겟: ${p.target})` : ''}`, kind: p.kind, targetKey: validMetricKey(p.target_key), source: 'dept' }; }); } catch (_) {} }
     if (collect) return { dept: deptKey, name: d.name, prose, items }; // 경영회의용 — 개별 발의 안 하고 모음
     log('info', 'dept-loop', { dept: deptKey, manual });
     await postAs(client, channel, undefined, byName(d.persona) || LEAD, `${d.name} 검토\n${prose.slice(0, 2600)}`); // postAs가 스피너 정리
@@ -1629,11 +1641,14 @@ async function runBoardMeeting(client, channel, manual = false) {
     startTyping(channel);
     const scoreCtx = Object.keys(bizData).map(rp => `[${rp.split('/').pop()}]\n${bizScorecard(rp)}`).join('\n\n') || '(지표 없음)';
     const goalCtx = goals.length ? goals.map(g => `- [${g.repo.split('/').pop()}] ${g.text}`).join('\n') : '(설정된 목표 없음 — "목표 등록"으로 추가 가능)';
-    const expCtx = Object.keys(bizData).flatMap(rp => measureExperiments(rp)).slice(-8).map(e => `#${e.id} [${e.repo.split('/').pop()}] ${e.focus} (${e.status})`).join('\n') || '(진행 실험 없음)';
+    // D1(닫힌 루프): 지난 실행 결과 — 추적 중인 과제의 타겟지표 이동. 회의가 "지난 결과"로 시작.
+    const measured = Object.keys(bizData).flatMap(rp => measureExperiments(rp)).filter(e => e.targetKey);
+    const resultLines = measured.slice(-8).map(e => { const lbl = BIZ_LABELS[e.targetKey] ? BIZ_LABELS[e.targetKey].ko : e.targetKey; const mv = (e.now != null && typeof e.baseline === 'number') ? `${e.baseline.toLocaleString()}→${e.now.toLocaleString()}${e.pct != null ? ` (${e.pct > 0 ? '+' : ''}${e.pct}%${e.pct >= 10 ? ' 적중' : e.pct <= -10 ? ' 역효과' : ' 미미'})` : ''}` : '측정 대기(다음 수집 후)'; return `#${e.id} [${e.repo.split('/').pop()}] ${e.focus} — ${lbl}: ${mv}`; });
+    const resultsCtx = resultLines.length ? resultLines.join('\n') : '(아직 추적·측정된 실행 결과 없음 — 첫 회의거나 승인·실행한 추적 과제가 없음)';
     const deptCtx = collected.map(c => `<<${c.name}>>\n진단: ${(c.prose || '').slice(0, 450)}\n제안: ${(c.items || []).map(x => `${x.task}[${x.kind}]`).join(' / ') || '없음'}`).join('\n\n');
-    const agenda = `[서비스 지표]\n${scoreCtx}\n\n[분기 목표]\n${goalCtx}\n\n[진행 중 실험]\n${expCtx}\n\n[부서별 진단·제안]\n${deptCtx}`;
+    const agenda = `[지난 실행 결과(닫힌 루프)]\n${resultsCtx}\n\n[서비스 지표]\n${scoreCtx}\n\n[분기 목표]\n${goalCtx}\n\n[부서별 진단·제안]\n${deptCtx}`;
     // CEO(한로로) 우선순위
-    const ceoOut = await runClaude(`너는 도핑연구소 CEO(한로로)다. 아래는 이번 주 경영회의 안건 — 서비스 지표, 분기 목표, 진행 실험, 각 부서장 진단·제안이다.${STYLE}${UNTRUSTED_PREAMBLE}\n${wrapUntrusted(agenda)}\n\n부서 제안이 많지만 이번 주에 진짜 집중할 1~3개만 골라라. 기준: 서비스 고도화·수익 기여가 크고 지금 데이터가 급하다고 말하는 것. 먼저 회의록 요약 4~7줄(반말, 왜 이걸 골랐는지 지표 근거로, 안 고른 건 왜 미뤘는지 한마디). 그 다음 줄에 JSON으로만: {"focus":[{"repo":"sponono|wewantpeace|bot","task":"한 문장","kind":"investigate|build","target":"올릴 지표","why":"한줄 근거"}]}`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 200000);
+    const ceoOut = await runClaude(`너는 도핑연구소 CEO(한로로)다. 아래는 이번 주 경영회의 안건 — 지난 실행 결과, 서비스 지표, 분기 목표, 각 부서장 진단·제안이다.${STYLE}${UNTRUSTED_PREAMBLE}\n${wrapUntrusted(agenda)}\n\n먼저 [지난 실행 결과]부터 봐라 — 효과 본 건(적중)은 이어가거나 다음 단계로, 효과 없던 건(미미/역효과)은 접거나 접근을 바꿔라. 그 다음 부서 제안 중 이번 주에 진짜 집중할 1~3개만 골라라(서비스 고도화·수익 기여 크고 데이터가 급하다는 것). 회의록 요약 4~7줄(반말): 첫 줄에 지난 결과를 한 줄로 짚고, 왜 이걸 골랐는지 지표 근거로, 안 고른 건 왜 미뤘는지. 그 다음 줄에 JSON으로만: {"focus":[{"repo":"sponono|wewantpeace|bot","task":"한 문장","kind":"investigate|build","target":"올릴 지표(사람말)","target_key":"아래 지표키 중 1개 또는 null","why":"한줄 근거"}]}\n측정가능 지표키: ${measurableKeysHint()}`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 200000);
     const craw = ceoOut.text || ''; const cjm = craw.match(/\{[\s\S]*"focus"[\s\S]*\}/);
     const digest = deMd(craw.replace(/```[\s\S]*?```/g, '').replace(/\{[\s\S]*"focus"[\s\S]*\}/, '').trim()) || '(회의록 생성 실패)';
     let focus = [];
@@ -1641,6 +1656,8 @@ async function runBoardMeeting(client, channel, manual = false) {
     // 회의록 요약 = top-level(별도 글, 스레드 앵커). 실제 심의 대화는 이 글의 댓글(스레드)로.
     const headRes = await postAs(client, channel, undefined, byName('한로로') || LEAD, `경영회의 회의록\n${digest.slice(0, 2400)}`); // 스피너 정리
     const anchor = (headRes && headRes.ts) || undefined;
+    // 댓글(첫번째): 지난 실행 결과 — 회의가 결과 보고로 시작(닫힌 루프). 측정 담당 김채원(PM/그로스).
+    if (resultLines.length) await postAs(client, channel, anchor, byName('김채원') || LEAD, `지난 실행 결과 (타겟지표 이동)\n${resultLines.join('\n')}`);
     // 댓글: 각 부서가 실제로 뭘 보고 뭘 제안했는지 — 부서장 본인이 스레드에 발언(실제 대화)
     for (const c of collected) {
       const dp = (DEPTS[c.dept] && byName(DEPTS[c.dept].persona)) || LEAD;
@@ -1658,7 +1675,7 @@ async function runBoardMeeting(client, channel, manual = false) {
     let finalFocus = focus, finalNote = '';
     if (critTxt) {
       startTyping(channel); // 재결정 생성 동안 생존표시
-      const fin = await runClaude(`너는 도핑연구소 CEO(한로로)다. 네가 처음 고른 이번 주 집중과제에 반론자(안다연)가 반박했다. 반론을 진지하게 반영해서 최종 결정을 내려라 — 타당하면 과제를 빼거나 바꾸고, 유지할 거면 반론에도 불구하고 왜 유지하는지 근거를 대라.${STYLE}${UNTRUSTED_PREAMBLE}\n[처음 고른 집중]\n${wrapUntrusted(focusText)}\n\n[안다연 반론]\n${wrapUntrusted(critTxt)}\n\n[참고 지표]\n${wrapUntrusted(scoreCtx)}\n\n먼저 최종 결정 요약 2~4줄(반말, 반론 중 뭘 받아들이고 뭘 기각했는지 분명히). 그 다음 줄에 JSON으로만: {"focus":[{"repo":"sponono|wewantpeace|bot","task":"한 문장","kind":"investigate|build","target":"올릴 지표","why":"한줄 근거"}]} (반영 결과 0개면 빈 배열).`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 180000);
+      const fin = await runClaude(`너는 도핑연구소 CEO(한로로)다. 네가 처음 고른 이번 주 집중과제에 반론자(안다연)가 반박했다. 반론을 진지하게 반영해서 최종 결정을 내려라 — 타당하면 과제를 빼거나 바꾸고, 유지할 거면 반론에도 불구하고 왜 유지하는지 근거를 대라.${STYLE}${UNTRUSTED_PREAMBLE}\n[처음 고른 집중]\n${wrapUntrusted(focusText)}\n\n[안다연 반론]\n${wrapUntrusted(critTxt)}\n\n[참고 지표]\n${wrapUntrusted(scoreCtx)}\n\n먼저 최종 결정 요약 2~4줄(반말, 반론 중 뭘 받아들이고 뭘 기각했는지 분명히). 그 다음 줄에 JSON으로만: {"focus":[{"repo":"sponono|wewantpeace|bot","task":"한 문장","kind":"investigate|build","target":"올릴 지표(사람말)","target_key":"아래 지표키 중 1개 또는 null","why":"한줄 근거"}]} (반영 결과 0개면 빈 배열).\n측정가능 지표키: ${measurableKeysHint()}`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 180000);
       const fraw = fin.text || ''; const fjm = fraw.match(/\{[\s\S]*"focus"[\s\S]*\}/);
       finalNote = deMd(fraw.replace(/```[\s\S]*?```/g, '').replace(/\{[\s\S]*"focus"[\s\S]*\}/, '').trim());
       if (fjm) { try { finalFocus = (JSON.parse(fjm[0]).focus || []).filter(f => f && f.task && ['investigate', 'build'].includes(f.kind)).slice(0, 3); } catch (_) {} }
@@ -1669,7 +1686,7 @@ async function runBoardMeeting(client, channel, manual = false) {
     if (!finalFocus.length) { await postAs(client, channel, undefined, LEAD, '반론을 반영하니 이번 주에 바로 칠 과제가 없네. 측정·검증부터 하고 다음 회의에서 다시 잡자. (심의는 회의록 댓글 참고)'); return; }
     // 게이트 발의(전략 결정 = 프로드 다수 → 강제 게이트). 최종 focus로.
     const finalText = finalFocus.map((f, i) => `${i + 1}. [${f.repo}] ${f.task} (타겟: ${f.target || '?'})`).join('\n');
-    const items = finalFocus.map(f => { const rr = resolveRepo(f.repo || 'bot'); const nm = rr === SELF_REPO ? '봇' : rr.split('/').pop(); return { who: '경영회의', repo: rr, task: `[${nm}] ${f.task}${f.target ? ` (타겟: ${f.target})` : ''}`, kind: f.kind }; });
+    const items = finalFocus.map(f => { const rr = resolveRepo(f.repo || 'bot'); const nm = rr === SELF_REPO ? '봇' : rr.split('/').pop(); return { who: '경영회의', repo: rr, task: `[${nm}] ${f.task}${f.target ? ` (타겟: ${f.target})` : ''}`, kind: f.kind, targetKey: validMetricKey(f.target_key), source: 'board' }; });
     await proposeOrAuto(client, channel, items[0].repo, items, '경영회의 최종 결정 — 이번 주 집중 과제 (반론 반영 후)', { forceGate: true });
     if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: `주간 경영회의 다이제스트\n${digest.slice(0, 900)}${finalNote ? `\n\n[반론 반영 최종]\n${finalNote.slice(0, 500)}` : ''}\n\n이번 주 집중:\n${finalText}` }).catch(() => {});
   } catch (e) { try { stopTyping(channel); log('error', 'board-meeting-err', { e: String(e).slice(0, 150) }); await postAs(client, channel, undefined, LEAD, '경영회의 중 오류가 났어: ' + String(e).slice(0, 200)); } catch (_) {} }
@@ -2048,7 +2065,9 @@ async function handle(event, client) {
         const nums = (raw.match(/\d+/g) || []).map(Number);
         if (nums.length) items = items.filter((_, i) => nums.includes(i + 1));
         const doable = items.filter(x => x.kind !== 'human');
-        await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, ${doable.length}개 착수할게 (조사 ${doable.filter(x => x.kind === 'investigate').length}·코드수정 ${doable.filter(x => x.kind === 'build').length}). 좀 걸려.`);
+        for (const it of doable) { if (it.targetKey && !it._exp) { try { it._exp = trackInitiative(it.repo || pd.repo, it.task, it.targetKey, it.source || 'board'); } catch (_) {} } } // D1: 승인=추적 시작(다음 회의가 결과 보고)
+        const tracked = doable.filter(x => x._exp).length;
+        await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, ${doable.length}개 착수할게 (조사 ${doable.filter(x => x.kind === 'investigate').length}·코드수정 ${doable.filter(x => x.kind === 'build').length}).${tracked ? ` ${tracked}개는 타겟지표 추적 시작 — 다음 회의에서 결과 보고할게.` : ''} 좀 걸려.`);
         dispatchActionItems(client, channel, thread_ts, pd.repo, items).catch(e => postAs(client, channel, thread_ts, LEAD, '실행 오류: ' + String(e).slice(0, 200)));
         return;
       }
@@ -2273,11 +2292,12 @@ async function handle(event, client) {
       if (!goals.length) { await postAs(client, channel, thread_ts, LEAD, '아직 설정된 목표(OKR)가 없어. "목표 등록 <서비스> <내용>"으로 추가해줘. 경영회의가 이 목표 기준으로 우선순위를 정해.'); return; }
       await postAs(client, channel, thread_ts, LEAD, '분기 목표(OKR)\n' + goals.map(g => `#${g.id} [${g.repo.split('/').pop()}] ${g.text}`).join('\n')); return;
     }
-    if (/(실험\s*현황|실험\s*목록|그로스\s*현황|실험\s*상태)/i.test(raw)) {
-      const all = Object.keys(bizData).flatMap(rp => measureExperiments(rp)).slice(-12);
-      if (!all.length) { await postAs(client, channel, thread_ts, byName('김채원') || LEAD, '아직 진행 중인 그로스 실험이 없어. "그로스 제안"으로 시작하면, 각 실험에 타겟지표·가설이 붙고 다음 측정에서 효과를 비교해줄게.'); return; }
-      const lines = all.map(e => { const tgt = e.targetKey ? (BIZ_LABELS[e.targetKey] ? BIZ_LABELS[e.targetKey].ko : e.targetKey) : '(지표 미측정)'; const eff = (e.now != null && typeof e.baseline === 'number') ? `${e.baseline.toLocaleString()} → ${e.now.toLocaleString()}${e.pct != null ? ` (${e.pct > 0 ? '+' : ''}${e.pct}%${e.pct >= 10 ? ', 효과 있음' : e.pct <= -10 ? ', 역효과' : ''})` : ''}` : '측정 대기'; return `#${e.id} [${e.repo.split('/').pop()}] ${e.focus}\n   타겟: ${tgt} / ${eff} / 상태: ${e.status}`; });
-      await postAs(client, channel, thread_ts, byName('김채원') || LEAD, '그로스 실험 현황 (타겟지표 baseline → 현재)\n' + lines.join('\n')); return;
+    if (/(실험\s*현황|실험\s*목록|그로스\s*현황|실험\s*상태|실행\s*결과|추적\s*현황|성과\s*현황)/i.test(raw)) {
+      const all = Object.keys(bizData).flatMap(rp => measureExperiments(rp)).slice(-15);
+      if (!all.length) { await postAs(client, channel, thread_ts, byName('김채원') || LEAD, '아직 추적 중인 실행 과제가 없어. "그로스 제안"이나 "경영회의"에서 타겟지표가 붙은 과제를 승인·실행하면, 그때부터 baseline을 잡고 다음 수집에서 지표가 움직였는지 측정해줄게.'); return; }
+      const srcLbl = s => s === 'board' ? '경영회의' : s === 'dept' ? '부서' : '그로스';
+      const lines = all.map(e => { const tgt = e.targetKey ? (BIZ_LABELS[e.targetKey] ? BIZ_LABELS[e.targetKey].ko : e.targetKey) : '(지표 미측정)'; const eff = (e.now != null && typeof e.baseline === 'number') ? `${e.baseline.toLocaleString()} → ${e.now.toLocaleString()}${e.pct != null ? ` (${e.pct > 0 ? '+' : ''}${e.pct}%${e.pct >= 10 ? ', 적중' : e.pct <= -10 ? ', 역효과' : ', 미미'})` : ''}` : '측정 대기'; return `#${e.id} [${e.repo.split('/').pop()}·${srcLbl(e.source)}] ${e.focus}\n   타겟: ${tgt} / ${eff} / 상태: ${e.status}`; });
+      await postAs(client, channel, thread_ts, byName('김채원') || LEAD, '실행 과제 추적 현황 (승인·실행한 과제의 타겟지표 baseline → 현재)\n' + lines.join('\n')); return;
     }
     // 사용량/번레이트 (오늘 Claude 호출·토큰·한도걸림)
     if (/(사용량|번레이트|토큰.*얼마|클로드.*사용|usage)/.test(raw) && !/운영|리포트|report/.test(raw)) {

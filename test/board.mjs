@@ -40,5 +40,27 @@ ok(!/focus/.test(digest) && /매출 0/.test(digest), '회의록(prose)에서 JSO
 const bad = JSON.parse('{"focus":[{"task":"x","kind":"deploy"},{"task":"y","kind":"build"}]}').focus.filter(f => f && f.task && ['investigate', 'build'].includes(f.kind));
 ok(bad.length === 1, '허용 안 된 kind(deploy) 제외');
 
+// 5) D1 닫힌 루프 — target_key 검증(validMetricKey) + 추적 등록 baseline + 효과측정
+const BIZ_LABELS = { 'admin.monthly_revenue': { ko: '이번달 매출' }, 'admin.subscribers': { ko: '구독자' }, 'admin.dau': { ko: '활성유저' } };
+const validMetricKey = k => (k && typeof k === 'string' && BIZ_LABELS[k]) ? k : null;
+ok(validMetricKey('admin.monthly_revenue') === 'admin.monthly_revenue', '유효 지표키 통과');
+ok(validMetricKey('made_up_key') === null, '미등록 지표키 거름(null)');
+ok(validMetricKey(null) === null, 'null 지표키 안전');
+// CEO focus에 target_key 달려 파싱되는지
+const fJson = '{"focus":[{"repo":"wewantpeace","task":"매출 0 조사","kind":"investigate","target":"실MRR","target_key":"admin.monthly_revenue"},{"repo":"wewantpeace","task":"가짜키","kind":"build","target":"x","target_key":"bogus"}]}';
+const ff = JSON.parse(fJson).focus.map(f => ({ ...f, targetKey: validMetricKey(f.target_key) }));
+ok(ff[0].targetKey === 'admin.monthly_revenue', 'focus target_key 유효키 보존');
+ok(ff[1].targetKey === null, 'focus target_key 가짜키 null');
+// 추적 등록 baseline 캡처 + 효과측정 pct
+const cur = { 'admin.monthly_revenue': 190000 };
+const exp = { targetKey: 'admin.monthly_revenue', baseline: (typeof cur['admin.monthly_revenue'] === 'number' ? cur['admin.monthly_revenue'] : null) };
+ok(exp.baseline === 190000, '추적 등록 시 baseline 캡처');
+const after = { 'admin.monthly_revenue': 228000 };
+const pct = exp.baseline ? Math.round((after['admin.monthly_revenue'] - exp.baseline) / exp.baseline * 100) : null;
+ok(pct === 20, '효과측정 pct(+20% 적중) 계산');
+// source 라벨
+const srcLbl = s => s === 'board' ? '경영회의' : s === 'dept' ? '부서' : '그로스';
+ok(srcLbl('board') === '경영회의' && srcLbl('dept') === '부서' && srcLbl('growth') === '그로스', 'source 라벨링');
+
 console.log(fail ? '\n❌ board 실패 ' + fail : '\n✅ board 전부 통과');
 process.exit(fail ? 1 : 0);
