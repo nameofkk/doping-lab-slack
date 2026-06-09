@@ -440,6 +440,7 @@ async function proposeOrAuto(client, channel, repo, items, headerLine, opts) {
   const fmt = items.map((x, i) => `${i + 1}. [${label(x.kind)}] ${x.task}`).join('\n');
   if ((opts && opts.forceGate) || !settings.autopilot || !settings.autopilot[channel]) { // 강제게이트(사업/그로스) 또는 오토파일럿 OFF → 전부 승인 받음
     pendingDispatch[channel] = { repo, items, at: Date.now() }; persistPendingDispatch();
+    try { logDecision(channel, 'gate-propose', `${String(headerLine).slice(0, 50)} · ${items.length}건`); } catch (_) {} // #6: 발의 기록
     await postAs(client, channel, undefined, LEAD, `${headerLine}\n${fmt}\n\n전부 하려면 "실행"(또는 버튼), 골라서 "실행 1,3"도 돼. 안 할 거면 "넘어가".`);
     await postButtons(channel, undefined, dispatchButtons(items.length));
     return;
@@ -459,7 +460,7 @@ async function proposeOrAuto(client, channel, repo, items, headerLine, opts) {
     apBuildCount += autoBuild.length;
     logDecision(channel, 'autopilot-run', `자동실행 ${autoNow.length}건(조사 ${autoInv.length}·코드 ${autoBuild.length}) ${repo}`);
     log('info', 'autopilot-run', { repo, inv: autoInv.length, build: autoBuild.length });
-    if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: `오토파일럿 자동실행(${repo.split('/').pop()}): ${autoNow.map(x => x.task.slice(0, 40)).join(' / ')}` }).catch(() => {});
+    if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`오토파일럿 자동실행(${repo.split('/').pop()}): ${autoNow.map(x => x.task.slice(0, 40)).join(' / ')}`) }).catch(() => {});
     dispatchActionItems(client, channel, undefined, repo, autoNow).catch(() => {});
   } else if (autoNow.length) { gated.push(...autoNow); } // 이미 작업중이면 게이트로
   if (gated.length) {
@@ -1329,7 +1330,7 @@ async function onboardNewService(client, channel, thread_ts, repo, url, dir) {
   try {
     if (!repo || repo === SELF_REPO || bizData[repo]) return; // 이미 온보딩됐거나 봇 자신이면 스킵
     bizData[repo] = { repo, sources: [], history: [] };
-    if (dir) { try { const pj = await sh(`cat package.json 2>/dev/null`, dir); const desc = (JSON.parse((pj.out || '{}').trim() || '{}').description || '').toString().slice(0, 300); if (desc) bizData[repo].product = desc; } catch (_) {} } // M2: 제품 설명 자동 수집(분석 품질)
+    if (dir) { try { const pj = await sh(`cat package.json 2>/dev/null`, dir); let desc = (JSON.parse((pj.out || '{}').trim() || '{}').description || '').toString(); desc = desc.replace(/[ -]+/g, ' ').replace(/(ignore|disregard|forget)\s+(all\s+|previous\s+|above\s+|prior\s+)*(instructions?|rules?|prompts?|context)/gi, '[차단됨]').replace(/\s+/g, ' ').trim().slice(0, 300); if (desc) bizData[repo].product = desc; } catch (_) {} } // M2: 제품 설명 자동 수집 + 인젝션 sanitize(외부 package.json 유래라 개행제거·마커무력화)
     persistBiz(); // 핵심 싱크: 운영 루프 편입
     if (settings.repoChannel && !settings.repoChannel[repo] && channel) { settings.repoChannel[repo] = channel; persistSettings(); }
     const name = repo.split('/').pop();
@@ -1711,7 +1712,7 @@ async function runBizSentinel(client, channel, manual = false) {
       const name = rp.split('/').pop(); const ch = channelForWork(rp, 'sentinel', (settings.sentinel && settings.sentinel.channel) || defCh); // 선제경보 전용 채널 > 서비스 sentinel override > 전사기본
       const lines = fresh.map(b => `- ${b.crit ? '[긴급] ' : ''}${b.label}: ${b.why}${b.pct != null ? ` (${(b.from != null ? b.from.toLocaleString() : '?')}→${b.to.toLocaleString()}, ${b.pct > 0 ? '+' : ''}${b.pct}%)` : ''}`).join('\n');
       if (ch) await postAs(client, ch, undefined, byName('김채원') || LEAD, `선제 경보 — ${name}\n지표 이상이 잡혀서 정기 회의 안 기다리고 바로 올려.\n${lines}`);
-      if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: `[선제 경보] ${name}\n${lines}` }).catch(() => {});
+      if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`[선제 경보] ${name}\n${lines}`) }).catch(() => {});
       logDecision(ch || defCh || 'sentinel', 'biz-sentinel', `${name}: ${fresh.map(b => b.label).join(', ')}`);
       if (ch) await runSentinelMini(client, ch, rp, fresh); // 긴급 미니 진단·제안(게이트)
     }
@@ -1908,7 +1909,7 @@ async function runBoardMeeting(client, channel, manual = false) {
     const finalText = finalFocus.map((f, i) => `${i + 1}. [${f.repo}] ${f.task} (타겟: ${f.target || '?'})`).join('\n');
     const items = finalFocus.map(f => { const rr = resolveRepo(f.repo || 'bot'); const nm = rr === SELF_REPO ? '봇' : rr.split('/').pop(); return { who: '경영회의', repo: rr, task: `[${nm}] ${f.task}${f.target ? ` (타겟: ${f.target})` : ''}`, kind: f.kind, targetKey: validMetricKey(f.target_key), source: 'board' }; });
     await proposeOrAuto(client, channel, items[0].repo, items, '경영회의 최종 결정 — 이번 주 집중 과제 (반론 반영 후)', { forceGate: true });
-    if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: `주간 경영회의 다이제스트\n${digest.slice(0, 900)}${finalNote ? `\n\n[반론 반영 최종]\n${finalNote.slice(0, 500)}` : ''}\n\n이번 주 집중:\n${finalText}` }).catch(() => {});
+    if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`주간 경영회의 다이제스트\n${digest.slice(0, 900)}${finalNote ? `\n\n[반론 반영 최종]\n${finalNote.slice(0, 500)}` : ''}\n\n이번 주 집중:\n${finalText}`) }).catch(() => {});
   } catch (e) { try { stopTyping(channel); log('error', 'board-meeting-err', { e: String(e).slice(0, 150) }); await postAs(client, channel, undefined, LEAD, '경영회의 중 오류가 났어: ' + String(e).slice(0, 200)); } catch (_) {} }
 }
 // 운영 헬스체크 — 각 라이브 서비스 curl로 상태 확인 → 우정잉(QA/SRE)이 보고, 다운이면 윈터가 알림
@@ -2284,7 +2285,7 @@ async function handle(event, client) {
         const applied = applyRhythm(chs);
         logDecision(channel, 'rhythm-apply', applied.map(c => `${c.id}.${c.field}=${c.value}`).join(', '));
         await postAs(client, channel, thread_ts, byName('윈터') || LEAD, applied.length ? `적용했어 — 정기 업무 ${applied.length}건 스케줄 변경. 홈 "정기 업무"에서 확인돼.` : '적용할 게 없었어.');
-        if (OWNER_USER_ID && botClient && applied.length) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: `운영 리듬 변경 적용: ${applied.map(c => OPS_DEFS[c.id].label).join(', ')}` }).catch(() => {});
+        if (OWNER_USER_ID && botClient && applied.length) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`운영 리듬 변경 적용: ${applied.map(c => OPS_DEFS[c.id].label).join(', ')}`) }).catch(() => {});
         return;
       }
     }
@@ -2304,6 +2305,7 @@ async function handle(event, client) {
           else if (it.targetKey) { try { it._exp = trackInitiative(it.repo || pd.repo, it.task, it.targetKey, it.source || 'board'); } catch (_) {} }
         }
         const tracked = doable.filter(x => x._exp).length;
+        try { logDecision(channel, 'gate-approve', `승인·실행 ${doable.length}건(${event.user || '?'})`); } catch (_) {} // #6: 승인 기록(감사추적)
         await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, ${doable.length}개 착수할게 (조사 ${doable.filter(x => x.kind === 'investigate').length}·코드수정 ${doable.filter(x => x.kind === 'build').length}).${tracked ? ` ${tracked}개는 타겟지표 추적 시작 — 다음 회의에서 결과 보고할게.` : ''} 좀 걸려.`);
         dispatchActionItems(client, channel, thread_ts, pd.repo, items).catch(e => postAs(client, channel, thread_ts, LEAD, '실행 오류: ' + String(e).slice(0, 200)));
         return;
@@ -2525,7 +2527,8 @@ async function handle(event, client) {
     // A3: 그로스 실험 제안 (타겟지표+가설 → 게이트) + 실험 현황(효과측정)
     if (/(그로스\s*제안|성장\s*제안|그로스\s*실험|실험\s*제안)/i.test(raw)) {
       if (await guardBusy(client, channel, thread_ts)) return;
-      runBizGrowth(client, channel, true).catch(() => {});
+      activeWork[channel] = { task: '그로스 제안', started: Date.now() }; // #5: 중복 실행 방지
+      runBizGrowth(client, channel, true).catch(() => {}).finally(() => { activeWork[channel] = null; });
       return;
     }
     // Phase B: 부서별 운영 루프
@@ -2534,7 +2537,7 @@ async function handle(event, client) {
       else if (/(마케팅\s*검토|마케팅\s*제안|획득\s*전략|seo|geo\b)/i.test(raw)) dk = 'marketing';
       else if (/(재무\s*검토|재무\s*제안|cfo|런웨이|번레이트|유닛이코노믹스|비용\s*검토)/i.test(raw)) dk = 'finance';
       else if (/(경쟁\s*동향|경쟁사|시장\s*분석|시장\s*동향|경쟁\s*검토|트렌드\s*조사)/i.test(raw)) dk = 'market';
-      if (dk) { if (await guardBusy(client, channel, thread_ts)) return; const fr = repoFromText(raw); runDeptLoop(client, channel, dk, true, false, fr || null).catch(() => {}); return; } // 서비스명 있으면 그 서비스만(예: "스포노노 마케팅 검토")
+      if (dk) { if (await guardBusy(client, channel, thread_ts)) return; const fr = repoFromText(raw); activeWork[channel] = { task: '부서 검토', started: Date.now() }; runDeptLoop(client, channel, dk, true, false, fr || null).catch(() => {}).finally(() => { activeWork[channel] = null; }); return; } // #5 중복방지 + 서비스명 있으면 그 서비스만
     }
     // D2: 운영 리듬 제안 수동 실행
     if (/(운영\s*리듬|리듬\s*점검|리듬\s*제안|스케줄\s*제안|스케줄\s*조정\s*제안)/i.test(raw)) {
@@ -3111,7 +3114,7 @@ async function postButtons(channel, thread_ts, buttons) {
         driftAt = Date.now();
         const msg = failRate > 0.3 ? `⚠️ 드리프트 감지 — 최근 1시간 잡 실패율 ${Math.round(failRate * 100)}% (${fails}/${total}). 로그 확인 필요.` : `⚠️ 드리프트 감지 — 오늘 클로드 한도걸림 ${usageStat.limitedHits}회. 사용량 과부하.`;
         log('warn', 'drift-alert', { failRate: Math.round(failRate * 100), fails, total, limitedHits: usageStat.limitedHits });
-        botClient.chat.postMessage({ channel: OWNER_USER_ID, text: msg }).catch(() => {});
+        botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(msg) }).catch(() => {});
       }
     }
   }, 60000);
