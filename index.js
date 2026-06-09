@@ -1653,13 +1653,25 @@ async function runBoardMeeting(client, channel, manual = false) {
     // Critic(안다연) 반박 — 회의록 댓글(심의의 일부). 본인이 말하므로 헤더에 이름 안 붙임.
     const critOut = await runClaude(`너는 도핑연구소 반론자(안다연)다. CEO가 이번 주 집중 과제로 아래를 골랐다. 각각 리스크·근거부족·놓친 점을 날카롭게 따지고, 정말 1순위가 맞는지 반박해라. 통과시킬 건 통과, 빼야 할 건 분명히 빼라고. 짧게 반말 3~6줄, 지문·메타서술 금지.${STYLE}${UNTRUSTED_PREAMBLE}\n[CEO가 고른 이번 주 집중]\n${wrapUntrusted(focusText)}\n\n[참고 지표]\n${wrapUntrusted(scoreCtx)}`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 150000);
     const critTxt = deMd((critOut.text || '').replace(/```[\s\S]*?```/g, '').trim());
-    if (critTxt) await postAs(client, channel, anchor, byName('안다연') || LEAD, `반론 검증\n${critTxt.slice(0, 1500)}`); else stopTyping(channel);
-    log('info', 'board-meeting', { focus: focus.length, depts: collected.length });
-    logDecision(channel, 'board-meeting', `이번 주 집중 ${focus.length}건: ${focus.map(f => f.task.slice(0, 40)).join(' / ')}`);
-    // 게이트 발의(전략 결정 = 프로드 다수 → 강제 게이트)
-    const items = focus.map(f => { const rr = resolveRepo(f.repo || 'bot'); const nm = rr === SELF_REPO ? '봇' : rr.split('/').pop(); return { who: '경영회의', repo: rr, task: `[${nm}] ${f.task}${f.target ? ` (타겟: ${f.target})` : ''}`, kind: f.kind }; });
-    await proposeOrAuto(client, channel, items[0].repo, items, '경영회의 결정 — 이번 주 집중 과제', { forceGate: true });
-    if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: `주간 경영회의 다이제스트\n${digest.slice(0, 1200)}\n\n이번 주 집중:\n${focusText}` }).catch(() => {});
+    if (critTxt) await postAs(client, channel, anchor, byName('안다연') || LEAD, `반론 검증\n${critTxt.slice(0, 1500)}`);
+    // CEO 최종 재결정 — 반론을 듣고 결정을 다시 내림(반박이 실제로 결정을 바꿀 수 있게). 진짜 회의처럼.
+    let finalFocus = focus, finalNote = '';
+    if (critTxt) {
+      startTyping(channel); // 재결정 생성 동안 생존표시
+      const fin = await runClaude(`너는 도핑연구소 CEO(한로로)다. 네가 처음 고른 이번 주 집중과제에 반론자(안다연)가 반박했다. 반론을 진지하게 반영해서 최종 결정을 내려라 — 타당하면 과제를 빼거나 바꾸고, 유지할 거면 반론에도 불구하고 왜 유지하는지 근거를 대라.${STYLE}${UNTRUSTED_PREAMBLE}\n[처음 고른 집중]\n${wrapUntrusted(focusText)}\n\n[안다연 반론]\n${wrapUntrusted(critTxt)}\n\n[참고 지표]\n${wrapUntrusted(scoreCtx)}\n\n먼저 최종 결정 요약 2~4줄(반말, 반론 중 뭘 받아들이고 뭘 기각했는지 분명히). 그 다음 줄에 JSON으로만: {"focus":[{"repo":"sponono|wewantpeace|bot","task":"한 문장","kind":"investigate|build","target":"올릴 지표","why":"한줄 근거"}]} (반영 결과 0개면 빈 배열).`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 180000);
+      const fraw = fin.text || ''; const fjm = fraw.match(/\{[\s\S]*"focus"[\s\S]*\}/);
+      finalNote = deMd(fraw.replace(/```[\s\S]*?```/g, '').replace(/\{[\s\S]*"focus"[\s\S]*\}/, '').trim());
+      if (fjm) { try { finalFocus = (JSON.parse(fjm[0]).focus || []).filter(f => f && f.task && ['investigate', 'build'].includes(f.kind)).slice(0, 3); } catch (_) {} }
+      if (finalNote) await postAs(client, channel, anchor, byName('한로로') || LEAD, `최종 결정 (반론 반영)\n${finalNote.slice(0, 1200)}`); else stopTyping(channel);
+    } else stopTyping(channel);
+    log('info', 'board-meeting', { initial: focus.length, final: finalFocus.length, depts: collected.length });
+    logDecision(channel, 'board-meeting', `이번 주 집중 ${finalFocus.length}건(초안 ${focus.length}→반론반영): ${finalFocus.map(f => f.task.slice(0, 40)).join(' / ')}`);
+    if (!finalFocus.length) { await postAs(client, channel, undefined, LEAD, '반론을 반영하니 이번 주에 바로 칠 과제가 없네. 측정·검증부터 하고 다음 회의에서 다시 잡자. (심의는 회의록 댓글 참고)'); return; }
+    // 게이트 발의(전략 결정 = 프로드 다수 → 강제 게이트). 최종 focus로.
+    const finalText = finalFocus.map((f, i) => `${i + 1}. [${f.repo}] ${f.task} (타겟: ${f.target || '?'})`).join('\n');
+    const items = finalFocus.map(f => { const rr = resolveRepo(f.repo || 'bot'); const nm = rr === SELF_REPO ? '봇' : rr.split('/').pop(); return { who: '경영회의', repo: rr, task: `[${nm}] ${f.task}${f.target ? ` (타겟: ${f.target})` : ''}`, kind: f.kind }; });
+    await proposeOrAuto(client, channel, items[0].repo, items, '경영회의 최종 결정 — 이번 주 집중 과제 (반론 반영 후)', { forceGate: true });
+    if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: `주간 경영회의 다이제스트\n${digest.slice(0, 900)}${finalNote ? `\n\n[반론 반영 최종]\n${finalNote.slice(0, 500)}` : ''}\n\n이번 주 집중:\n${finalText}` }).catch(() => {});
   } catch (e) { try { stopTyping(channel); log('error', 'board-meeting-err', { e: String(e).slice(0, 150) }); await postAs(client, channel, undefined, LEAD, '경영회의 중 오류가 났어: ' + String(e).slice(0, 200)); } catch (_) {} }
 }
 // 운영 헬스체크 — 각 라이브 서비스 curl로 상태 확인 → 우정잉(QA/SRE)이 보고, 다운이면 윈터가 알림
