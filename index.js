@@ -135,7 +135,7 @@ function startTyping(channel, thread_ts) {
   wc.chat.postMessage({ channel, thread_ts, text: TYPING_FRAMES[0] }).then(r => {
     if (channelTyping[channel] !== self) { if (r && r.ts) wc.chat.delete({ channel, ts: r.ts }).catch(() => {}); return; } // 그새 stop/교체됨 → 이 메시지는 고아라 삭제(정지 스피너 잔존 방지)
     self.ts = r && r.ts;
-    if (self.ts) { let i = 0; self.timer = setInterval(() => { if (Date.now() - self.started > 120000) return stopTyping(channel); i = (i + 1) % TYPING_FRAMES.length; wc.chat.update({ channel, ts: self.ts, text: TYPING_FRAMES[i] }).catch(() => {}); }, 1000); }
+    if (self.ts) { let i = 0; self.timer = setInterval(() => { const cap = activeWork[channel] ? 600000 : 120000; if (Date.now() - self.started > cap) return stopTyping(channel); i = (i + 1) % TYPING_FRAMES.length; wc.chat.update({ channel, ts: self.ts, text: TYPING_FRAMES[i] }).catch(() => {}); }, 1000); }
   }).catch(() => { if (channelTyping[channel] === self) delete channelTyping[channel]; });
 }
 function stopTyping(channel) {
@@ -1623,6 +1623,8 @@ async function runBoardMeeting(client, channel, manual = false) {
     for (const dk of depts) { try { const r = await runDeptLoop(client, channel, dk, false, true); if (r && (r.items.length || r.prose)) collected.push(r); } catch (_) {} }
     const allItems = collected.flatMap(c => c.items || []);
     if (!allItems.length) { stopTyping(channel); await postAs(client, channel, undefined, LEAD, '이번 회의는 부서들이 실행할 제안을 못 냈어(데이터 부족/한도). 지표부터 더 쌓이면 다시 하자.'); return; }
+    await postAs(client, channel, undefined, LEAD, `부서 검토 ${collected.length}개 모았어(제안 ${allItems.length}건). 이제 한로로가 우선순위 정하고 안다연이 반박할게.`); // 중간 진행 체크포인트(긴 회의 생존표시)
+    startTyping(channel);
     const scoreCtx = Object.keys(bizData).map(rp => `[${rp.split('/').pop()}]\n${bizScorecard(rp)}`).join('\n\n') || '(지표 없음)';
     const goalCtx = goals.length ? goals.map(g => `- [${g.repo.split('/').pop()}] ${g.text}`).join('\n') : '(설정된 목표 없음 — "목표 등록"으로 추가 가능)';
     const expCtx = Object.keys(bizData).flatMap(rp => measureExperiments(rp)).slice(-8).map(e => `#${e.id} [${e.repo.split('/').pop()}] ${e.focus} (${e.status})`).join('\n') || '(진행 실험 없음)';
