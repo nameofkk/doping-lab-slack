@@ -691,6 +691,7 @@ async function liveCheck(client, channel, thread_ts, dir, repo) {
   const deployable = (await sh(`test -f package.json && echo yes || echo no`, dir)).out.includes('yes'); // 정적 HTML은 package.json 없음 → 레일웨이 배포 스킵
   if (deployable) { try { url = await railwayDeploy(client, channel, thread_ts, dir, repo); } catch (e) {} }
   registerService(repo, url, channel); // 서비스 대장에 등록 (운영/마케팅 루프 대상)
+  await onboardNewService(client, channel, thread_ts, repo, url); // 신규면 사업 운영 루프·홈·채널 자동 편입(멱등)
   target = url;
   try {
     if (!target) {
@@ -1321,6 +1322,25 @@ function registerService(repo, url, channel) {
   persistServices();
 }
 function svcList(channel) { return Object.values(services).filter(s => !channel || s.channel === channel); }
+// 신규 서비스 자동 온보딩 — 배포된 새 서비스를 사업 운영 루프(브리핑·부서검토·선제감시·경영회의·홈)에 자동 편입. bizData 미존재 = 첫 온보딩(멱등).
+async function onboardNewService(client, channel, thread_ts, repo, url) {
+  try {
+    if (!repo || repo === SELF_REPO || bizData[repo]) return; // 이미 온보딩됐거나 봇 자신이면 스킵
+    bizData[repo] = { repo, sources: [], history: [] }; persistBiz(); // 핵심 싱크: 운영 루프 편입
+    if (settings.repoChannel && !settings.repoChannel[repo] && channel) { settings.repoChannel[repo] = channel; persistSettings(); }
+    const name = repo.split('/').pop();
+    logDecision(channel, 'service-onboard', `${repo} 운영 루프 편입`);
+    await postAs(client, channel, thread_ts, byName('김채원') || LEAD, `신규 서비스 "${name}" 온보딩 완료.\n이제 사업 브리핑·부서 검토·선제 감시·경영회의에 자동으로 들어가고 헬스체크도 돌아. 홈탭 "서비스 기본 채널"에도 떠.\n회원·매출 같은 사업 지표까지 보려면 stats만 연결하면 돼 — "사업 메트릭 등록 ${name} <stats_url>".`);
+    if (settings.autoChannel !== false && botClient) { // 전용 채널 best-effort(스코프 없으면 조용히 빌드채널 유지)
+      try {
+        const chName = ('ops-' + name).toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').slice(0, 70);
+        const cr = await botClient.conversations.create({ name: chName });
+        if (cr && cr.ok && cr.channel && cr.channel.id) { const cid = cr.channel.id; settings.repoChannel[repo] = cid; persistSettings(); joinedChannels.delete(cid); await ensureMembers(cid); await postAs(client, channel, thread_ts, LEAD, `전용 채널 <#${cid}>도 만들어서 팀 다 넣었어. 이 서비스 운영 글은 거기로 가게 설정했어. (다른 채널 쓰려면 홈에서 바꿔.)`); }
+      } catch (_) { /* name_taken/스코프없음 → 빌드 채널 유지 */ }
+    }
+    if (OWNER_USER_ID && botClient) { try { await publishHome(botClient, OWNER_USER_ID); } catch (_) {} }
+  } catch (e) { try { log('error', 'onboard-err', { repo, e: String(e).slice(0, 120) }); } catch (_) {} }
+}
 // A1: 서비스 추세 한 줄 — 연속다운 / 지연 상승 감지(링버퍼 history 기반)
 function svcTrend(s) {
   if ((s.failStreak || 0) >= 2) return `⚠️${s.failStreak}연속다운`;
@@ -2449,6 +2469,7 @@ async function handle(event, client) {
         registerService(repoKey, urlArg.replace(/[)>,]+$/, ''), channel);
         logDecision(channel, 'service-register', `${repoKey} → ${urlArg}`);
         await postAs(client, channel, thread_ts, byName('윈터') || LEAD, `대장에 올렸어: ${repoKey} · ${urlArg}\n이제 헬스체크·운영 센티넬이 이 서비스를 추적해. "헬스체크" 치면 바로 상태·지연 잡아줄게.`);
+        await onboardNewService(client, channel, thread_ts, repoKey, urlArg.replace(/[)>,]+$/, '')); // 수동 등록도 사업 운영 루프 편입(멱등)
         return;
       }
       if (/^서비스\s*(목록|리스트|대장|상태)\s*\??$/.test(raw)) {
