@@ -361,7 +361,7 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
 }
 
 // ── 실제 작업 모드: 레포 클론 → claude 코드 작업 → 브랜치 push → PR → 보고 ──
-let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {}; const pendingPlan = {}; const pendingSchedule = {}; const pendingMcp = {}; const pendingRhythm = {}; const pendingDesign = {};
+let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {}; const pendingPlan = {}; const pendingSchedule = {}; const pendingMcp = {}; const pendingRhythm = {}; const pendingDesign = {}; const limitedResume = {}; // 한도로 멈춘 작업 자동 재개 대기
 // B3: 검증된 MCP 후보를 승인 게이트로 제안(자동설치 금지). 승인 시 config 추가+핫리로드, 키 필요하면 👤 안내.
 async function proposeMcp(client, channel, cand, why) {
   if (!cand || pendingMcp[channel]) return;
@@ -2137,6 +2137,11 @@ function launchWork(client, channel, thread_ts, repo, task, newProject, forcePR,
   activeWork[channel] = ctx;
   if (!recoverAttempt) postFeedbackButtons(channel, thread_ts, '작업 들어갔어 — 진행 중에 바꿀 점 생기면 "피드백 주기"로 언제든 줘. 단계 끝날 때마다 반영할게.').catch(() => {}); // 피드백 루프 어포던스
   runWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName)
+    .then(() => { // 한도로 멈춤 감지 → 자동 재개 대기 등록(리셋되면 틱이 이어감)
+      const st = jobs[job.id] && jobs[job.id].status; const fctx = { ...ctx, repo: (activeWork[channel] && activeWork[channel].repo) || repo };
+      if (st === 'limited') { pausedWork[channel] = { ...fctx }; const prev = limitedResume[channel]; limitedResume[channel] = { ctx: fctx, at: Date.now(), lastTry: Date.now(), attempts: prev ? prev.attempts : 0 }; if (!prev && botClient) botClient.chat.postMessage({ channel, text: '한도 걸려서 멈췄어 — 리셋되면 멈춘 지점부터 자동으로 이어갈게. (급하면 "이어서")' }).catch(() => {}); }
+      else delete limitedResume[channel]; // 정상 완료 → 자동재개 해제
+    })
     .catch(e => { const err = String(e).slice(0, 300); jobUpdateById(job.id, { status: 'failed', error: err.slice(0, 200) }); const fctx = { ...ctx, repo: (activeWork[channel] && activeWork[channel].repo) || repo }; onWorkFailed(client, channel, thread_ts, job.id, err, fctx).catch(() => {}); }) // #3/#4: 실패 표시+자동복구
     .finally(() => { if (jobs[job.id] && jobs[job.id].status === 'running') jobUpdateById(job.id, { status: 'done' }); if (activeWork[channel] && activeWork[channel].jobId === job.id) activeWork[channel] = null; }); // 이 잡 것만 정리(복구 재개가 새로 잡은 건 안 건드림)
 }
@@ -3205,6 +3210,17 @@ async function postButtons(channel, thread_ts, buttons) {
         activeWork[ch] = null;
         postAs(botClient, ch, undefined, LEAD, '아까 그 작업이 응답이 끊긴 거 같아서 일단 풀어둘게. "다시 해"나 "이어서"라고 하면 이어갈게.').catch(() => {});
       }
+    }
+    // 한도로 멈춘 작업 자동 재개 — 20분 간격으로 시도(브레이커 닫히고 한가할 때), 8회까지
+    for (const ch of Object.keys(limitedResume)) {
+      const lr = limitedResume[ch]; if (!lr) continue;
+      if (settings.paused || activeWork[ch] || pendingDispatch[ch] || Date.now() < claudeBreaker.openUntil) continue;
+      if (Date.now() - (lr.lastTry || lr.at) < 20 * 60 * 1000) continue;
+      if (lr.attempts >= 8) { delete limitedResume[ch]; postAs(botClient, ch, undefined, LEAD, '한도 자동 재개를 여러 번 시도했는데 계속 막혀. "이어서"로 수동 재시도해줘.').catch(() => {}); continue; }
+      lr.attempts++; lr.lastTry = Date.now(); const ctx = lr.ctx;
+      postAs(botClient, ch, undefined, LEAD, `한도 리셋된 것 같아 — 멈췄던 작업 자동으로 이어갈게 (재개 ${lr.attempts}회차).`).catch(() => {});
+      delete pausedWork[ch];
+      launchWork(botClient, ch, undefined, ctx.repo, ctx.task, false, ctx.forcePR, ctx.projName, ctx.recoverAttempt || 0); // 기존 레포에 이어서(중단지점부터)
     }
     const n = kstNow();
     for (const s of schedules) {
