@@ -1188,7 +1188,11 @@ function rulesCtx(channel) { const r = rules[channel] || []; return r.length ? `
 // ── 설정(권한/승인) + 태스크보드 (영구) ──
 const SET_FILE = process.env.SETTINGS_FILE || '/data/settings.json';
 let settings = { commanders: [], approval: {}, autopilot: {} };
-function loadSettings() { try { if (fs.existsSync(SET_FILE)) settings = JSON.parse(fs.readFileSync(SET_FILE, 'utf8')) || settings; } catch {} settings.commanders = settings.commanders || []; settings.approval = settings.approval || {}; settings.autopilot = settings.autopilot || {}; }
+function loadSettings() { try { if (fs.existsSync(SET_FILE)) settings = JSON.parse(fs.readFileSync(SET_FILE, 'utf8')) || settings; } catch {} settings.commanders = settings.commanders || []; settings.approval = settings.approval || {}; settings.autopilot = settings.autopilot || {}; settings.repoChannel = settings.repoChannel || {}; settings.hqChannel = settings.hqChannel || null; }
+// D5: 서비스(repo)별 담당 채널 — 자동 브리핑·알림을 그 서비스 채널로 라우팅(없으면 기본 채널). hqChannel=경영회의 등 전사 업무 채널.
+function channelForRepo(repo, fallback) { try { return (settings.repoChannel && settings.repoChannel[repo]) || fallback || null; } catch { return fallback || null; } }
+// 텍스트에서 등록된 사업 서비스(repo) 찾기 — 영문 레포명 + 한글 별칭
+function repoFromText(raw) { const t = String(raw || ''); for (const rp of Object.keys(bizData)) { const nm = rp.split('/').pop(); if (nm && new RegExp(nm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(t)) return rp; } if (/위원트피스|위피|wewantpeace/i.test(t)) return Object.keys(bizData).find(r => /wewantpeace/i.test(r)) || null; if (/스포노노|스포논|sponono/i.test(t)) return Object.keys(bizData).find(r => /sponono/i.test(r)) || null; return null; }
 function persistSettings() { try { fs.writeFileSync(SET_FILE, JSON.stringify(settings)); } catch {} }
 function canCommand(user) { return !settings.commanders.length || settings.commanders.includes(user); }
 const TASK_FILE = process.env.TASKS_FILE || '/data/tasks.json';
@@ -1542,9 +1546,10 @@ async function runBizBriefing(client, channel, manual = false) {
       const name = rp.split('/').pop();
       const prod = BIZ_PRODUCT[rp] ? `\n[이 서비스가 뭐냐]\n${BIZ_PRODUCT[rp]}` : '';
       const gen = async () => { const r = await runClaude(`너는 도핑연구소 사업 책임자(PM/그로스)다. 아래는 "${name}" 서비스 하나의 실제 사업 지표(직전 대비 추세 포함)다. 다른 서비스랑 섞지 말고 이 서비스만 분석해라.${prod}${UNTRUSTED_PREAMBLE}\n[${name} 지표]\n${wrapUntrusted(metricsTxt)}\n\n${BIZ_RUBRIC}\n\n친근한 한국어 반말로(절대 마크다운·별표(*)·#·이모지·영어약어남발 금지, 쉬운 말, 그냥 문장으로). 구성: 1)지금 상태(AARRR 단계별, 있는 데이터만) 2)눈에 띄는 변화·특이사항(전일/전주/전달 대비 변동 크면 왜 중요한지 설명) 3)측정 갭(중요한데 안 보이는 지표+어떻게 계측) 4)지금 하면 효과 클 개선 1~3개(각각 어떤 지표 올리려는지 타겟). 데이터에 없는 수치는 절대 지어내지 마.`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 180000); const t = deMd((r.text || '').trim()) || '(이 서비스 브리핑 생성 실패 — 데이터부족/한도)'; return { ok: r.ok !== false, text: t }; };
-      log('info', 'biz-briefing', { manual, repo: rp });
+      const postCh = manual ? channel : channelForRepo(rp, channel); // D5: 자동이면 서비스 담당 채널로 라우팅
+      log('info', 'biz-briefing', { manual, repo: rp, ch: postCh });
       let text;
-      if (channel) { const res = await replyTyping(client, channel, undefined, byName('김채원') || LEAD, async () => { const g = await gen(); return { ...g, text: `사업 브리핑 — ${name}\n${g.text}` }; }); text = (res && res.text) || ''; }
+      if (postCh) { const res = await replyTyping(client, postCh, undefined, byName('김채원') || LEAD, async () => { const g = await gen(); return { ...g, text: `사업 브리핑 — ${name}\n${g.text}` }; }); text = (res && res.text) || ''; }
       else { const g = await gen(); text = `사업 브리핑 — ${name}\n${g.text}`; }
       if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(text) }).catch(() => {});
     }
@@ -2210,6 +2215,22 @@ async function handle(event, client) {
       await postAs(client, channel, thread_ts, LEAD, `우리가 운영 중인 서비스 (${list.length}개)\n${fmt}`);
       return;
     }
+    // D5: 서비스 담당 채널 지정/해제/현황 — 이 채널을 특정 서비스 전담으로(자동 브리핑·알림 라우팅)
+    if (/(담당|전담)\s*(해제|취소|풀어|해지)/.test(raw) && canCommand(event.user)) {
+      const removed = []; for (const k of Object.keys(settings.repoChannel || {})) if (settings.repoChannel[k] === channel) { delete settings.repoChannel[k]; removed.push(k.split('/').pop()); }
+      if (settings.hqChannel === channel) { settings.hqChannel = null; removed.push('전사(경영)'); }
+      persistSettings(); await postAs(client, channel, thread_ts, LEAD, removed.length ? `이 채널 담당 해제했어: ${removed.join(', ')}` : '이 채널엔 지정된 담당이 없었어.'); return;
+    }
+    if (/(담당\s*채널|채널\s*담당|채널\s*배정|담당\s*현황)/.test(raw) && !/(지정|맡|전담|해|줘)/.test(raw)) {
+      const lines = Object.keys(bizData).map(rp => `· ${rp.split('/').pop()} → ${settings.repoChannel[rp] ? '<#' + settings.repoChannel[rp] + '>' : '미지정(기본 채널로)'}`);
+      await postAs(client, channel, thread_ts, LEAD, `서비스 담당 채널\n${lines.join('\n') || '(등록된 서비스 없음)'}\n전사(경영회의): ${settings.hqChannel ? '<#' + settings.hqChannel + '>' : '미지정'}\n\n지정하려면 그 채널에서 "이 채널 wewantpeace 담당" 또는 "이 채널 경영 담당".`); return;
+    }
+    if (/(이\s*채널|여기|이곳).*(담당|전담|맡)|(담당|전담)\s*(으로|로)?\s*(지정|해|설정)/.test(raw) && canCommand(event.user)) {
+      if (/(본사|경영|전사|hq|메인|이사회)/i.test(raw)) { settings.hqChannel = channel; persistSettings(); await postAs(client, channel, thread_ts, LEAD, '이 채널을 전사(경영회의 등 회사 전체 업무) 채널로 지정했어. 주간 경영회의가 여기로 와.'); return; }
+      const rp = repoFromText(raw);
+      if (rp) { settings.repoChannel[rp] = channel; persistSettings(); logDecision(channel, 'channel-assign', `${rp} → 이 채널`); await postAs(client, channel, thread_ts, LEAD, `이 채널을 ${rp.split('/').pop()} 담당으로 지정했어 — 그 서비스 자동 사업 브리핑·알림이 이제 여기로 와. (해제: "담당 해제")`); return; }
+      await postAs(client, channel, thread_ts, LEAD, '어느 서비스 담당으로 할지 알려줘. 예) "이 채널 wewantpeace 담당", "이 채널 sponono 담당", "이 채널 경영 담당".'); return;
+    }
     // 스크린샷 받기 — 라이브 서비스 화면을 찍어서 슬랙에 올림 (요청할 때)
     if ((/(스크린샷|캡쳐|캡처|스샷).*(줘|보여|찍어|올려|첨부)/.test(raw) || /화면\s*(줘|보여|찍어|캡)/.test(raw)) && !/검증/.test(raw)) {
       const ux = byName('정소민') || LEAD;
@@ -2569,43 +2590,91 @@ app.event('app_mention', async ({ event, client }) => { await handle(event, clie
 app.command(/^\/(도핑|도핑연구소|dope|doping)$/, async ({ ack, respond }) => { try { await ack(); await respond({ response_type: 'ephemeral', text: commandMenuText() }); } catch (e) { try { console.log('[cmd] err', String(e).slice(0, 80)); } catch (_) {} } });
 // L4: App Home 탭 — 봇 홈을 열면 작업·스케줄·판단기록·기억을 한눈에 보는 읽기전용 운영 대시보드(채널 명령 "작업현황" 등과 같은 데이터). Home 탭은 Slack 앱설정에서 켜야(👤) 동작하고, 안 켜져 있으면 조용히 패스.
 function homeSchedTime(s) { if (s.ms) return `${Math.round(s.ms / 60000)}분마다`; const h = s.hour || 0, m = s.minute || 0; const ap = h < 12 ? '오전' : '오후'; const h12 = (h % 12) === 0 ? 12 : h % 12; return `매일 ${ap} ${h12}시${m ? ' ' + m + '분' : ''}`; }
-function buildHomeBlocks() {
-  const B = []; const ago = at => { const m = Math.round((Date.now() - (at || 0)) / 60000); return m < 60 ? m + '분 전' : Math.round(m / 60) + '시간 전'; };
-  B.push({ type: 'header', text: { type: 'plain_text', text: '🧪 도핑연구소 대시보드', emoji: true } });
-  const icon = { running: '🔵', 'awaiting-approval': '🟡', done: '✅', failed: '❌', interrupted: '⚠️', limited: '⏳', cancelled: '⏹️', planning: '📝' };
+// 내장 정기 업무(코드 고정) — 홈에서 보이게 명시
+const BUILTIN_OPS = [
+  { when: '매일 오전 10시', what: '헬스체크 · 운영 브리핑 · 사업 브리핑' },
+  { when: '매주 월요일', what: '운영 개선 제안 (승인 게이트)' },
+  { when: '매주 화요일', what: '그로스 실험 제안 (승인 게이트)' },
+  { when: '매주 수요일', what: '봇 자기개선 스캔 (승인 게이트)' },
+  { when: '매주 금요일', what: '전략 경영회의 (부서 수렴 → 승인)' },
+];
+function hbtn(text, action_id, opts) { const b = { type: 'button', text: { type: 'plain_text', text, emoji: true }, action_id }; if (opts && opts.value) b.value = opts.value; if (opts && opts.style) b.style = opts.style; return b; }
+function buildHomeBlocksNew() {
+  const B = [];
   const js = Object.values(jobs).sort((a, b) => b.id - a.id);
   const isActive = j => ['running', 'awaiting-approval', 'planning'].includes(j.status);
-  const jline = j => { const m = Math.round(((j.updatedAt || 0) - (j.createdAt || 0)) / 60000); const tok = j.tokens ? ` ·~${Math.round(j.tokens / 1000)}k` : ''; return `${icon[j.status] || '•'} *#${j.id}* ${j.type} · ${String(j.title || '').slice(0, 60)}${j.repo ? ' (' + j.repo.split('/').pop() + ')' : ''}${m ? ' ·' + m + '분' : ''}${tok}`; };
-  const active = js.filter(isActive); const recent = js.filter(j => !isActive(j)).slice(0, 5);
-  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*🔧 진행 중 작업* (${active.length})\n` + (active.length ? active.map(jline).join('\n') : '_지금 도는 작업 없음_').slice(0, 2900) } });
-  if (recent.length) B.push({ type: 'section', text: { type: 'mrkdwn', text: `*최근 끝난 작업*\n` + recent.map(jline).join('\n').slice(0, 2900) } });
+  const active = js.filter(isActive);
+  const pendCh = Object.keys(pendingDispatch).filter(c => pendingDispatch[c] && (pendingDispatch[c].items || []).length);
+  const pendCount = pendCh.reduce((a, c) => a + pendingDispatch[c].items.length, 0);
+  const svcs = Object.values(services).filter(s => s.url); const upN = svcs.filter(s => s.lastStatus !== 'down').length;
+  const icon = { running: '🔵', 'awaiting-approval': '🟡', done: '✅', failed: '❌', interrupted: '⚠️', limited: '⏳', cancelled: '⏹️', planning: '📝' };
+  // 헤더 + 요약 + 빠른 실행
+  B.push({ type: 'header', text: { type: 'plain_text', text: '도핑연구소 운영 콘솔', emoji: true } });
+  B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `서비스 ${svcs.length}개(정상 ${upN}) · 진행 작업 ${active.length} · 승인 대기 ${pendCount} · 추적 ${experiments.length}` }] });
+  B.push({ type: 'actions', elements: [hbtn('경영회의 열기', 'home_run_board', { style: 'primary' }), hbtn('사업 브리핑', 'home_run_bizbrief'), hbtn('헬스체크', 'home_run_health'), hbtn('운영 브리핑', 'home_run_opsbrief'), hbtn('새로고침', 'home_refresh')] });
   B.push({ type: 'divider' });
-  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*⏰ 예약 스케줄* (${schedules.length})\n` + (schedules.length ? schedules.map(s => `• *#${s.id}* ${homeSchedTime(s)} — ${String(s.label || s.task || '').slice(0, 50)} (${s.action === 'work' ? '작업' : '리포트'})`).join('\n').slice(0, 2900) : '_등록된 스케줄 없음_') } });
+  // 승인 대기 — 홈에서 바로 승인/넘어가
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*승인 대기* (${pendCount})` } });
+  if (pendCount) { for (const c of pendCh.slice(0, 4)) { const pd = pendingDispatch[c]; const lst = pd.items.map((x, i) => `${i + 1}. ${x.task}`).join('\n').slice(0, 600); B.push({ type: 'section', text: { type: 'mrkdwn', text: `<#${c}>\n${lst}` } }); B.push({ type: 'actions', elements: [hbtn('실행', 'home_disp_run_' + c, { style: 'primary', value: c }), hbtn('넘어가', 'home_disp_skip_' + c, { value: c })] }); } }
+  else B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '_대기 중인 제안 없음_' }] });
   B.push({ type: 'divider' });
-  // A1: 라이브 서비스 상태(메트릭 추세)
-  const svcs = Object.values(services).filter(s => s.url);
-  const sIcon = s => s.lastStatus === 'down' ? '🔴' : '🟢';
-  const sLine = s => { const last = (s.history || [])[s.history.length - 1]; const ms = last && last.ms != null ? `${last.ms}ms` : '—'; const tr = svcTrend(s); return `${sIcon(s)} ${s.repo} · ${s.lastStatus || '?'} (${ms})${tr ? ' ' + tr : ''}`; };
-  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*🩺 라이브 서비스* (${svcs.length})\n` + (svcs.length ? svcs.map(sLine).join('\n').slice(0, 2900) : '_등록된 서비스 없음_') } });
+  // 진행 중 작업
+  const jline = j => `${icon[j.status] || '•'} #${j.id} ${j.type} · ${String(j.title || '').slice(0, 48)}${j.repo ? ' (' + j.repo.split('/').pop() + ')' : ''}`;
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*진행 중 작업* (${active.length})\n` + (active.length ? active.map(jline).join('\n').slice(0, 2800) : '_지금 도는 작업 없음_') } });
+  const recent = js.filter(j => !isActive(j)).slice(0, 4);
+  if (recent.length) B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '최근: ' + recent.map(j => `${icon[j.status] || '•'} ${String(j.title || j.type).slice(0, 26)}`).join('   ') }] });
   B.push({ type: 'divider' });
-  const ds = decisions.slice(-8).reverse();
-  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*🧾 최근 판단 기록*\n` + (ds.length ? ds.map(d => `• [${d.kind}] ${String(d.detail || '').slice(0, 80)} _(${ago(d.at)})_`).join('\n').slice(0, 2900) : '_아직 없음_') } });
+  // 팀 / 부서 검토
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: '*팀원* (8)\n한로로 팀장/CEO · 김채원 PM/그로스 · 아이유 리서처/시장 · 정소민 UX\n윈터 아키/재무 · 우정잉 보안/고객 · 영듀 마케팅 · 안다연 반론' } });
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: '*부서 검토 돌리기* — 각 부서가 실데이터로 진단·개선 제안' } });
+  B.push({ type: 'actions', elements: [hbtn('고객(CX)', 'home_dept_cx'), hbtn('마케팅', 'home_dept_marketing'), hbtn('재무', 'home_dept_finance'), hbtn('시장·경쟁', 'home_dept_market'), hbtn('그로스 제안', 'home_run_growth')] });
   B.push({ type: 'divider' });
-  const fkeys = Object.keys(facts).filter(k => (facts[k] || []).length);
-  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*📌 장기 기억*\n` + (fkeys.length ? fkeys.map(k => `*${k}*: ${facts[k].length}개`).join('  ·  ').slice(0, 2900) : '_저장된 기억 없음_') } });
+  // 정기 업무(자동) — 내장 + 사용자 스케줄
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: '*정기 업무 (자동)*\n' + BUILTIN_OPS.map(o => `• ${o.when} — ${o.what}`).join('\n') } });
+  if (schedules.length) B.push({ type: 'section', text: { type: 'mrkdwn', text: '*내가 등록한 스케줄*\n' + schedules.map(s => `• #${s.id} ${homeSchedTime(s)} — ${String(s.label || s.task || '').slice(0, 44)}`).join('\n').slice(0, 2600) } });
+  // 서비스 담당 채널
+  const chMap = Object.keys(bizData).map(rp => `• ${rp.split('/').pop()} → ${settings.repoChannel[rp] ? '<#' + settings.repoChannel[rp] + '>' : '_미지정_'}`);
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*서비스 담당 채널*\n${chMap.join('\n') || '_등록된 서비스 없음_'}\n전사(경영): ${settings.hqChannel ? '<#' + settings.hqChannel + '>' : '_미지정_'}` } });
+  B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '지정: 원하는 채널에서 "이 채널 wewantpeace 담당" / "이 채널 경영 담당"' }] });
   B.push({ type: 'divider' });
-  // Q3: 운영 메트릭(7일 영속) — 호출/실토큰/한도걸림 + 잡 성공률
+  // 실행 추적(지표 이동)
+  const tracked = Object.keys(bizData).flatMap(rp => measureExperiments(rp)).filter(e => e.targetKey).slice(-6);
+  if (tracked.length) { const tline = e => { const lbl = BIZ_LABELS[e.targetKey] ? BIZ_LABELS[e.targetKey].ko : e.targetKey; const mv = (e.now != null && typeof e.baseline === 'number' && e.pct != null) ? `${e.pct > 0 ? '+' : ''}${e.pct}%${e.pct >= 10 ? ' 적중' : e.pct <= -10 ? ' 역효과' : ''}` : '측정대기'; return `• #${e.id} ${String(e.focus).slice(0, 40)} — ${lbl}: ${mv}`; }; B.push({ type: 'section', text: { type: 'mrkdwn', text: '*실행 추적 (지표 이동)*\n' + tracked.map(tline).join('\n').slice(0, 2600) } }); B.push({ type: 'divider' }); }
+  // 라이브 서비스 + 운영 메트릭
+  const sLine = s => { const last = (s.history || [])[s.history.length - 1]; const ms = last && last.ms != null ? `${last.ms}ms` : '—'; return `${s.lastStatus === 'down' ? '🔴' : '🟢'} ${s.repo.split('/').pop()} (${ms})`; };
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*라이브 서비스* (${svcs.length})\n` + (svcs.length ? svcs.map(sLine).join('\n').slice(0, 2600) : '_등록된 서비스 없음_') } });
   const mdays = [...usageHist, usageStat].filter(d => d && d.day).slice(-7);
   const mtot = mdays.reduce((a, d) => ({ c: a.c + (d.calls || 0), t: a.t + (d.outTokens || 0), l: a.l + (d.limitedHits || 0) }), { c: 0, t: 0, l: 0 });
   const rj = Object.values(jobs).filter(j => Date.now() - (j.createdAt || 0) < 7 * 86400000);
-  const dN = rj.filter(j => j.status === 'done').length, fN = rj.filter(j => j.status === 'failed').length;
-  const sr = (dN + fN) ? Math.round(dN / (dN + fN) * 100) : null;
-  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*📈 운영 메트릭* (최근 ${mdays.length}일)\n호출 ${mtot.c}회 · 실토큰 ~${Math.round(mtot.t / 1000)}k · 한도걸림 ${mtot.l}\n잡 ${rj.length}건 — 완료 ${dN} / 실패 ${fN}${sr !== null ? ` (성공률 ${sr}%)` : ''}` } });
-  B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '채널에서 "작업현황" · "스케줄 목록" · "결정 로그" · "기억 목록" · "운영 리포트" 로도 볼 수 있어 · 갱신하려면 홈 탭 다시 열기' }] });
-  return B;
+  const dN = rj.filter(j => j.status === 'done').length, fN = rj.filter(j => j.status === 'failed').length; const sr = (dN + fN) ? Math.round(dN / (dN + fN) * 100) : null;
+  B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `운영 메트릭 (최근 ${mdays.length}일): 호출 ${mtot.c} · 실토큰 ~${Math.round(mtot.t / 1000)}k · 한도걸림 ${mtot.l} · 잡 완료 ${dN}/실패 ${fN}${sr !== null ? ` (성공 ${sr}%)` : ''}` }] });
+  return B.slice(0, 98); // 블록 상한 안전
 }
-async function publishHome(client, userId) { try { await client.views.publish({ user_id: userId, view: { type: 'home', blocks: buildHomeBlocks() } }); } catch (e) { try { console.log('[home] publish 실패(앱설정에서 Home 탭 켜야 함?):', String(e && e.data && e.data.error || e).slice(0, 120)); } catch (_) {} } }
+async function publishHome(client, userId) { try { await client.views.publish({ user_id: userId, view: { type: 'home', blocks: buildHomeBlocksNew() } }); } catch (e) { try { console.log('[home] publish 실패(앱설정에서 Home 탭 켜야 함?):', String(e && e.data && e.data.error || e).slice(0, 120)); } catch (_) {} } }
 app.event('app_home_opened', async ({ event, client }) => { if (event.tab && event.tab !== 'home') return; await publishHome(client, event.user); });
+// D5: 홈 버튼 액션 라우팅 — 채널 컨텍스트 없는 홈 클릭을 적절한 채널로 보냄(전사>서비스>DM)
+function homeTargetChannel(userId) { return settings.hqChannel || (Object.values(services).find(s => s.channel) || {}).channel || (Object.keys(bizData).map(rp => settings.repoChannel[rp]).find(Boolean)) || userId; }
+app.action(/^home_/, async ({ ack, body, action, client }) => {
+  await ack();
+  try {
+    const userId = body.user && body.user.id; const aid = action.action_id;
+    if (aid === 'home_refresh') { await publishHome(client, userId); return; }
+    let m;
+    if (m = aid.match(/^home_disp_(run|skip)_(.+)$/)) { // 특정 채널 대기제안 승인/넘어가
+      const ch = m[2], text = m[1] === 'run' ? '실행' : '넘어가';
+      if (pendingDispatch[ch]) await handle({ channel: ch, user: userId, ts: 'home-' + Date.now(), text }, app.client);
+      setTimeout(() => publishHome(client, userId).catch(() => {}), 1500); return;
+    }
+    const cmdMap = { home_run_board: '경영회의', home_run_bizbrief: '사업 브리핑', home_run_health: '헬스체크', home_run_opsbrief: '운영 브리핑', home_run_growth: '그로스 제안', home_dept_cx: '고객 검토', home_dept_marketing: '마케팅 검토', home_dept_finance: '재무 검토', home_dept_market: '경쟁 동향' };
+    const text = cmdMap[aid];
+    if (text) {
+      const ch = homeTargetChannel(userId); if (!ch) return;
+      try { await client.chat.postMessage({ channel: userId, text: `홈에서 "${text}" 실행했어 — ${ch === userId ? '여기(DM)' : '<#' + ch + '>'} 에서 진행 중이야.${ch === userId ? ' (전사 채널을 지정하면 거기로 가: 채널에서 "이 채널 경영 담당")' : ''}` }); } catch (_) {}
+      await handle({ channel: ch, user: userId, ts: 'home-' + Date.now(), text }, app.client);
+      setTimeout(() => publishHome(client, userId).catch(() => {}), 1500); return;
+    }
+  } catch (e) { try { console.log('[home-action] err', String(e).slice(0, 120)); } catch (_) {} }
+});
 // L3: Block Kit 버튼 클릭 → 동등한 텍스트 명령을 합성해 handle() 재사용(로직 무리팩터·텍스트 폴백 유지). 메인앱(botClient)이 올린 버튼만 여기로 라우팅됨.
 app.action(/^(dispatch|plan|sched|mcp)_/, async ({ ack, body, action }) => {
   await ack();
@@ -2690,7 +2759,7 @@ async function postButtons(channel, thread_ts, buttons) {
         if (dow === 1) setTimeout(() => { if (idle()) runImprovementProposal(botClient, briefCh, false).catch(() => {}); }, 360000); // 월: 개선 제안
         if (dow === 2) setTimeout(() => { if (idle()) runBizGrowth(botClient, briefCh, false).catch(() => {}); }, 360000); // 화: 그로스 제안
         if (dow === 3) setTimeout(() => { if (idle()) runSelfImproveScan(botClient, briefCh, false).catch(() => {}); }, 360000); // 수: 자기개선
-        if (dow === 5) setTimeout(() => { if (!activeWork[briefCh]) { activeWork[briefCh] = { task: '경영회의', started: Date.now() }; runBoardMeeting(botClient, briefCh, false).catch(() => {}).finally(() => { activeWork[briefCh] = null; }); } }, 360000); // 금: 경영회의
+        if (dow === 5) { const hq = settings.hqChannel || briefCh; setTimeout(() => { if (!activeWork[hq]) { activeWork[hq] = { task: '경영회의', started: Date.now() }; runBoardMeeting(botClient, hq, false).catch(() => {}).finally(() => { activeWork[hq] = null; }); } }, 360000); } // 금: 경영회의(전사 채널)
       }
     }
     // A4: 능동 강화 — 악화(2연속 다운+) 서비스는 시간 기다리지 말고 다음 틱에 즉시 재확인(빠른 복구·다운 감지)
