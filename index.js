@@ -72,6 +72,7 @@ const DESIGN_RULE = `
 
 [디자인 규칙 — UI·화면·프론트·디자인 작업이면 코드 짜기 전에 반드시 이 순서로. 출처: Anthropic 공식 frontend-design 스킬의 frontend_aesthetics + impeccable.style]
 0) 무드 선언 먼저: 코드 짜기 전에 "이번 화면의 방향(레퍼런스 1~2개, 폰트, 지배색+강조색, 모션 컨셉)"을 한두 줄로 정해서 먼저 말해라. 방향 없이 바로 코딩하면 그게 AI slop의 원인이다. 절대 금지.
+0.5) 5대 필수(이 5개 다 정하고 시작 — 하나라도 빠지면 뻔한 SaaS 템플릿으로 추락): (1)레퍼런스 브랜드/제품 1~2개를 실제로 정하고 그 퀄리티를 기준선으로(모르면 WebSearch로 "이 분야 잘 만든 제품 UI" 찾아서 근거로), (2)컬러 팔레트를 hex나 named로 명시(AI 기본 팔레트 금지), (3)타이포 페어링, (4)간격 리듬(8pt 등 한 스케일로 일관), (5)의도한 감정 한 단어(예: 신뢰감/긴박/장난기). 이걸 무드 선언에 다 박아라.
 1) 기존 디자인시스템이 최우선: 그 프로젝트에 design-system 폴더(MASTER.md, pages/[페이지].md)나 .impeccable.md가 있으면 먼저 읽고 거기 색·타이포·간격·radius·그림자를 그대로 따른다(페이지 파일이 MASTER보다 우선). 기존 시스템이 있으면 아래 2)의 폰트/컬러 자유선택보다 기존 시스템이 항상 이긴다.
 2) 기존 시스템이 없는 신규 디자인일 때만 — '뻔한 AI 디자인'을 피해 과감하게 정한다:
    타이포: Inter/Roboto/Open Sans/Lato/Arial/시스템폰트/Space Grotesk 같은 뻔한 거 절대 금지. 무드로 골라라. 코드감=JetBrains Mono·Fira Code, 에디토리얼=Playfair Display·Fraunces·Crimson Pro, 스타트업=Clash Display·Satoshi·Cabinet Grotesk, 테크=IBM Plex, 개성=Bricolage Grotesque·Newsreader. 대비 크게(100/200 vs 800/900), 크기 점프 3배 이상. 폰트 하나 정해서 결단력 있게, Google Fonts 로드. 코딩 전에 고른 폰트를 말해라.
@@ -79,8 +80,8 @@ const DESIGN_RULE = `
    모션: 흩뿌리지 말고 임팩트 한 방. 페이지 로드 때 staggered reveal(animation-delay)이 자잘한 마이크로인터랙션 여러개보다 낫다. HTML은 CSS-only, React는 Motion 라이브러리.
    배경: 단색만 깔지 말고 분위기/깊이를 줘라. 은은한 CSS 그라데이션 레이어, 기하 패턴, 맥락에 맞는 효과.
 3) AI slop 안티패턴 금지(impeccable.style): 이모지를 아이콘으로 쓰기 금지(Lucide 등 실제 아이콘), nested cards 금지, 예측가능한 3카드 그리드 같은 뻔한 레이아웃 금지, 텍스트 대비 4.5:1 이상, 모든 클릭요소 cursor-pointer, 한국어 UI(브랜드명 제외), 빈 상태 화면엔 캐릭터/안내, prefers-reduced-motion 존중, 반응형 375/768/1024/1440px.
-4) 한 번에 다 만들지 말고 컴포넌트 단위로(히어로 → 카드 → 가격/기능 → 푸터 순). shadcn/ui 쓰면 기존 토큰·패턴 따르고 직접 space-y 남발 금지.
-5) 끝나면 Playwright로 실제 스크린샷 찍어 눈으로 확인. "될 것이다/잘 나왔을 것이다" 금지, 못 본 건 미확인이라고 말해라.`;
+4) 컴포넌트 라이브러리 우선(맨바닥 금지): React면 shadcn/ui를 기본으로 — 버튼·카드·폼·다이얼로그 같은 걸 직접 손으로 그리지 말고 shadcn 컴포넌트/블록을 가져다 조합하고 토큰·패턴을 따른다(검증된 컴포넌트가 from-scratch보다 항상 낫다. shadcn MCP/21st.dev Magic MCP 연결돼 있으면 그걸로 실제 컴포넌트 가져와 쓰기). 정적 HTML이면 잘 만든 레퍼런스 패턴을 따른다. 한 번에 다 만들지 말고 컴포넌트 단위로(히어로 → 카드 → 가격/기능 → 푸터).
+5) Polish 패스(필수): 다 만든 뒤 hover/focus/active·loading·empty·error 상태를 빠짐없이 넣고, transition으로 미세 모션을 더한다. gradient·box-shadow 남용은 빼서 premium하게. 그리고 Playwright로 실제 스크린샷 찍어 눈으로 확인 — "될 것이다/잘 나왔을 것이다" 금지, 못 본 건 미확인이라고 말해라.`;
 
 // 신규 웹/사이트/앱 제작 시 항상 — 출시·마케팅·운영까지 준비된 상태로 만들게 하는 규칙
 const LAUNCH_RULE = `
@@ -252,6 +253,8 @@ const MCP_REGISTRY = [
   { name: 'github', desc: 'GitHub 이슈·PR·코드검색', triggers: /github\s*(이슈|issue|pr|pull)|이슈\s*(만들|생성|목록)|pull\s*request/i, needs: ['GITHUB_TOKEN'], config: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-github'], env: { GITHUB_PERSONAL_ACCESS_TOKEN: '${GITHUB_TOKEN}' } } },
   { name: 'sentry', desc: 'Sentry 에러·크래시 조회', triggers: /sentry|에러\s*추적|error\s*tracking|크래시\s*(로그|리포트)|예외\s*모니터/i, needs: ['SENTRY_AUTH_TOKEN'], config: { command: 'npx', args: ['-y', '@sentry/mcp-server'], env: { SENTRY_AUTH_TOKEN: '${SENTRY_AUTH_TOKEN}' } } },
   { name: 'fetch', desc: '웹페이지 가져와 읽기(키 불필요)', triggers: /웹페이지\s*(가져|읽)|url\s*가져|크롤링|스크랩|페이지\s*긁/i, needs: [], config: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-fetch'] } },
+  { name: 'shadcn', desc: 'shadcn/ui 실제 컴포넌트·블록 검색/사용 — 맨바닥 UI 방지(키 불필요)', triggers: /shadcn|ui\s*컴포넌트|컴포넌트\s*(라이브러리|가져|만들)|화면\s*(만들|디자인)|프론트\s*(만들|작업)|랜딩\s*페이지|대시보드\s*(만들|디자인)|디자인\s*(개선|퀄|예쁘)/i, needs: [], config: { command: 'npx', args: ['-y', '@jpisnice/shadcn-ui-mcp-server'] } },
+  { name: '21st-magic', desc: '21st.dev Magic — 디자인 엔지니어 감각의 고퀄 UI 컴포넌트 생성', triggers: /21st|magic\s*ui|고퀄\s*(ui|컴포넌트)|예쁜\s*(ui|컴포넌트|화면|디자인)|세련된\s*(ui|디자인)/i, needs: ['TWENTYFIRST_API_KEY'], config: { command: 'npx', args: ['-y', '@21st-dev/magic@latest'], env: { API_KEY: '${TWENTYFIRST_API_KEY}' } } },
 ];
 function suggestMcp(taskText) { const connected = mcpServerNames(); return MCP_REGISTRY.filter(m => m.triggers.test(String(taskText || '')) && !connected.includes(m.name)); }
 // Q4: 서킷브레이커 — claude 연속 실패(N=5) 시 60s 회로 개방. 개방 동안 3×재시도 난타 대신 즉시 강등 응답(장애 증폭 방지).
