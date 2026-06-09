@@ -306,6 +306,7 @@ async function runClaudeOnce(prompt, model, cwd = WORKDIR, perm = CLAUDE_PERMISS
 async function runDebate(client, channel, thread_ts, idea, repo) {
   ensureJob(channel, 'debate', idea, repo); // R1: 보드에 기록
   await postAs(client, channel, thread_ts, LEAD, `🧪 토론 시작할게. 주제: ${idea}\n${repo ? '먼저 프로젝트 좀 까보고 ' : ''}${ROUNDS}라운드 치고받은 다음에 내가 결론 정리할게.`);
+  postFeedbackButtons(channel, thread_ts, '토론 방향 틀고 싶으면 "피드백 주기"로 — 라운드 사이에 반영할게.').catch(() => {});
   let facts = '';
   if (repo && GITHUB_TOKEN) {
     const id = ++workSeq; const dir = `/tmp/d${id}`;
@@ -324,6 +325,8 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
   let transcript = `[토론 주제]\n${idea}\n${facts}`, stopped = false; const structured = []; // R6: 구조화 핸드오프 — 각 발언의 핵심/근거/미해결을 누적
   const TAG = '\n\n맨 끝에 딱 한 줄, 네 발언의 핵심을 이 형식 그대로 붙여라: ⟦핵심: 한 줄 주장 | 근거: 무엇에 기반(코드/사실/추측) | 미해결: 아직 확인 안 된 것⟧';
   for (let r = 1; r <= ROUNDS && !stopped; r++) {
+    const rfb = drainFeedback(channel); // 라운드 사이 사용자 피드백 반영
+    if (rfb) { transcript += `\n[사용자가 방금 준 방향·피드백 — 이걸 토론에 반드시 반영해라]\n${rfb}\n`; await postAs(client, channel, thread_ts, LEAD, `방금 피드백 받았어 — ${r}라운드부터 반영할게.`); }
     for (const p of TEAM) {
       bumpWork(channel); // 토론은 자체 스피너가 없어서 여기서 생존신호 갱신 (긴 토론이 워치독에 안 끊기게)
       if (workCancel[channel]) { stopped = true; break; } // "중단"하면 토론 즉시 멈춤
@@ -343,7 +346,8 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
   }
   if (stopped) { delete workCancel[channel]; await postAs(client, channel, thread_ts, LEAD, '토론 중단했어.'); return; }
   const structDigest = structured.length ? `\n\n[구조화된 핵심 주장 — 이걸 1차 입력으로 종합해라]\n${structured.map(s => `- ${s.who}: ${s.tag}`).join('\n')}` : '';
-  const synth = await runClaude(`${LEAD.prompt}${STYLE}${rulesCtx(channel)}${structDigest}\n\n[토론 전문(참고)]\n${transcript.slice(-3500)}\n\n위 구조화된 핵심 주장을 1차 근거로, 전문은 보조로 종합해. 의견 갈린 지점 짚고, 가장 설득력 있는 쪽으로 최적 결론. 단순 요약 말고 결정과 다음 액션까지. 특히 '미해결'로 표시된 건 액션아이템 후보로 챙겨.${HONEST}`, LEAD.model);
+  const sfb = drainFeedback(channel); const sfbCtx = sfb ? `\n\n[사용자가 토론 중 준 추가 지시 — 결론에 반드시 반영]\n${sfb}` : ''; // 종합 직전 피드백
+  const synth = await runClaude(`${LEAD.prompt}${STYLE}${rulesCtx(channel)}${structDigest}${sfbCtx}\n\n[토론 전문(참고)]\n${transcript.slice(-3500)}\n\n위 구조화된 핵심 주장을 1차 근거로, 전문은 보조로 종합해. 의견 갈린 지점 짚고, 가장 설득력 있는 쪽으로 최적 결론. 단순 요약 말고 결정과 다음 액션까지. 특히 '미해결'로 표시된 건 액션아이템 후보로 챙겨.${HONEST}`, LEAD.model);
   await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}📋 결론\n` + (synth.text || '').trim().slice(0, 9000));
   extractFacts(repo || channel, `[토론: ${idea}]\n${(synth.text || '').slice(0, 1800)}`, '토론').catch(() => {}); // R7: 토론 결론에서 결정·사실 저장
   // 결론의 액션아이템을 뽑아서 "승인하면 실제로 착수"하게 제시 (자동 실행 X — 사용자 승인 게이트). 레포 있을 때만(코드로 할 게 있어야 함).
@@ -1054,6 +1058,7 @@ async function runReport(client, channel, thread_ts, reporter, repo, task) {
   ensureJob(channel, 'report', task, repo); // R1: 보드에 기록
   if (!GITHUB_TOKEN) { jobUpdate(channel, { status: 'failed', error: 'GITHUB_TOKEN 없음' }); await postAs(client, channel, thread_ts, reporter, 'GITHUB_TOKEN이 없어서 조사를 못 해.'); return reportOut; }
   await postAs(client, channel, thread_ts, reporter, `${repo} 한번 까볼게. 잠깐만.`);
+  postFeedbackButtons(channel, thread_ts, '조사 방향·집중할 포인트 있으면 "피드백 주기"로 — 종합 전에 반영할게.').catch(() => {});
   const id = ++workSeq; const dir = `/tmp/r${id}`;
   const prog = startProgress(channel, thread_ts, `${repo.split('/').pop()} 까보고 정리하는 중`, reporter);
   try {
@@ -1072,7 +1077,9 @@ async function runReport(client, channel, thread_ts, reporter, repo, task) {
     }
     // 팀장 한로로 — 의견들 + 반론 다 검토해서 최종 실행안으로 종합·보완 (그냥 의견 나열로 끝내지 않게)
     if (workCancel[channel]) { delete workCancel[channel]; return; } // 중단 요청 시 종합 안 함
-    const synth = await runClaude(`${LEAD.prompt}${PLAIN}${rulesCtx(channel)}\n\n[사용자 질문]\n${task}\n\n[팀 의견]\n${(res.text || '').slice(0, 2500)}\n\n[안다연 반론]\n${devilText.slice(0, 1200)}\n\n위를 다 검토해서 "최종안"으로 종합·보완해라. 의견 충돌은 네가 정리하고, 우선순위(1·2·3)를 매기고, 코드로 확인 안 된 가정은 빼거나 "확인 필요"로 표시해라. 바로 실행 가능한 구체적 액션으로 끝내. 마크다운 금지.`, LEAD.model, dir, CLAUDE_PERMISSION_MODE, 180000);
+    const rpfb = drainFeedback(channel); const rpfbCtx = rpfb ? `\n\n[사용자가 조사 중 준 추가 지시 — 최종안에 반드시 반영]\n${rpfb}` : ''; // 종합 직전 피드백
+    if (rpfb) await postAs(client, channel, thread_ts, LEAD, '방금 준 피드백 최종 정리에 반영할게.');
+    const synth = await runClaude(`${LEAD.prompt}${PLAIN}${rulesCtx(channel)}\n\n[사용자 질문]\n${task}${rpfbCtx}\n\n[팀 의견]\n${(res.text || '').slice(0, 2500)}\n\n[안다연 반론]\n${devilText.slice(0, 1200)}\n\n위를 다 검토해서 "최종안"으로 종합·보완해라. 의견 충돌은 네가 정리하고, 우선순위(1·2·3)를 매기고, 코드로 확인 안 된 가정은 빼거나 "확인 필요"로 표시해라. 바로 실행 가능한 구체적 액션으로 끝내. 마크다운 금지.`, LEAD.model, dir, CLAUDE_PERMISSION_MODE, 180000);
     if (synth.text && synth.ok !== false) { reportOut = synth.text.trim(); await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}📌 최종안 (팀 의견+반론 종합)\n${reportOut.slice(0, 9000)}`); } // 분할게시되니 안 잘림
     else await postAs(client, channel, thread_ts, reporter, `${mention(channel)}다 정리했어, 위에 봐줘!`);
     extractFacts(repo, `[조사] ${task}\n${(synth.text || res.text || '').slice(0, 1800)}`, '조사').catch(() => {}); // R7: 조사에서 확인된 사실 저장
