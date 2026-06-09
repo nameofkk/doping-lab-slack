@@ -353,7 +353,7 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
 }
 
 // ── 실제 작업 모드: 레포 클론 → claude 코드 작업 → 브랜치 push → PR → 보고 ──
-let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {}; const pendingPlan = {}; const pendingSchedule = {}; const pendingMcp = {};
+let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {}; const pendingPlan = {}; const pendingSchedule = {}; const pendingMcp = {}; const pendingRhythm = {};
 // B3: 검증된 MCP 후보를 승인 게이트로 제안(자동설치 금지). 승인 시 config 추가+핫리로드, 키 필요하면 👤 안내.
 async function proposeMcp(client, channel, cand, why) {
   if (!cand || pendingMcp[channel]) return;
@@ -1698,6 +1698,43 @@ async function runSentinelMini(client, channel, repo, breaches) {
     if (jm) { try { const items = (JSON.parse(jm[0]).proposals || []).filter(p => p && p.task && ['investigate', 'build'].includes(p.kind)).slice(0, 2).map(p => ({ who: '선제대응', repo: resolveRepo(p.repo || repo), task: `[${name}] ${p.task}${p.target ? ` (타겟: ${p.target})` : ''}`, kind: p.kind, targetKey: validMetricKey(p.target_key), source: 'sentinel' })); if (items.length) await proposeOrAuto(client, channel, items[0].repo, items, `선제 대응 제안 — ${name}`, { forceGate: true }); } catch (_) {} }
   } catch (_) {}
 }
+// ── D2: 자율 운영 리듬 — 에이전트가 실제 활동·지연·경보 신호를 보고 정기 업무 주기/시각/켜기 조정을 제안→승인 시 적용 ──
+function applyRhythm(changes) {
+  const applied = [];
+  for (const c of (changes || [])) {
+    const o = opsConfig[c.id]; if (!o) continue;
+    if (c.field === 'cadence' && ['daily', 'weekly', 'monthly'].includes(c.value)) { o.cadence = c.value; applied.push(c); }
+    else if (c.field === 'enabled') { o.enabled = (c.value === true || c.value === 'true'); applied.push(c); }
+    else if (c.field === 'hour') { const h = parseInt(c.value, 10); if (h >= 0 && h <= 23) { o.hour = h; applied.push(c); } }
+    else if (c.field === 'dow') { const d = parseInt(c.value, 10); if (d >= 0 && d <= 6) { o.dow = d; applied.push(c); } }
+    o.lastRunDay = null;
+  }
+  if (applied.length) persistOpsConfig();
+  return applied;
+}
+async function runRhythmProposal(client, channel, manual = false) {
+  if (!channel) return;
+  try {
+    startTyping(channel);
+    const sched = OPS_ORDER.map(id => { const o = opsConfig[id]; return `${id}(${OPS_DEFS[id].label}): ${o && o.enabled ? opsWhen(o) : '꺼짐'}`; }).join('\n');
+    const board = progressBoard();
+    const stale = board.filter(b => b.state === 'stale').length, hit = board.filter(b => b.state === 'hit').length, prop = board.filter(b => b.state === 'proposed').length, prog = board.filter(b => b.state === 'progress').length;
+    const days = [...usageHist, usageStat].filter(d => d && d.day).slice(-7); const calls = days.reduce((a, d) => a + (d.calls || 0), 0), limited = days.reduce((a, d) => a + (d.limitedHits || 0), 0);
+    const ctx = `[현재 정기 업무 스케줄]\n${sched}\n\n[진척] 발의 ${prop} · 진행 ${prog} · 지연 ${stale} · 적중 ${hit}\n[최근 7일] 클로드 호출 ${calls}회 · 한도걸림 ${limited}\n[선제 경보] 누적 ${Object.keys(bizAlertSeen).length}건`;
+    const out = await runClaude(`너는 도핑연구소 운영 책임자(아키텍트)다. 아래는 우리 봇의 정기 업무 스케줄과 최근 운영 신호다.${UNTRUSTED_PREAMBLE}\n${wrapUntrusted(ctx)}\n\n이 신호로 정기 업무의 "주기/시각/켜기"를 조정하면 나아질 게 있으면 제안해라. 기준: 지연 과제 많으면 제안성 업무 주기 줄이기, 적중 많고 활동 활발하면 늘리기, 안 쓰는 건 끄기, 한도걸림 잦으면 주기 늘려 부하 줄이기. 바꿀 게 없으면 빈 배열. 먼저 한줄 진단(반말, 지문 금지). 그 다음 JSON만: {"changes":[{"id":"${OPS_ORDER.join('|')}","field":"cadence|enabled|hour|dow","value":"cadence=daily/weekly/monthly, enabled=true/false, hour=0-23, dow=0(일)-6(토)","why":"한줄 근거"}]} (최대 3개).`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 150000);
+    const raw = out.text || ''; const jm = raw.match(/\{[\s\S]*"changes"[\s\S]*\}/);
+    const prose = deMd(raw.replace(/```[\s\S]*?```/g, '').replace(/\{[\s\S]*"changes"[\s\S]*\}/, '').trim());
+    let changes = [];
+    if (jm) { try { changes = (JSON.parse(jm[0]).changes || []).filter(c => c && opsConfig[c.id] && ['cadence', 'enabled', 'hour', 'dow'].includes(c.field)).slice(0, 3); } catch (_) {} }
+    const arch = byName('윈터') || LEAD;
+    if (!changes.length) { stopTyping(channel); if (manual) await postAs(client, channel, undefined, arch, `운영 리듬 점검 — 지금 스케줄 그대로 둬도 괜찮아.${prose ? '\n' + prose.slice(0, 400) : ''}`); return; }
+    const FV = c => c.field === 'cadence' ? (CADENCE_KO[c.value] || c.value) : c.field === 'enabled' ? ((c.value === true || c.value === 'true') ? '켜기' : '끄기') : c.field === 'hour' ? `${c.value}시` : c.field === 'dow' ? `${DOW_KO[c.value] || c.value}요일` : c.value;
+    const FN = { cadence: '주기', enabled: '켜기/끄기', hour: '시각', dow: '요일' };
+    const list = changes.map((c, i) => `${i + 1}. ${OPS_DEFS[c.id].label}: ${FN[c.field]} → ${FV(c)} (${c.why || ''})`).join('\n');
+    pendingRhythm[channel] = { changes, at: Date.now() };
+    await postAs(client, channel, undefined, arch, `운영 리듬 제안 (적용하면 자동 업무 스케줄이 바뀌어)\n${prose ? prose.slice(0, 500) + '\n\n' : ''}${list}\n\n적용하려면 "실행"(또는 "실행 1,3"), 안 할 거면 "넘어가". 홈에서 직접 바꿔도 돼.`);
+  } catch (e) { try { stopTyping(channel); log('error', 'rhythm-err', { e: String(e).slice(0, 120) }); } catch (_) {} }
+}
 // ── Phase B: 부서별 운영 루프 — 각 부서가 실데이터를 자기 관점으로 검토→진단+개선 제안(게이트). 4개가 같은 골격이라 제네릭. 페르소나=부서장. ──
 const DEPTS = {
   cx: { name: '고객(CX)', persona: '우정잉', role: '고객 경험(CX) 책임자', prompt: '아래에 "인앱 피드백"(우리 서비스가 직접 받은 진짜 사용자 의견)과 "스토어 실데이터"(평점·설치수·실제 리뷰 본문 — 이미 정확한 앱에서 가져온 진짜 데이터)가 주어진다. 그 실제 내용만 근거로(절대 기억·검색으로 추정 금지) 반복되는 불만·요청·칭찬을 테마별로 묶고, 평점/리뷰가 말해주는 제품 개선을 제안해라. "수집 실패/제한"이라고 적힌 건 데이터 없는 것이니 지어내지 말고 그 사실만 짚어라.' },
@@ -1748,8 +1785,9 @@ const OPS_DEFS = { // id → 표시정보 + 기본값(주기/시각/요일)
   growth: { label: '그로스 실험 제안', desc: '사업 데이터 기반 타겟지표+가설 실험을 승인 게이트로 발의', defCad: 'weekly', defHour: 10, defDow: 2, perService: true },
   selfimprove: { label: '봇 자기개선 스캔', desc: '봇 자체 코드 개선점을 스캔해 승인 게이트로 발의', defCad: 'weekly', defHour: 10, defDow: 3 },
   board: { label: '전략 경영회의', desc: '부서 검토 수렴→CEO 우선순위→반론→최종결정→승인. 회사 이사회', defCad: 'weekly', defHour: 10, defDow: 5 },
+  rhythm: { label: '운영 리듬 점검', desc: '스케줄을 실제 활동·지연 과제·경보 빈도에 맞게 조정 제안(승인하면 적용)', defCad: 'monthly', defHour: 10 },
 };
-const OPS_ORDER = ['health', 'opsbrief', 'bizbrief', 'improve', 'growth', 'selfimprove', 'board'];
+const OPS_ORDER = ['health', 'opsbrief', 'bizbrief', 'improve', 'growth', 'selfimprove', 'board', 'rhythm'];
 let opsConfig = {};
 function seedOpsConfig() { for (const id of OPS_ORDER) { const d = OPS_DEFS[id]; if (!opsConfig[id]) opsConfig[id] = { cadence: d.defCad, hour: d.defHour, minute: 0, dow: d.defDow != null ? d.defDow : 1, dom: 1, channel: null, enabled: true, lastRunDay: null }; } }
 function loadOpsConfig() { try { if (fs.existsSync(OPS_CONFIG_FILE)) opsConfig = JSON.parse(fs.readFileSync(OPS_CONFIG_FILE, 'utf8')) || {}; } catch { opsConfig = {}; } seedOpsConfig(); }
@@ -1770,6 +1808,7 @@ function runOpsTask(id, ch) {
     if (id === 'growth') return void runBizGrowth(botClient, ch, false).catch(() => {});
     if (id === 'selfimprove') return void runSelfImproveScan(botClient, ch, false).catch(() => {});
     if (id === 'board') { if (!activeWork[ch]) { activeWork[ch] = { task: '경영회의', started: Date.now() }; runBoardMeeting(botClient, ch, false).catch(() => {}).finally(() => { activeWork[ch] = null; }); } return; }
+    if (id === 'rhythm') return void runRhythmProposal(botClient, ch, false).catch(() => {});
   } catch (e) { try { log('error', 'ops-task-err', { id, e: String(e).slice(0, 120) }); } catch (_) {} }
 }
 let boardAt = 0;
@@ -2203,6 +2242,20 @@ async function handle(event, client) {
       }
       else if (/^수정\s*[:：]?\s*(.+)/.test(raw)) { const mod = raw.match(/^수정\s*[:：]?\s*([\s\S]+)/)[1].trim(); const pp = pendingPlan[channel]; delete pendingPlan[channel]; await postAs(client, channel, thread_ts, LEAD, '계획에 반영해서 다시 잡을게.'); startWork(client, channel, thread_ts, pp.repo, `${pp.task}\n\n[추가 수정 지시]\n${mod}`, pp.newProject, pp.forcePR, pp.projName); return; }
     }
+    // D2: 운영 리듬 제안 승인 — "실행"/"실행 1,3"으로 스케줄 변경 적용, "넘어가"로 폐기
+    if (pendingRhythm[channel]) {
+      if (pendingRhythm[channel].at && Date.now() - pendingRhythm[channel].at > 30 * 60 * 1000) { delete pendingRhythm[channel]; }
+      else if (/^(넘어가|패스|무시|안\s?해|됐어|취소|놔둬|나중에)/.test(raw)) { delete pendingRhythm[channel]; await postAs(client, channel, thread_ts, LEAD, '오케이, 스케줄은 그대로 둘게.'); return; }
+      else if (/^(실행|적용|진행해?|좋아|ㄱㄱ|고고|다\s*해|전부\s*(해|적용))(\s*[\d,\s및과~-]+)?\s*$/.test(raw) && canCommand(event.user)) {
+        const pr = pendingRhythm[channel]; delete pendingRhythm[channel];
+        let chs = pr.changes; const nums = (raw.match(/\d+/g) || []).map(Number); if (nums.length) chs = chs.filter((_, i) => nums.includes(i + 1));
+        const applied = applyRhythm(chs);
+        logDecision(channel, 'rhythm-apply', applied.map(c => `${c.id}.${c.field}=${c.value}`).join(', '));
+        await postAs(client, channel, thread_ts, byName('윈터') || LEAD, applied.length ? `적용했어 — 정기 업무 ${applied.length}건 스케줄 변경. 홈 "정기 업무"에서 확인돼.` : '적용할 게 없었어.');
+        if (OWNER_USER_ID && botClient && applied.length) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: `운영 리듬 변경 적용: ${applied.map(c => OPS_DEFS[c.id].label).join(', ')}` }).catch(() => {});
+        return;
+      }
+    }
     // 토론 결론 액션아이템 실행 승인 — "실행"/"실행 1,3"으로 착수, "넘어가"로 폐기 (승인 게이트: 자동 실행 안 함)
     if (pendingDispatch[channel]) {
       if (pendingDispatch[channel].at && Date.now() - pendingDispatch[channel].at > 30 * 60 * 1000) { delete pendingDispatch[channel]; } // 30분 만료
@@ -2444,6 +2497,11 @@ async function handle(event, client) {
       else if (/(재무\s*검토|재무\s*제안|cfo|런웨이|번레이트|유닛이코노믹스|비용\s*검토)/i.test(raw)) dk = 'finance';
       else if (/(경쟁\s*동향|경쟁사|시장\s*분석|시장\s*동향|경쟁\s*검토|트렌드\s*조사)/i.test(raw)) dk = 'market';
       if (dk) { if (await guardBusy(client, channel, thread_ts)) return; const fr = repoFromText(raw); runDeptLoop(client, channel, dk, true, false, fr || null).catch(() => {}); return; } // 서비스명 있으면 그 서비스만(예: "스포노노 마케팅 검토")
+    }
+    // D2: 운영 리듬 제안 수동 실행
+    if (/(운영\s*리듬|리듬\s*점검|리듬\s*제안|스케줄\s*제안|스케줄\s*조정\s*제안)/i.test(raw)) {
+      if (await guardBusy(client, channel, thread_ts)) return;
+      runRhythmProposal(client, channel, true).catch(() => {}); return;
     }
     // D3: 선제 감시 수동 실행 / 켜기·끄기
     if (/(선제\s*점검|긴급\s*점검|이상\s*점검|지표\s*점검|선제\s*감시\s*(실행|점검|돌려)?)/i.test(raw) && !/(켜|꺼|on|off|상태)/i.test(raw)) {

@@ -62,5 +62,25 @@ ok(pct === 20, '효과측정 pct(+20% 적중) 계산');
 const srcLbl = s => s === 'board' ? '경영회의' : s === 'dept' ? '부서' : '그로스';
 ok(srcLbl('board') === '경영회의' && srcLbl('dept') === '부서' && srcLbl('growth') === '그로스', 'source 라벨링');
 
+// 11) D2 운영 리듬 — applyRhythm 적용 로직
+function applyRhythm(opsConfig, changes) {
+  const applied = [];
+  for (const c of (changes || [])) { const o = opsConfig[c.id]; if (!o) continue;
+    if (c.field === 'cadence' && ['daily', 'weekly', 'monthly'].includes(c.value)) { o.cadence = c.value; applied.push(c); }
+    else if (c.field === 'enabled') { o.enabled = (c.value === true || c.value === 'true'); applied.push(c); }
+    else if (c.field === 'hour') { const h = parseInt(c.value, 10); if (h >= 0 && h <= 23) { o.hour = h; applied.push(c); } }
+    else if (c.field === 'dow') { const d = parseInt(c.value, 10); if (d >= 0 && d <= 6) { o.dow = d; applied.push(c); } }
+    o.lastRunDay = null; }
+  return applied;
+}
+const oc = { growth: { cadence: 'weekly', dow: 2, hour: 10, enabled: true, lastRunDay: 20260609 }, bizbrief: { cadence: 'daily', hour: 10, enabled: true } };
+let ap = applyRhythm(oc, [{ id: 'growth', field: 'cadence', value: 'monthly' }, { id: 'bizbrief', field: 'enabled', value: 'false' }]);
+ok(ap.length === 2, '리듬 변경 2건 적용');
+ok(oc.growth.cadence === 'monthly', '그로스 주기 monthly로 변경');
+ok(oc.bizbrief.enabled === false, '사업브리핑 끄기 적용');
+ok(oc.growth.lastRunDay === null, '변경 시 lastRunDay 리셋(다음 due 재평가)');
+ok(applyRhythm(oc, [{ id: 'growth', field: 'hour', value: 25 }]).length === 0, '잘못된 시각(25시) 거부');
+ok(applyRhythm(oc, [{ id: 'nope', field: 'cadence', value: 'daily' }]).length === 0, '없는 업무 id 무시');
+
 console.log(fail ? '\n❌ board 실패 ' + fail : '\n✅ board 전부 통과');
 process.exit(fail ? 1 : 0);
