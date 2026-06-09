@@ -1602,12 +1602,12 @@ async function storeReviews(repo) {
 }
 // A2: 사업 브리핑 — 서비스별로 따로 분석(제품이 달라 한 덩어리 금지). 실수치+추세+루브릭 → 운영자 해석. 친한국어, 추정 0.
 let bizBriefAt = 0;
-async function runBizBriefing(client, channel, manual = false) {
+async function runBizBriefing(client, channel, manual = false, startLine = null) {
   if (!manual && Date.now() - bizBriefAt < 18 * 3600000) return;
   bizBriefAt = Date.now();
   try {
     const repos = Object.keys(bizData); if (!repos.length) { if (manual) await postAs(client, channel, undefined, LEAD, '아직 등록된 사업 메트릭이 없어. "사업 메트릭 등록"으로 서비스 stats를 연결해줘.'); return; }
-    let any = false;
+    let any = false; const greeted = new Set(); // 채널별 시작 멘트 1회
     for (const rp of repos) { // 서비스별 개별 브리핑
       const cur = await bizFetch(rp); const m = cur || bizLatest(rp); if (!m) continue;
       any = true;
@@ -1618,6 +1618,7 @@ async function runBizBriefing(client, channel, manual = false) {
       const gen = async () => { const r = await runClaude(`너는 도핑연구소 사업 책임자(PM/그로스)다. 아래는 "${name}" 서비스 하나의 실제 사업 지표(직전 대비 추세 포함)다. 다른 서비스랑 섞지 말고 이 서비스만 분석해라.${prod}${UNTRUSTED_PREAMBLE}\n[${name} 지표]\n${wrapUntrusted(metricsTxt)}${recallForBiz(rp, name)}\n\n${BIZ_RUBRIC}\n\n친근한 한국어 반말로(절대 마크다운·별표(*)·#·이모지·영어약어남발 금지, 쉬운 말, 그냥 문장으로). 구성: 1)지금 상태(AARRR 단계별, 있는 데이터만) 2)눈에 띄는 변화·특이사항(전일/전주/전달 대비 변동 크면 왜 중요한지 설명) 3)측정 갭(중요한데 안 보이는 지표+어떻게 계측) 4)지금 하면 효과 클 개선 1~3개(각각 어떤 지표 올리려는지 타겟). 데이터에 없는 수치는 절대 지어내지 마.`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 180000); const t = deMd((r.text || '').trim()) || '(이 서비스 브리핑 생성 실패 — 데이터부족/한도)'; return { ok: r.ok !== false, text: t }; };
       const postCh = manual ? channel : channelForWork(rp, 'bizbrief', channel); // D5: 자동이면 서비스×기능 담당 채널로 라우팅
       log('info', 'biz-briefing', { manual, repo: rp, ch: postCh });
+      if (startLine && postCh && !greeted.has(postCh)) { greeted.add(postCh); await client.chat.postMessage({ channel: postCh, text: scrubOutput(startLine) }).catch(() => {}); } // 시작 멘트도 그 서비스 채널로(브리핑 바로 위)
       let text;
       if (postCh) { const res = await replyTyping(client, postCh, undefined, byName('김채원') || LEAD, async () => { const g = await gen(); return { ...g, text: `사업 브리핑 — ${name}\n${g.text}` }; }); text = (res && res.text) || ''; }
       else { const g = await gen(); text = `사업 브리핑 — ${name}\n${g.text}`; }
@@ -1691,7 +1692,7 @@ function archiveDoneInitiatives() { // H3: pct는 stored exp에 없음 → progr
   let n = 0; for (const e of experiments) { if (!e.archived && ids.has(e.id)) { e.archived = true; n++; } } if (n) persistExperiments(); return n;
 }
 let bizGrowthAt = 0;
-async function runBizGrowth(client, channel, manual = false) {
+async function runBizGrowth(client, channel, manual = false, startLine = null) {
   if (!manual && Date.now() - bizGrowthAt < 6 * 86400000) return; bizGrowthAt = Date.now();
   if (!channel) return;
   try {
@@ -1712,7 +1713,8 @@ async function runBizGrowth(client, channel, manual = false) {
     else { // 자동: 서비스별로 그 서비스 담당 채널에 분배 발의
       stopTyping(channel);
       const byRepo = {}; for (const it of allItems) (byRepo[it.repo] = byRepo[it.repo] || []).push(it);
-      for (const rp of Object.keys(byRepo)) { const ch = channelForWork(rp, 'growth', channel); if (ch) await proposeOrAuto(client, ch, rp, byRepo[rp], `그로스 실험 제안 — ${rp.split('/').pop()} (승인하면 착수, 효과는 다음 측정에서 비교)`, { forceGate: true }); }
+      const greeted = new Set(); // 같은 채널에 시작 멘트 중복 방지
+      for (const rp of Object.keys(byRepo)) { const ch = channelForWork(rp, 'growth', channel); if (!ch) continue; if (startLine && !greeted.has(ch)) { greeted.add(ch); await client.chat.postMessage({ channel: ch, text: scrubOutput(startLine) }).catch(() => {}); } await proposeOrAuto(client, ch, rp, byRepo[rp], `그로스 실험 제안 — ${rp.split('/').pop()} (승인하면 착수, 효과는 다음 측정에서 비교)`, { forceGate: true }); }
     }
   } catch (e) { try { stopTyping(channel); log('error', 'biz-growth-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
 }
@@ -1880,13 +1882,16 @@ async function runOpsTask(id, ch) {
     const cadKo = o ? (o.cadence === 'weekly' ? '주간' : o.cadence === 'monthly' ? '월간' : '일간') : '일간';
     const label = (OPS_DEFS[id] && OPS_DEFS[id].label) || id;
     const startCh = id === 'health' ? ([...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))][0] || ch) : ch;
+    const startLine = `${ymd} · ${o ? (o.runCount || 1) : 1}차 ${cadKo} ${label} 자동 실행 시작할게.`;
+    // 서비스별로 결과가 흩어지는 업무(그로스·사업브리핑)는 시작 멘트도 각 서비스 채널로(작업함수가 제안 바로 위에 붙임). 그 외 단일채널 업무만 여기서 시작 멘트.
+    const PER_SVC = id === 'growth' || id === 'bizbrief';
     // 자동화 시작 멘트 — 작업함수의 startTyping("입력 중" 스피너)보다 먼저 올라가도록 await(레이스로 스피너가 위에 붙는 것 방지)
-    if (botClient && startCh) await botClient.chat.postMessage({ channel: startCh, text: scrubOutput(`${ymd} · ${o ? (o.runCount || 1) : 1}차 ${cadKo} ${label} 자동 실행 시작할게.`) }).catch(() => {});
+    if (botClient && startCh && !PER_SVC) await botClient.chat.postMessage({ channel: startCh, text: scrubOutput(startLine) }).catch(() => {});
     if (id === 'health') { const chans = [...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))]; (chans.length ? chans : [ch]).forEach(c => checkServices(botClient, c, false).catch(() => {})); return; }
     if (id === 'opsbrief') return void runOpsBriefing(botClient, ch, false).catch(() => {});
-    if (id === 'bizbrief') return void runBizBriefing(botClient, ch, false).catch(() => {});
+    if (id === 'bizbrief') return void runBizBriefing(botClient, ch, false, startLine).catch(() => {});
     if (id === 'improve') return void runImprovementProposal(botClient, ch, false).catch(() => {});
-    if (id === 'growth') return void runBizGrowth(botClient, ch, false).catch(() => {});
+    if (id === 'growth') return void runBizGrowth(botClient, ch, false, startLine).catch(() => {});
     if (id === 'selfimprove') return void runSelfImproveScan(botClient, ch, false).catch(() => {});
     if (id === 'board') { if (!activeWork[ch]) { activeWork[ch] = { task: '경영회의', started: Date.now() }; runBoardMeeting(botClient, ch, false).catch(() => {}).finally(() => { activeWork[ch] = null; }); } return; }
     if (id === 'rhythm') return void runRhythmProposal(botClient, ch, false).catch(() => {});
