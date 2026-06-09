@@ -1846,6 +1846,12 @@ function opsWhen(o) { const t = `${o.hour < 12 ? '오전' : '오후'} ${((o.hour
 function runOpsTask(id, ch) {
   try {
     log('info', 'ops-task', { id, ch });
+    const o = opsConfig[id]; if (o) { o.runCount = (o.runCount || 0) + 1; persistOpsConfig(); } // N차 카운트
+    const n = kstNow(); const ymd = `${Math.floor(n.day / 10000)}년 ${Math.floor(n.day / 100) % 100}월 ${n.day % 100}일`;
+    const cadKo = o ? (o.cadence === 'weekly' ? '주간' : o.cadence === 'monthly' ? '월간' : '일간') : '일간';
+    const label = (OPS_DEFS[id] && OPS_DEFS[id].label) || id;
+    const startCh = id === 'health' ? ([...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))][0] || ch) : ch;
+    if (botClient && startCh) botClient.chat.postMessage({ channel: startCh, text: scrubOutput(`${ymd} · ${o ? (o.runCount || 1) : 1}차 ${cadKo} ${label} 자동 실행 시작할게.`) }).catch(() => {}); // 자동화 시작 멘트
     if (id === 'health') { const chans = [...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))]; (chans.length ? chans : [ch]).forEach(c => checkServices(botClient, c, false).catch(() => {})); return; }
     if (id === 'opsbrief') return void runOpsBriefing(botClient, ch, false).catch(() => {});
     if (id === 'bizbrief') return void runBizBriefing(botClient, ch, false).catch(() => {});
@@ -2972,7 +2978,7 @@ function buildHomeBlocksNew() {
   B.push({ type: 'divider' });
   // 팀 / 부서 검토
   B.push({ type: 'section', text: { type: 'mrkdwn', text: '*팀원* (8)\n한로로 팀장/CEO · 김채원 PM/그로스 · 아이유 리서처/시장 · 정소민 UX\n윈터 아키/재무 · 우정잉 보안/고객 · 영듀 마케팅 · 안다연 반론' } });
-  B.push({ type: 'section', text: { type: 'mrkdwn', text: '*부서 검토 돌리기* — 각 부서가 실데이터로 진단·개선 제안' } });
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*부서 검토 돌리기* — 각 부서가 실데이터로 진단·개선 제안${settings.deptRunChannel ? `\n실행 채널: <#${settings.deptRunChannel}> (지정됨 — 아래서 바꾸거나 비우면 서비스별 기본채널로)` : '\n실행 채널: 서비스별 기본 채널(아래서 지정하면 거기로 모아서)'}`, }, accessory: chanSel('home_deptrun_ch', settings.deptRunChannel, '검토 실행 채널') });
   B.push({ type: 'actions', elements: [hbtn('고객(CX)', 'home_dept_cx'), hbtn('마케팅', 'home_dept_marketing'), hbtn('재무', 'home_dept_finance'), hbtn('시장·경쟁', 'home_dept_market'), hbtn('그로스 제안', 'home_run_growth')] });
   B.push({ type: 'divider' });
   // 정기 업무(자동) — 주기·시각·요일·채널·켜기를 홈에서 직접 편집
@@ -3063,6 +3069,7 @@ app.action(/^(home_|opscfg_|svcroute_)/, async ({ ack, body, action, client }) =
     if (aid === 'home_board_archive') { archiveDoneInitiatives(); await publishHome(client, userId); return; }
     if (aid === 'home_pause_toggle') { settings.paused = !settings.paused; persistSettings(); logDecision('home', 'global-pause', settings.paused ? 'ON' : 'OFF'); await publishHome(client, userId); return; }
     if (aid === 'home_sentinel_ch') { settings.sentinel = settings.sentinel || { enabled: true }; settings.sentinel.channel = action.selected_conversation || null; persistSettings(); await publishHome(client, userId); return; }
+    if (aid === 'home_deptrun_ch') { settings.deptRunChannel = action.selected_conversation || null; persistSettings(); await publishHome(client, userId); return; }
     if (aid === 'home_sentinel_toggle') { const on = !settings.sentinel || settings.sentinel.enabled !== false; settings.sentinel = { enabled: !on }; persistSettings(); await publishHome(client, userId); return; }
     if (aid === 'home_sentinel_run') { const ch = homeTargetChannel(userId); try { await client.chat.postMessage({ channel: userId, text: `선제 점검 돌렸어 — 이상 있으면 ${ch === userId ? '여기' : '<#' + ch + '>'}나 해당 서비스 채널로 경보가 가.` }); } catch (_) {} runBizSentinel(app.client, ch, true).catch(() => {}); setTimeout(() => publishHome(client, userId).catch(() => {}), 1500); return; }
     let m;
@@ -3100,7 +3107,7 @@ app.action(/^(home_|opscfg_|svcroute_)/, async ({ ack, body, action, client }) =
       if (!repos.length) { try { await client.chat.postMessage({ channel: userId, text: '등록된 서비스가 없어서 부서 검토를 못 돌려.' }); } catch (_) {} return; }
       const dnm = (DEPTS[dept] && DEPTS[dept].name) || dept;
       try { await client.chat.postMessage({ channel: userId, text: `${dnm} 검토를 서비스별로 시작했어 — 각 서비스 담당 채널(부서 채널 지정 시 거기, 아니면 서비스 기본)에서 진행돼.` }); } catch (_) {}
-      for (const rp of repos) { const ch = channelForWork(rp, dept, homeTargetChannel(userId)); if (ch) { try { await runDeptLoop(app.client, ch, dept, true, false, rp); } catch (_) {} } }
+      for (const rp of repos) { const ch = settings.deptRunChannel || channelForWork(rp, dept, homeTargetChannel(userId)); if (ch) { try { await runDeptLoop(app.client, ch, dept, true, false, rp); } catch (_) {} } } // 지정 채널 있으면 거기로, 없으면 서비스별 라우팅
       setTimeout(() => publishHome(client, userId).catch(() => {}), 1500); return;
     }
     const cmdMap = { home_run_board: '경영회의', home_run_bizbrief: '사업 브리핑', home_run_health: '헬스체크', home_run_opsbrief: '운영 브리핑', home_run_growth: '그로스 제안' };
