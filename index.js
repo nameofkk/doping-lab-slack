@@ -1872,7 +1872,7 @@ const CADENCE_KO = { daily: '매일', weekly: '매주', monthly: '매월' };
 const DOW_KO = ['일', '월', '화', '수', '목', '금', '토'];
 function opsWhen(o) { const t = `${o.hour < 12 ? '오전' : '오후'} ${((o.hour % 12) === 0 ? 12 : o.hour % 12)}시${o.minute ? ' ' + o.minute + '분' : ''}`; if (o.cadence === 'weekly') return `매주 ${DOW_KO[o.dow] || '월'}요일 ${t}`; if (o.cadence === 'monthly') return `매월 ${o.dom || 1}일 ${t}`; return `매일 ${t}`; }
 // 정기 업무 1건 디스패치(채널 ch로). 자동 틱에서 호출.
-function runOpsTask(id, ch) {
+async function runOpsTask(id, ch) {
   try {
     log('info', 'ops-task', { id, ch });
     const o = opsConfig[id]; if (o) { o.runCount = (o.runCount || 0) + 1; persistOpsConfig(); } // N차 카운트
@@ -1880,7 +1880,8 @@ function runOpsTask(id, ch) {
     const cadKo = o ? (o.cadence === 'weekly' ? '주간' : o.cadence === 'monthly' ? '월간' : '일간') : '일간';
     const label = (OPS_DEFS[id] && OPS_DEFS[id].label) || id;
     const startCh = id === 'health' ? ([...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))][0] || ch) : ch;
-    if (botClient && startCh) botClient.chat.postMessage({ channel: startCh, text: scrubOutput(`${ymd} · ${o ? (o.runCount || 1) : 1}차 ${cadKo} ${label} 자동 실행 시작할게.`) }).catch(() => {}); // 자동화 시작 멘트
+    // 자동화 시작 멘트 — 작업함수의 startTyping("입력 중" 스피너)보다 먼저 올라가도록 await(레이스로 스피너가 위에 붙는 것 방지)
+    if (botClient && startCh) await botClient.chat.postMessage({ channel: startCh, text: scrubOutput(`${ymd} · ${o ? (o.runCount || 1) : 1}차 ${cadKo} ${label} 자동 실행 시작할게.`) }).catch(() => {});
     if (id === 'health') { const chans = [...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))]; (chans.length ? chans : [ch]).forEach(c => checkServices(botClient, c, false).catch(() => {})); return; }
     if (id === 'opsbrief') return void runOpsBriefing(botClient, ch, false).catch(() => {});
     if (id === 'bizbrief') return void runBizBriefing(botClient, ch, false).catch(() => {});
