@@ -418,7 +418,7 @@ async function proposeOrAuto(client, channel, repo, items, headerLine, opts) {
   const label = k => k === 'investigate' ? '조사' : k === 'build' ? '코드수정' : '사람만';
   const fmt = items.map((x, i) => `${i + 1}. [${label(x.kind)}] ${x.task}`).join('\n');
   if ((opts && opts.forceGate) || !settings.autopilot || !settings.autopilot[channel]) { // 강제게이트(사업/그로스) 또는 오토파일럿 OFF → 전부 승인 받음
-    pendingDispatch[channel] = { repo, items, at: Date.now() };
+    pendingDispatch[channel] = { repo, items, at: Date.now() }; persistPendingDispatch();
     await postAs(client, channel, undefined, LEAD, `${headerLine}\n${fmt}\n\n전부 하려면 "실행"(또는 버튼), 골라서 "실행 1,3"도 돼. 안 할 거면 "넘어가".`);
     await postButtons(channel, undefined, dispatchButtons(items.length));
     return;
@@ -442,7 +442,7 @@ async function proposeOrAuto(client, channel, repo, items, headerLine, opts) {
     dispatchActionItems(client, channel, undefined, repo, autoNow).catch(() => {});
   } else if (autoNow.length) { gated.push(...autoNow); } // 이미 작업중이면 게이트로
   if (gated.length) {
-    pendingDispatch[channel] = { repo, items: gated, at: Date.now() };
+    pendingDispatch[channel] = { repo, items: gated, at: Date.now() }; persistPendingDispatch();
     const glabel = k => k === 'investigate' ? '조사' : k === 'build' ? '코드수정' : '사람만';
     const glist = gated.map((x, i) => `${i + 1}. [${glabel(x.kind)}] ${x.task}`).join('\n');
     await postAs(client, channel, undefined, LEAD, `승인 필요 (프로드·자기수정이라 자동 안 함):\n${glist}\n\n전부 하려면 "실행"(또는 전부 실행 버튼), 골라서 "실행 1" 또는 번호 버튼. 안 할 거면 "넘어가".`);
@@ -1534,6 +1534,10 @@ async function runBizBriefing(client, channel, manual = false) {
 const EXP_FILE = process.env.EXP_FILE || '/data/experiments.json';
 let experiments = [];
 function loadExperiments() { try { if (fs.existsSync(EXP_FILE)) experiments = JSON.parse(fs.readFileSync(EXP_FILE, 'utf8')) || []; } catch { experiments = []; } }
+// 대기 제안(pendingDispatch) 영속 — 재배포·재시작에도 발의된 제안이 안 날아가게(30분 만료는 유지). 메모리에만 있던 게 배포 때마다 사라지던 문제 해결. (pendingProject용 PENDING_FILE과 별개)
+const PENDING_DISPATCH_FILE = process.env.PENDING_DISPATCH_FILE || '/data/pending_dispatch.json';
+function loadPendingDispatch() { try { if (fs.existsSync(PENDING_DISPATCH_FILE)) { const j = JSON.parse(fs.readFileSync(PENDING_DISPATCH_FILE, 'utf8')) || {}; for (const ch of Object.keys(j)) { if (j[ch] && j[ch].at && Date.now() - j[ch].at < 30 * 60 * 1000) pendingDispatch[ch] = j[ch]; } } } catch (_) {} }
+function persistPendingDispatch() { try { fs.writeFileSync(PENDING_DISPATCH_FILE, JSON.stringify(pendingDispatch)); } catch (_) {} }
 function persistExperiments() { try { fs.writeFileSync(EXP_FILE, JSON.stringify(experiments.slice(-100))); } catch {} }
 function addExperiment(repo, focus, targetKey, hypothesis) {
   const cur = bizLatest(repo) || {};
@@ -2071,6 +2075,11 @@ async function handle(event, client) {
         dispatchActionItems(client, channel, thread_ts, pd.repo, items).catch(e => postAs(client, channel, thread_ts, LEAD, '실행 오류: ' + String(e).slice(0, 200)));
         return;
       }
+    }
+    // 대기 제안이 없는데 "실행"만 친 경우 — 침묵 금지. (제안 만료 30분 / 봇 재시작으로 날아갔을 때 명확히 안내)
+    else if (/^(실행|착수|전부\s*실행|실행해)(\s*[\d,\s및과~-]+)?\s*$/.test(raw) && canCommand(event.user) && !activeWork[channel] && !pendingPlan[channel] && !pendingSchedule[channel] && !pendingMcp[channel]) {
+      await postAs(client, channel, thread_ts, LEAD, '지금 실행 대기 중인 제안이 없어 — 만료(30분)됐거나 봇 재배포로 날아갔을 수 있어. "경영회의"나 "그로스 제안"·"고객 검토"를 다시 돌리면 새로 발의할게. (이제 제안은 재시작에도 보존돼.)');
+      return;
     }
     // 작업 진행 중 "수정/지시"만 진행 중 작업에 반영(피드백). 명확한 수정 신호일 때만 — 원문 재전송·새 시작명령(제작/만들/시작/진행)은 제외, 중복 방지
     if (activeWork[channel] && /(바꿔|바꾸|수정|추가해|빼고|빼줘|말고|대신|틀렸|틀려|반영|변경|고쳐|로 ?해|로 ?가|넣어|이렇게|저렇게|먼저|우선|강조|제외|보강)/.test(raw) && !/^(제작|만들|시작|진행)/.test(raw)) {
@@ -2612,11 +2621,12 @@ async function postButtons(channel, thread_ts, buttons) {
   loadMemory();
   loadRules();
   loadSettings();
-  loadTasks(); loadJobs(); loadFacts(); loadSkills(); buildMcpConfig(); loadDecisions(); loadUsage(); loadBiz(); loadExperiments();
+  loadTasks(); loadJobs(); loadFacts(); loadSkills(); buildMcpConfig(); loadDecisions(); loadUsage(); loadBiz(); loadExperiments(); loadPendingDispatch();
   loadLastRepo();
   loadServices();
   loadPending();
   setInterval(persistMemory, 15000);
+  setInterval(persistPendingDispatch, 8000); // 대기 제안 주기 플러시(재배포 생존)
   let opsLastDay = null;
   const OPS_HOUR = parseInt(process.env.OPS_HOUR || '10', 10); // 매일 이 시각(KST)에 운영 헬스체크 자동
   let driftAt = 0; // Q3 드리프트 알림 쿨다운
@@ -2703,7 +2713,7 @@ async function postButtons(channel, thread_ts, buttons) {
     if (draining) return; draining = true;
     try { log('warn', 'shutdown', { sig, claudeRunning, active: Object.keys(activeWork).filter(c => activeWork[c]).length }); } catch (_) {}
     try { for (const ch of Object.keys(activeWork)) { const w = activeWork[ch]; if (w && w.jobId && jobs[w.jobId] && jobs[w.jobId].status === 'running') jobUpdateById(w.jobId, { status: 'interrupted' }); } } catch (_) {}
-    try { persistJobs(); persistUsage(); persistPending(); persistSchedules(); persistMemory(); } catch (_) {}
+    try { persistJobs(); persistUsage(); persistPending(); persistPendingDispatch(); persistSchedules(); persistMemory(); } catch (_) {}
     const t0 = Date.now();
     const waiter = setInterval(() => {
       if (claudeRunning <= 0 || Date.now() - t0 > 10000) { clearInterval(waiter); try { log('info', 'shutdown-done', { waitedMs: Date.now() - t0, claudeRunning }); } catch (_) {} process.exit(0); }
