@@ -930,6 +930,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
       extractFacts(repo, `[작업] ${task}\n[한 일] ${(res.text || '').slice(0, 1500)}`, '작업').catch(() => {}); // R7: 이 작업에서 기억할 사실 저장
       if (!incomplete) extractSkill(repo, `[성공한 작업] ${task}\n[한 일] ${(res.text || '').slice(0, 1500)}`).catch(() => {}); // B1: 성공 작업에서 재사용 스킬 추출(Voyager)
       await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}${doneHead} ${repoUrl} (${WORK_BASE}에 반영)\n코드 브라우저로 보려면: https://github.dev/${repo}\n빌드·라이브·스크린샷은 위에 확인해줘. (코드 파일로 받고 싶으면 "코드 줘"라고 해)`);
+      postFeedbackButtons(channel, thread_ts, '화면·결과 보고 바꿀 점 있으면 "피드백 주기"로 줘 — "이어서"로 그 부분만 다시 손볼게.').catch(() => {});
       if (newProject && !incomplete) await handoffChecklist(client, channel, thread_ts, repo, task); // 미완성이면 "상용 오픈 체크리스트" 안 띄움(거짓 신호 방지)
       return;
     }
@@ -947,6 +948,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   await verifyBuild(client, channel, thread_ts, dir, repo, branch); // PR 경로 → 빌드 자동수정도 PR 브랜치로(main 직행 금지)
   jobUpdate(channel, { status: 'awaiting-approval', artifacts: [url], note: 'PR 머지 대기' });
   await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}${doneHead} ${forcePR ? '승인모드라 PR로 올렸어 (머지하면 반영).' : 'PR로 올렸어.'}\nPR: ${url}\n코드 브라우저로 보려면: https://github.dev/${repo}`);
+  postFeedbackButtons(channel, thread_ts, '결과 보고 바꿀 점 있으면 "피드백 주기"로 줘 — "이어서"로 그 부분만 다시 손볼게.').catch(() => {});
   if (newProject && !incomplete) await handoffChecklist(client, channel, thread_ts, repo, task);
   } finally { await prog.done(); try { await sh(`rm -rf ${dir}`); } catch {} } // I7: 작업 후 임시 작업디렉토리 정리(디스크 보호·격리)
 }
@@ -2116,10 +2118,11 @@ async function onWorkFailed(client, channel, thread_ts, jobId, err, ctx) {
 function failNotifyOwner(label, repo, err) { try { if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`[작업 실패] ${label}${repo ? ' (' + repo.split('/').pop() + ')' : ''}\n${String(err).slice(0, 300)}`) }).catch(() => {}); } catch (_) {} }
 // 작업 실행(activeWork 세팅 + runWork + 정리) 공통
 function launchWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName, recoverAttempt = 0) {
-  feedback[channel] = []; if (!recoverAttempt) delete pausedWork[channel]; // 새 작업이면 옛 중단작업 정리(복구 재개는 유지)
+  if (!recoverAttempt) { delete pausedWork[channel]; if (newProject) feedback[channel] = []; } // 새 신규프로젝트만 옛 피드백 정리. 이어서·기존수정·복구는 큐된 피드백 유지(drainFeedback이 단계에서 소비)
   const job = createJob(channel, newProject ? 'build' : 'work', task, repo, lastRequester[channel]); // R1: 작업 보드에 기록
   const ctx = { task, started: Date.now(), beat: Date.now(), by: lastRequester[channel], repo, newProject, forcePR, projName, jobId: job.id, recoverAttempt }; // 재개·복구용 컨텍스트
   activeWork[channel] = ctx;
+  if (!recoverAttempt) postFeedbackButtons(channel, thread_ts, '작업 들어갔어 — 진행 중에 바꿀 점 생기면 "피드백 주기"로 언제든 줘. 단계 끝날 때마다 반영할게.').catch(() => {}); // 피드백 루프 어포던스
   runWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName)
     .catch(e => { const err = String(e).slice(0, 300); jobUpdateById(job.id, { status: 'failed', error: err.slice(0, 200) }); const fctx = { ...ctx, repo: (activeWork[channel] && activeWork[channel].repo) || repo }; onWorkFailed(client, channel, thread_ts, job.id, err, fctx).catch(() => {}); }) // #3/#4: 실패 표시+자동복구
     .finally(() => { if (jobs[job.id] && jobs[job.id].status === 'running') jobUpdateById(job.id, { status: 'done' }); if (activeWork[channel] && activeWork[channel].jobId === job.id) activeWork[channel] = null; }); // 이 잡 것만 정리(복구 재개가 새로 잡은 건 안 건드림)
@@ -2788,6 +2791,13 @@ async function handle(event, client) {
       runReport(client, channel, event.thread_ts || event.ts, reporter, projRepo, raw).catch(e => { jobUpdate(channel, { status: 'failed', error: String(e).slice(0, 150) }); failNotifyOwner('조사', null, e); postAs(client, channel, thread_ts, LEAD, '조사 오류: ' + String(e).slice(0, 300)); }).finally(() => { endJob(channel); activeWork[channel] = null; });
       return;
     }
+    // 작업 중 자유발화 = 피드백으로 캡처(버튼/모달이 주 경로지만 타이핑도 안 놓침). 제어·조회 명령은 위에서 이미 처리됨. 페르소나 호출·질문·맞장구는 잡담으로 통과.
+    if (activeWork[channel] && canCommand(event.user) && raw.length > 4 && !/\?\s*$/.test(raw) && ![LEAD, ...TEAM].some(p => (p.kw || []).some(k => raw.trim().toLowerCase().startsWith(String(k).toLowerCase()))) && !/^(ㅎㅇ|하이|안녕|ㅇㅇ|ㅇㅋ|오케이|ok|굿|고마워|고맙|땡큐|ㅋㅋ|ㅎㅎ|응|넹|네|예|좋아|좋네|왜|뭐|어때|어떻게|진행\s*상황|상황|얼마나|언제|다\s*됐|끝났)/i.test(raw.trim())) {
+      queueFeedback(channel, raw);
+      await postAs(client, channel, thread_ts, LEAD, `피드백 메모해뒀어 — "${raw.slice(0, 60)}"\n지금 작업 단계 끝나는 대로 반영할게.`);
+      await postFeedbackButtons(channel, thread_ts, '추가로 바꿀 점 있으면 버튼으로 줘.');
+      return;
+    }
     // 특정 단어 없어도 AI가 의도 판단 → 작업이면 알아서 수행
     const ctx = recentCtx(channel);
     // 짧은 인사·맞장구는 분류기(haiku) 안 돌리고 바로 잡담 처리 → 사용량 절약
@@ -3064,6 +3074,30 @@ app.action(/^(dispatch|plan|sched|mcp)_/, async ({ ack, body, action }) => {
     await handle({ channel, user: body.user && body.user.id, ts: 'btn-' + (action.action_ts || (body.actions && body.actions[0] && body.actions[0].action_ts) || '0'), text }, app.client);
   } catch (e) { try { console.log('[action] err', String(e).slice(0, 120)); } catch (_) {} }
 });
+// ── 피드백 루프 UI: 버튼 → 텍스트박스(모달) → 큐 적재 → 단계 경계에서 반영 ──
+app.action('fb_open', async ({ ack, body, action, client }) => { // [피드백 주기] 버튼 → 모달 열기
+  await ack();
+  try {
+    const channel = (action && action.value) || (body.channel && body.channel.id) || (body.container && body.container.channel_id); if (!channel) return;
+    await client.views.open({ trigger_id: body.trigger_id, view: { type: 'modal', callback_id: 'fb_modal', private_metadata: channel, title: { type: 'plain_text', text: '피드백' }, submit: { type: 'plain_text', text: '반영' }, close: { type: 'plain_text', text: '닫기' }, blocks: [{ type: 'input', block_id: 'fb', label: { type: 'plain_text', text: '바꾸거나 추가할 점을 적어줘' }, element: { type: 'plain_text_input', action_id: 'fb_text', multiline: true, placeholder: { type: 'plain_text', text: '예: 히어로 색을 더 어둡게, 가입 버튼을 위로, 톤을 더 차분하게...' } } }] } });
+  } catch (e) { try { console.log('[fb] open err', String(e).slice(0, 120)); } catch (_) {} }
+});
+app.view('fb_modal', async ({ ack, body, view }) => { // 모달 제출 → 피드백 큐에 적재
+  await ack();
+  try {
+    const channel = view.private_metadata; const text = (((view.state.values.fb || {}).fb_text || {}).value || '').trim();
+    if (!channel || !text) return;
+    queueFeedback(channel, text);
+    const active = !!activeWork[channel];
+    if (botClient) await botClient.chat.postMessage({ channel, text: scrubOutput(active ? `피드백 받았어 — "${text.slice(0, 90)}"\n지금 작업 단계 끝나는 대로 바로 반영할게.` : `피드백 받았어 — "${text.slice(0, 90)}"\n"이어서"라고 하면 이 피드백 반영해서 바로 이어갈게.`) });
+  } catch (e) { try { console.log('[fb] submit err', String(e).slice(0, 120)); } catch (_) {} }
+});
+// 피드백 적재(중복·과다 방지) + 작업 beat 갱신(살아있음 표시)
+function queueFeedback(channel, text) { feedback[channel] = feedback[channel] || []; if (feedback[channel].length < 12) feedback[channel].push(String(text).slice(0, 500)); bumpWork(channel); }
+// 작업 메시지에 붙이는 피드백 어포던스(버튼). withCtrl=true면 진행/중단도.
+async function postFeedbackButtons(channel, thread_ts, note) {
+  try { if (!botClient) return; await botClient.chat.postMessage({ channel, thread_ts, text: note || '피드백', blocks: [{ type: 'section', text: { type: 'mrkdwn', text: note || '바꿀 점 있으면 버튼으로 알려줘 — 단계 끝날 때마다 반영할게.' } }, { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: '피드백 주기', emoji: true }, action_id: 'fb_open', value: channel }] }] }); } catch (_) {}
+}
 // L3: 메인 봇(botClient)이 버튼을 별도 메시지로 올림 — 페르소나는 별개 토큰이라 버튼 라우팅이 안 되므로. 실패해도 텍스트 명령이 폴백.
 async function postButtons(channel, thread_ts, buttons) {
   try {
