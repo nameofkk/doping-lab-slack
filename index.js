@@ -114,16 +114,23 @@ function clientFor(persona) {
   if (!clientCache.has(tok)) clientCache.set(tok, new WebClient(tok));
   return clientCache.get(tok);
 }
+const POST_LIMIT = 3800; // 슬랙 한 메시지 안전 길이 — 넘으면 자르지 말고 분할
+function chunkText(t, lim) { const out = []; let s = String(t == null ? '' : t); while (s.length > lim) { let cut = s.lastIndexOf('\n\n', lim); if (cut < lim * 0.5) cut = s.lastIndexOf('\n', lim); if (cut < lim * 0.5) cut = lim; out.push(s.slice(0, cut)); s = s.slice(cut).replace(/^\n+/, ''); } if (s.length) out.push(s); return out.length ? out : ['']; }
 async function postAs(defaultClient, channel, thread_ts, persona, text) {
   try {
     try { stopTyping(channel); } catch (_) {} // 답 나가면 입력중 스피너 제거
     text = scrubOutput(text); // Q2: 발신 직전 시크릿 마스킹(모든 발신 단일 통로)
     const wc = clientFor(persona);
-    let res;
-    if (wc) res = await wc.chat.postMessage({ channel, thread_ts, text });          // 진짜 별도 멤버
-    else res = await defaultClient.chat.postMessage({ channel, thread_ts, text, username: persona.name, icon_emoji: persona.emoji });
-    recordMsg(channel, persona.name, text);
-    return res || null; // 스레드 앵커(ts) 필요 시 사용 — 기존 호출은 반환값 무시라 안전
+    const chunks = (text && text.length > POST_LIMIT) ? chunkText(text, POST_LIMIT) : [text]; // 긴 글은 잘라버리지 말고 여러 메시지로(보고문 끝 액션 잘림 방지)
+    let res = null;
+    for (let i = 0; i < chunks.length; i++) {
+      const t = chunks[i]; let r;
+      if (wc) r = await wc.chat.postMessage({ channel, thread_ts, text: t });          // 진짜 별도 멤버
+      else r = await defaultClient.chat.postMessage({ channel, thread_ts, text: t, username: persona.name, icon_emoji: persona.emoji });
+      if (i === 0) res = r;
+      recordMsg(channel, persona.name, t);
+    }
+    return res || null; // 첫 메시지의 ts(스레드 앵커) — 기존 호출은 반환값 무시라 안전
   } catch (e) { /* not_in_channel 등 → 채널에 초대 안 된 봇은 조용히 패스 */ return null; }
 }
 // 타이핑 연출 — 슬랙 네이티브 "작성 중"은 봇이 못 쓰니(RTM 폐기) "입력 중 ·" 임시 메시지를 1초마다 순환(로딩 스피너). 채널당 1개, 봇이 답(postAs)하면 자동 삭제. 모든 대화에 적용.
@@ -332,7 +339,7 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
   if (stopped) { delete workCancel[channel]; await postAs(client, channel, thread_ts, LEAD, '토론 중단했어.'); return; }
   const structDigest = structured.length ? `\n\n[구조화된 핵심 주장 — 이걸 1차 입력으로 종합해라]\n${structured.map(s => `- ${s.who}: ${s.tag}`).join('\n')}` : '';
   const synth = await runClaude(`${LEAD.prompt}${STYLE}${rulesCtx(channel)}${structDigest}\n\n[토론 전문(참고)]\n${transcript.slice(-3500)}\n\n위 구조화된 핵심 주장을 1차 근거로, 전문은 보조로 종합해. 의견 갈린 지점 짚고, 가장 설득력 있는 쪽으로 최적 결론. 단순 요약 말고 결정과 다음 액션까지. 특히 '미해결'로 표시된 건 액션아이템 후보로 챙겨.${HONEST}`, LEAD.model);
-  await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}📋 결론\n` + (synth.text || '').trim().slice(0, 2800));
+  await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}📋 결론\n` + (synth.text || '').trim().slice(0, 9000));
   extractFacts(repo || channel, `[토론: ${idea}]\n${(synth.text || '').slice(0, 1800)}`, '토론').catch(() => {}); // R7: 토론 결론에서 결정·사실 저장
   // 결론의 액션아이템을 뽑아서 "승인하면 실제로 착수"하게 제시 (자동 실행 X — 사용자 승인 게이트). 레포 있을 때만(코드로 할 게 있어야 함).
   if (repo && synth.text && synth.ok !== false) {
@@ -371,6 +378,7 @@ async function dispatchActionItems(client, channel, thread_ts, defaultRepo, item
   const repos = Object.keys(byRepo).filter(Boolean);
   if (!repos.length) { await postAs(client, channel, thread_ts, LEAD, '코드로 착수할 수 있는 건 없네. 나머진 사람이 해야 하는 거야(계정·심사 등).'); return; }
   activeWork[channel] = { task: '액션아이템 실행', started: Date.now(), beat: Date.now() };
+  const followups = []; // 조사 결과 → 후속 실행안 추출용
   try {
     for (const repo of repos) {
       const its = byRepo[repo]; const investigates = its.filter(x => x.kind === 'investigate'); const builds = its.filter(x => x.kind === 'build');
@@ -380,7 +388,8 @@ async function dispatchActionItems(client, channel, thread_ts, defaultRepo, item
       if (investigates.length) {
         const combined = '팀이 "확인 필요"라고 한 것들을 레포 코드로 직접 확인해서 사실로 답해라(추측 금지, 코드 근거로):\n' + investigates.map((x, i) => `${i + 1}. ${x.task}`).join('\n');
         await postAs(client, channel, thread_ts, LEAD, `조사 ${investigates.length}건 까볼게.`);
-        await runReport(client, channel, thread_ts, byName('우정잉') || LEAD, repo, combined);
+        const reportText = await runReport(client, channel, thread_ts, byName('우정잉') || LEAD, repo, combined);
+        if (reportText) followups.push({ repo, text: reportText });
       }
       for (const b of builds.slice(0, 3)) {
         if (workCancel[channel]) { delete workCancel[channel]; break; }
@@ -390,7 +399,18 @@ async function dispatchActionItems(client, channel, thread_ts, defaultRepo, item
       }
       if (builds.length > 3) await postAs(client, channel, thread_ts, LEAD, `${repo.split('/').pop()} 코드작업 ${builds.length}개 중 3개만 했어. 나머진 "작업: ..."로.`);
     }
-    await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}액션아이템 실행 끝. 조사 결과·PR 위에서 확인해줘.`);
+    // 조사 결과 → 후속 실행(수정) 제안을 게이트로 발의 — "다음 뭐 할지/승인요청"이 비지 않게
+    let followProposed = false;
+    for (const f of followups) {
+      try {
+        const acts = await extractActionItems(f.text);
+        const fixes = (acts || []).filter(a => a && a.task && ['build', 'investigate'].includes(a.kind)).slice(0, 3)
+          .map(a => { const nm = f.repo === SELF_REPO ? '봇' : f.repo.split('/').pop(); return { who: '조사후속', repo: f.repo, task: `[${nm}] ${a.task}`, kind: a.kind }; });
+        if (fixes.length) { await proposeOrAuto(client, channel, fixes[0].repo, fixes, `조사 결과 — 다음 실행 제안 (${f.repo === SELF_REPO ? '봇' : f.repo.split('/').pop()})`, { forceGate: true }); followProposed = true; }
+      } catch (_) {}
+    }
+    if (followProposed) await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}조사 끝났어. 결과 바탕으로 다음 실행안을 위에 제안해놨으니, "실행"으로 승인하면 착수할게(원인 확인됐으면 바로 고치는 거야).`);
+    else await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}액션아이템 실행 끝. 조사 결과·PR 위에서 확인해줘.`);
   } catch (e) { await postAs(client, channel, thread_ts, LEAD, '실행 중 오류: ' + String(e).slice(0, 200)); }
   finally { activeWork[channel] = null; }
 }
@@ -1021,8 +1041,9 @@ function extractRepo(raw) {
   return null;
 }
 async function runReport(client, channel, thread_ts, reporter, repo, task) {
+  let reportOut = ''; // 조사 최종안 텍스트(후속 제안 추출용)
   ensureJob(channel, 'report', task, repo); // R1: 보드에 기록
-  if (!GITHUB_TOKEN) { jobUpdate(channel, { status: 'failed', error: 'GITHUB_TOKEN 없음' }); await postAs(client, channel, thread_ts, reporter, 'GITHUB_TOKEN이 없어서 조사를 못 해.'); return; }
+  if (!GITHUB_TOKEN) { jobUpdate(channel, { status: 'failed', error: 'GITHUB_TOKEN 없음' }); await postAs(client, channel, thread_ts, reporter, 'GITHUB_TOKEN이 없어서 조사를 못 해.'); return reportOut; }
   await postAs(client, channel, thread_ts, reporter, `${repo} 한번 까볼게. 잠깐만.`);
   const id = ++workSeq; const dir = `/tmp/r${id}`;
   const prog = startProgress(channel, thread_ts, `${repo.split('/').pop()} 까보고 정리하는 중`, reporter);
@@ -1033,7 +1054,7 @@ async function runReport(client, channel, thread_ts, reporter, repo, task) {
     const res = await runClaude(`이 저장소를 실제로 열어보고, 아래 UNTRUSTED 마커 안의 사용자 요청에 직접 답해라.${UNTRUSTED_PREAMBLE}\n사용자 요청:\n${wrapUntrusted(task)}\n 단순 현황 나열이 아니라, 레포에서 확인한 사실을 근거로 실제 답·제안·전략을 내라. 코드는 읽기만 해. 레포에 없는 시장·경쟁사·트렌드·벤치마크는 웹서치(WebSearch)로 찾아서 근거로 써도 돼.${GROUND}${rulesCtx(channel)}${recallFacts(repo, task)}\n\n역할별로 각자 그 요청에 대한 자기 분야의 답/제안을 줘. 각 줄 "역할: 답/제안" 형식(관련된 역할만, PM/리서처/UX/아키텍트/보안/마케터). 질문 분야의 담당이 메인으로 구체적인 안을 내고(예: 마케팅 질문이면 마케터가 채널·메시지·실행안까지), 나머지는 거들어. 한 역할당 2~4줄.${PLAIN}`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 540000);
     if (res.limited) { await postAs(client, channel, thread_ts, reporter, `${mention(channel)}⏳ 조사 중에 클로드 사용량 한도에 걸렸어. 리셋되면 다시 봐줄게.`); return; }
     const n = await distributeReport(client, channel, thread_ts, res.text);
-    if (!n) await postAs(client, channel, thread_ts, reporter, (res.text || '(내용 없음)').trim().slice(0, 3000));
+    if (!n) await postAs(client, channel, thread_ts, reporter, (res.text || '(내용 없음)').trim().slice(0, 9000));
     // 반론자 안다연 — 위 의견들 검토해서 약점/리스크/근거 약한 부분 반박 (특히 코드로 확인 안 된 걸 사실처럼 말한 거)
     const devil = byName('안다연'); let devilText = '';
     if (devil && !workCancel[channel]) {
@@ -1043,10 +1064,11 @@ async function runReport(client, channel, thread_ts, reporter, repo, task) {
     // 팀장 한로로 — 의견들 + 반론 다 검토해서 최종 실행안으로 종합·보완 (그냥 의견 나열로 끝내지 않게)
     if (workCancel[channel]) { delete workCancel[channel]; return; } // 중단 요청 시 종합 안 함
     const synth = await runClaude(`${LEAD.prompt}${PLAIN}${rulesCtx(channel)}\n\n[사용자 질문]\n${task}\n\n[팀 의견]\n${(res.text || '').slice(0, 2500)}\n\n[안다연 반론]\n${devilText.slice(0, 1200)}\n\n위를 다 검토해서 "최종안"으로 종합·보완해라. 의견 충돌은 네가 정리하고, 우선순위(1·2·3)를 매기고, 코드로 확인 안 된 가정은 빼거나 "확인 필요"로 표시해라. 바로 실행 가능한 구체적 액션으로 끝내. 마크다운 금지.`, LEAD.model, dir, CLAUDE_PERMISSION_MODE, 180000);
-    if (synth.text && synth.ok !== false) await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}📌 최종안 (팀 의견+반론 종합)\n${synth.text.trim().slice(0, 2500)}`);
+    if (synth.text && synth.ok !== false) { reportOut = synth.text.trim(); await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}📌 최종안 (팀 의견+반론 종합)\n${reportOut.slice(0, 9000)}`); } // 분할게시되니 안 잘림
     else await postAs(client, channel, thread_ts, reporter, `${mention(channel)}다 정리했어, 위에 봐줘!`);
     extractFacts(repo, `[조사] ${task}\n${(synth.text || res.text || '').slice(0, 1800)}`, '조사').catch(() => {}); // R7: 조사에서 확인된 사실 저장
   } finally { await prog.done(); try { await sh(`rm -rf ${dir}`); } catch {} } // I7: 임시 디렉토리 정리
+  return reportOut; // 후속 제안 추출용(조사 결과 → 수정 제안 게이트)
 }
 
 // ── 주기 스케줄 (영구 저장) ──
@@ -2627,7 +2649,7 @@ async function postButtons(channel, thread_ts, buttons) {
   loadPending();
   setInterval(persistMemory, 15000);
   setInterval(persistPendingDispatch, 8000); // 대기 제안 주기 플러시(재배포 생존)
-  let opsLastDay = null;
+  let opsHealthDay = null, opsBriefDay = null;
   const OPS_HOUR = parseInt(process.env.OPS_HOUR || '10', 10); // 매일 이 시각(KST)에 운영 헬스체크 자동
   let driftAt = 0; // Q3 드리프트 알림 쿨다운
   setInterval(() => {
@@ -2650,24 +2672,26 @@ async function postButtons(channel, thread_ts, buttons) {
         }
       }
     }
-    // 매일 OPS_HOUR에 전체 헬스체크 리포트 (운영 부서 자동화)
-    if (n.h === OPS_HOUR && n.m === 0 && opsLastDay !== n.day) {
-      opsLastDay = n.day;
+    // 매일 OPS_HOUR 정각: 헬스체크(가벼움) — 항상 1회
+    if (n.h === OPS_HOUR && n.m === 0 && opsHealthDay !== n.day) {
+      opsHealthDay = n.day;
       const chans = [...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))];
       for (const ch of chans) checkServices(botClient, ch, false).catch(() => {});
-      // A3: 일1회 자율 운영 브리핑 — 서비스 채널 있으면 거기, 없으면 최근 채널, 그것도 없으면 OWNER DM만
+    }
+    // 무거운 일일 자동(브리핑·주간 제안)은 OPS_HOUR 시간대에 채널이 "한가할 때만" 1회 — 작업/대기제안 중이면 안 쏟고 다음 틱(같은 시간대 내) 재시도. 와르르 방지로 텀 두고 순차.
+    if (n.h === OPS_HOUR && opsBriefDay !== n.day) {
+      const chans = [...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))];
       const briefCh = chans[0] || Object.keys(lastRequester)[0] || null;
-      runOpsBriefing(botClient, briefCh, false).catch(() => {});
-      runBizBriefing(botClient, briefCh, false).catch(() => {}); // A2: 일1회 사업 브리핑
-
-      // A4: 주1회(월요일) 능동 개선 제안 — 게이트로 발의
-      if (n.dow === 1 && briefCh) runImprovementProposal(botClient, briefCh, false).catch(() => {});
-      // B4: 주1회(수요일) 능동 자기개선 스캔 — 봇 자체 코드 개선 발의(게이트)
-      if (n.dow === 3 && briefCh) runSelfImproveScan(botClient, briefCh, false).catch(() => {});
-      // A3: 주1회(화요일) 그로스 실험 제안 — 사업 데이터 기반(게이트)
-      if (n.dow === 2 && briefCh) runBizGrowth(botClient, briefCh, false).catch(() => {});
-      // Phase C: 주1회(금요일) 전략 경영회의 — 부서 제안 수렴→집중 과제 결정(게이트)
-      if (n.dow === 5 && briefCh && !activeWork[briefCh]) { activeWork[briefCh] = { task: '경영회의', started: Date.now() }; runBoardMeeting(botClient, briefCh, false).catch(() => {}).finally(() => { activeWork[briefCh] = null; }); }
+      if (briefCh && !activeWork[briefCh] && !pendingDispatch[briefCh]) { // 한가할 때만 — 안 그러면 opsBriefDay 안 박고 다음 틱 재시도
+        opsBriefDay = n.day; const dow = n.dow;
+        const idle = () => !activeWork[briefCh] && !pendingDispatch[briefCh]; // 순차 사이에 또 바빠지면 뒤엣것 양보
+        runOpsBriefing(botClient, briefCh, false).catch(() => {}); // 운영 브리핑 먼저
+        setTimeout(() => { if (!activeWork[briefCh]) runBizBriefing(botClient, briefCh, false).catch(() => {}); }, 180000); // 3분 뒤 사업 브리핑
+        if (dow === 1) setTimeout(() => { if (idle()) runImprovementProposal(botClient, briefCh, false).catch(() => {}); }, 360000); // 월: 개선 제안
+        if (dow === 2) setTimeout(() => { if (idle()) runBizGrowth(botClient, briefCh, false).catch(() => {}); }, 360000); // 화: 그로스 제안
+        if (dow === 3) setTimeout(() => { if (idle()) runSelfImproveScan(botClient, briefCh, false).catch(() => {}); }, 360000); // 수: 자기개선
+        if (dow === 5) setTimeout(() => { if (!activeWork[briefCh]) { activeWork[briefCh] = { task: '경영회의', started: Date.now() }; runBoardMeeting(botClient, briefCh, false).catch(() => {}).finally(() => { activeWork[briefCh] = null; }); } }, 360000); // 금: 경영회의
+      }
     }
     // A4: 능동 강화 — 악화(2연속 다운+) 서비스는 시간 기다리지 말고 다음 틱에 즉시 재확인(빠른 복구·다운 감지)
     if (n.m % 5 === 0) {
