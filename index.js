@@ -691,7 +691,7 @@ async function liveCheck(client, channel, thread_ts, dir, repo) {
   const deployable = (await sh(`test -f package.json && echo yes || echo no`, dir)).out.includes('yes'); // 정적 HTML은 package.json 없음 → 레일웨이 배포 스킵
   if (deployable) { try { url = await railwayDeploy(client, channel, thread_ts, dir, repo); } catch (e) {} }
   registerService(repo, url, channel); // 서비스 대장에 등록 (운영/마케팅 루프 대상)
-  await onboardNewService(client, channel, thread_ts, repo, url); // 신규면 사업 운영 루프·홈·채널 자동 편입(멱등)
+  await onboardNewService(client, channel, thread_ts, repo, url, dir); // 신규면 사업 운영 루프·홈·채널 자동 편입(멱등)
   target = url;
   try {
     if (!target) {
@@ -1191,8 +1191,6 @@ function rulesCtx(channel) { const r = rules[channel] || []; return r.length ? `
 const SET_FILE = process.env.SETTINGS_FILE || '/data/settings.json';
 let settings = { commanders: [], approval: {}, autopilot: {} };
 function loadSettings() { try { if (fs.existsSync(SET_FILE)) settings = JSON.parse(fs.readFileSync(SET_FILE, 'utf8')) || settings; } catch {} settings.commanders = settings.commanders || []; settings.approval = settings.approval || {}; settings.autopilot = settings.autopilot || {}; settings.repoChannel = settings.repoChannel || {}; settings.hqChannel = settings.hqChannel || null; settings.workRoute = settings.workRoute || {}; settings.sentinel = settings.sentinel || { enabled: true }; }
-// D5: 서비스(repo)별 담당 채널 — 자동 브리핑·알림을 그 서비스 채널로 라우팅(없으면 기본 채널). hqChannel=경영회의 등 전사 업무 채널.
-function channelForRepo(repo, fallback) { try { return (settings.repoChannel && settings.repoChannel[repo]) || fallback || null; } catch { return fallback || null; } }
 // 텍스트에서 등록된 사업 서비스(repo) 찾기 — 영문 레포명 + 한글 별칭
 function repoFromText(raw) { const t = String(raw || ''); for (const rp of Object.keys(bizData)) { const nm = rp.split('/').pop(); if (nm && new RegExp(nm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(t)) return rp; } if (/위원트피스|위피|wewantpeace/i.test(t)) return Object.keys(bizData).find(r => /wewantpeace/i.test(r)) || null; if (/스포노노|스포논|sponono/i.test(t)) return Object.keys(bizData).find(r => /sponono/i.test(r)) || null; return null; }
 function persistSettings() { try { fs.writeFileSync(SET_FILE, JSON.stringify(settings)); } catch {} }
@@ -1322,15 +1320,19 @@ function registerService(repo, url, channel) {
   persistServices();
 }
 function svcList(channel) { return Object.values(services).filter(s => !channel || s.channel === channel); }
+// M1: bizData에 있는데 services(헬스 모니터링)에 없는 서비스를 보충 — 소스 URL을 헬스 URL로. 양쪽 비대칭 해소.
+function reconcileServices() { try { for (const rp of Object.keys(bizData)) { if (rp === SELF_REPO || services[rp]) continue; const u = (bizData[rp].sources && bizData[rp].sources[0] && bizData[rp].sources[0].url) || null; if (u) registerService(rp, u, (settings.repoChannel && settings.repoChannel[rp]) || null); } } catch (_) {} }
 // 신규 서비스 자동 온보딩 — 배포된 새 서비스를 사업 운영 루프(브리핑·부서검토·선제감시·경영회의·홈)에 자동 편입. bizData 미존재 = 첫 온보딩(멱등).
-async function onboardNewService(client, channel, thread_ts, repo, url) {
+async function onboardNewService(client, channel, thread_ts, repo, url, dir) {
   try {
     if (!repo || repo === SELF_REPO || bizData[repo]) return; // 이미 온보딩됐거나 봇 자신이면 스킵
-    bizData[repo] = { repo, sources: [], history: [] }; persistBiz(); // 핵심 싱크: 운영 루프 편입
+    bizData[repo] = { repo, sources: [], history: [] };
+    if (dir) { try { const pj = await sh(`cat package.json 2>/dev/null`, dir); const desc = (JSON.parse((pj.out || '{}').trim() || '{}').description || '').toString().slice(0, 300); if (desc) bizData[repo].product = desc; } catch (_) {} } // M2: 제품 설명 자동 수집(분석 품질)
+    persistBiz(); // 핵심 싱크: 운영 루프 편입
     if (settings.repoChannel && !settings.repoChannel[repo] && channel) { settings.repoChannel[repo] = channel; persistSettings(); }
     const name = repo.split('/').pop();
     logDecision(channel, 'service-onboard', `${repo} 운영 루프 편입`);
-    await postAs(client, channel, thread_ts, byName('김채원') || LEAD, `신규 서비스 "${name}" 온보딩 완료.\n이제 사업 브리핑·부서 검토·선제 감시·경영회의에 자동으로 들어가고 헬스체크도 돌아. 홈탭 "서비스 기본 채널"에도 떠.\n회원·매출 같은 사업 지표까지 보려면 stats만 연결하면 돼 — "사업 메트릭 등록 ${name} <stats_url>".`);
+    await postAs(client, channel, thread_ts, byName('김채원') || LEAD, `신규 서비스 "${name}" 온보딩 완료.\n이제 사업 브리핑·부서 검토·선제 감시·경영회의에 자동으로 들어가고 헬스체크도 돌아. 홈탭 "서비스 기본 채널"에도 떠.${bizData[repo].product ? '' : `\n제품 한 줄 설명 알려주면 분석이 정확해져 — "서비스 설명 ${name} <한 줄>".`}\n회원·매출 같은 사업 지표까지 보려면 stats만 연결하면 돼 — "사업 메트릭 등록 ${name} <stats_url>".`);
     if (settings.autoChannel !== false && botClient) { // 전용 채널 best-effort(스코프 없으면 조용히 빌드채널 유지)
       try {
         const chName = ('ops-' + name).toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').slice(0, 70);
@@ -1500,6 +1502,8 @@ const BIZ_PRODUCT = {
   'nameofkk/wewantpeace': '전 세계 분쟁·전쟁을 실시간 추적하는 플랫폼(지도·긴장지수·AI분석·알림). 핵심행동=알림 구독/지도 사용, 노스스타=전달한 분쟁 알림·활성 이슈.',
   'nameofkk/sponono': '유튜브·트위터·웹툰에서 스포일러를 자동 차단하는 구독 앱(무료10개·프리미엄 무제한). 핵심행동=첫 차단 경험, 노스스타=막아준 스포일러 수, 수익=월 구독.',
 };
+// M2: 제품 설명 — 하드코딩 BIZ_PRODUCT 우선, 없으면 bizData[rp].product(신규 서비스 온보딩 시 수집). 신규 서비스도 제품맥락 있는 분석.
+function productOf(rp) { return BIZ_PRODUCT[rp] || (bizData[rp] && bizData[rp].product) || ''; }
 // 정확한 스토어 listing URL — 참조/표기용. 공개 데이터라 키 불필요.
 const STORE_URLS = {
   'nameofkk/wewantpeace': ['Play스토어: https://play.google.com/store/apps/details?id=com.wewantpeace.app&hl=ko'],
@@ -1565,7 +1569,7 @@ async function runBizBriefing(client, channel, manual = false) {
       const tr = bizTrendLines(rp);
       const metricsTxt = Object.entries(m).map(([k, v]) => `${(BIZ_LABELS[k] ? BIZ_LABELS[k].ko : k)}: ${v}${tr[k] ? ' ' + tr[k] : ''}`).join('\n');
       const name = rp.split('/').pop();
-      const prod = BIZ_PRODUCT[rp] ? `\n[이 서비스가 뭐냐]\n${BIZ_PRODUCT[rp]}` : '';
+      const prod = productOf(rp) ? `\n[이 서비스가 뭐냐]\n${productOf(rp)}` : '';
       const gen = async () => { const r = await runClaude(`너는 도핑연구소 사업 책임자(PM/그로스)다. 아래는 "${name}" 서비스 하나의 실제 사업 지표(직전 대비 추세 포함)다. 다른 서비스랑 섞지 말고 이 서비스만 분석해라.${prod}${UNTRUSTED_PREAMBLE}\n[${name} 지표]\n${wrapUntrusted(metricsTxt)}\n\n${BIZ_RUBRIC}\n\n친근한 한국어 반말로(절대 마크다운·별표(*)·#·이모지·영어약어남발 금지, 쉬운 말, 그냥 문장으로). 구성: 1)지금 상태(AARRR 단계별, 있는 데이터만) 2)눈에 띄는 변화·특이사항(전일/전주/전달 대비 변동 크면 왜 중요한지 설명) 3)측정 갭(중요한데 안 보이는 지표+어떻게 계측) 4)지금 하면 효과 클 개선 1~3개(각각 어떤 지표 올리려는지 타겟). 데이터에 없는 수치는 절대 지어내지 마.`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 180000); const t = deMd((r.text || '').trim()) || '(이 서비스 브리핑 생성 실패 — 데이터부족/한도)'; return { ok: r.ok !== false, text: t }; };
       const postCh = manual ? channel : channelForWork(rp, 'bizbrief', channel); // D5: 자동이면 서비스×기능 담당 채널로 라우팅
       log('info', 'biz-briefing', { manual, repo: rp, ch: postCh });
@@ -1620,9 +1624,11 @@ function measureExperiments(repo) {
 }
 // ── D4: 책임·진척 보드 — 승인·실행한 과제의 상태(발의/진행/지연/적중/역효과)를 추적. "약속 vs 실행"을 책임지게. ──
 const SRC_KO = { board: '경영회의', dept: '부서', growth: '그로스', sentinel: '선제대응', undefined: '그로스' };
+// H1: 추적 대상 repo = bizData(서비스) ∪ experiments에 실제 등장하는 repo(봇/SELF_REPO 과제 포함). bizData만 보면 봇 과제가 누락됨.
+function trackedRepos() { return [...new Set([...Object.keys(bizData), ...experiments.map(e => e.repo)])]; }
 function progressBoard() {
   const today = kstNow().day;
-  const all = Object.keys(bizData).flatMap(rp => measureExperiments(rp)).filter(e => !e.archived);
+  const all = trackedRepos().flatMap(rp => measureExperiments(rp)).filter(e => !e.archived);
   return all.map(e => {
     const age = Math.max(0, daysBetweenDay(e.startDay || today, today));
     let state, label;
@@ -1635,7 +1641,10 @@ function progressBoard() {
   });
 }
 function progressMove(e) { if (e.targetKey && e.now != null && typeof e.baseline === 'number') { const lbl = BIZ_LABELS[e.targetKey] ? BIZ_LABELS[e.targetKey].ko : e.targetKey; return `${lbl} ${e.baseline.toLocaleString()}→${e.now.toLocaleString()}${e.pct != null ? ` (${e.pct > 0 ? '+' : ''}${e.pct}%)` : ''}`; } return e.targetKey ? `${BIZ_LABELS[e.targetKey] ? BIZ_LABELS[e.targetKey].ko : e.targetKey} 측정 대기` : '지표 미측정'; }
-function archiveDoneInitiatives() { let n = 0; for (const e of experiments) { if (!e.archived && (e.status === 'measured' || (e.pct != null && e.pct <= -10))) { e.archived = true; n++; } } if (n) persistExperiments(); return n; }
+function archiveDoneInitiatives() { // H3: pct는 stored exp에 없음 → progressBoard로 상태 판정. 적중/역효과 + 30일+ 지연 정리.
+  const ids = new Set(progressBoard().filter(b => b.state === 'hit' || b.state === 'bad' || (b.state === 'stale' && b.age >= 30)).map(b => b.id));
+  let n = 0; for (const e of experiments) { if (!e.archived && ids.has(e.id)) { e.archived = true; n++; } } if (n) persistExperiments(); return n;
+}
 let bizGrowthAt = 0;
 async function runBizGrowth(client, channel, manual = false) {
   if (!manual && Date.now() - bizGrowthAt < 6 * 86400000) return; bizGrowthAt = Date.now();
@@ -1646,11 +1655,11 @@ async function runBizGrowth(client, channel, manual = false) {
     for (const rp of Object.keys(bizData)) {
       const cur = await bizFetch(rp); const m = cur || bizLatest(rp); if (!m) continue;
       const name = rp.split('/').pop(); const sc = bizScorecard(rp); const availKeys = Object.keys(m).filter(k => typeof m[k] === 'number');
-      const prod = BIZ_PRODUCT[rp] ? `\n제품: ${BIZ_PRODUCT[rp]}` : '';
+      const prod = productOf(rp) ? `\n제품: ${productOf(rp)}` : '';
       const out = await runClaude(`너는 "${name}" 그로스 책임자다.${prod}\n아래 사업 스코어카드를 보고, 지금 하면 효과 클 그로스 실험 1~2개를 제안해라. 각 실험은 반드시 "어떤 지표를 올리려는지(타겟)"가 명확하고, 측정 가능하면 아래 키 중 하나를 target_key로.${UNTRUSTED_PREAMBLE}\n${wrapUntrusted(sc)}\n\n측정가능 타겟키(이 중 하나 또는 null): ${availKeys.join(', ') || '(없음)'}\n\nJSON만: {"experiments":[{"focus":"한줄 요약","target_key":"위 키중 하나 or null","hypothesis":"이걸 하면 ~될 거란 가설","action":{"task":"구체적으로 뭘 할지 한 문장","kind":"investigate|build"}}]}. 데이터 근거로만, 측정갭 메우기(계측 추가)도 좋은 실험.`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 150000);
       const mm = (out.text || '').match(/\{[\s\S]*\}/); if (!mm) continue;
       let obj; try { obj = JSON.parse(mm[0]); } catch { continue; }
-      for (const e of (obj.experiments || []).slice(0, 2)) { if (!e || !e.action || !e.action.task) continue; const tk = (e.target_key && e.target_key !== 'null') ? e.target_key : null; const eid = addExperiment(rp, e.focus, tk, e.hypothesis); const tgtLabel = tk ? (BIZ_LABELS[tk] ? BIZ_LABELS[tk].ko : tk) : (e.focus || '지표'); allItems.push({ who: '그로스', repo: resolveRepo(rp), task: `[${name}·실험#${eid}] ${e.action.task} (타겟: ${tgtLabel} / 가설: ${String(e.hypothesis || '').slice(0, 60)})`, kind: ['investigate', 'build'].includes(e.action.kind) ? e.action.kind : 'investigate' }); }
+      for (const e of (obj.experiments || []).slice(0, 2)) { if (!e || !e.action || !e.action.task) continue; const tk = (e.target_key && e.target_key !== 'null') ? e.target_key : null; const eid = addExperiment(rp, e.focus, tk, e.hypothesis); const tgtLabel = tk ? (BIZ_LABELS[tk] ? BIZ_LABELS[tk].ko : tk) : (e.focus || '지표'); allItems.push({ who: '그로스', repo: resolveRepo(rp), task: `[${name}·실험#${eid}] ${e.action.task} (타겟: ${tgtLabel} / 가설: ${String(e.hypothesis || '').slice(0, 60)})`, kind: ['investigate', 'build'].includes(e.action.kind) ? e.action.kind : 'investigate', targetKey: validMetricKey(tk), source: 'growth', _exp: eid }); } // H2: 아이템에 targetKey·source·_exp 부착 → 승인 시 proposed→executing 전이
     }
     if (!allItems.length) { stopTyping(channel); if (manual) await postAs(client, channel, undefined, byName('김채원') || LEAD, '지금 데이터로 뽑을 그로스 실험이 마땅찮아. 측정 갭부터 메우자("사업 브리핑" 참고).'); return; }
     log('info', 'biz-growth', { n: allItems.length, manual });
@@ -1768,7 +1777,7 @@ async function runDeptLoop(client, channel, deptKey, manual = false, collect = f
     if (!collect) startTyping(channel);
     const repos = (focusRepo && bizData[focusRepo]) ? [focusRepo] : Object.keys(bizData);
     const focusName = focusRepo ? focusRepo.split('/').pop() : null;
-    let svcCtx = repos.map(rp => `[${rp.split('/').pop()}]\n${bizScorecard(rp)}${BIZ_PRODUCT[rp] ? '\n제품: ' + BIZ_PRODUCT[rp] : ''}`).join('\n\n') || '(등록된 서비스 없음)';
+    let svcCtx = repos.map(rp => `[${rp.split('/').pop()}]\n${bizScorecard(rp)}${productOf(rp) ? '\n제품: ' + productOf(rp) : ''}`).join('\n\n') || '(등록된 서비스 없음)';
     if (deptKey === 'cx') { // 인앱 피드백(진짜 사용자 의견) + 정확한 스토어 URL 주입
       for (const rp of repos) { const fb = await bizFeedback(rp); if (fb && fb.recent.length) svcCtx += `\n\n[${rp.split('/').pop()} 인앱 피드백 ${fb.total}건 중 최근]\n` + fb.recent.slice(0, 20).map(f => `- (${f.category || ''}) ${f.message}`).join('\n'); const sr = await storeReviews(rp); if (sr) svcCtx += `\n${sr}`; }
     }
@@ -1840,7 +1849,8 @@ async function runBoardMeeting(client, channel, manual = false) {
     await postAs(client, channel, undefined, LEAD, '경영회의 시작 — 각 부서 검토부터 모을게(고객·재무·마케팅·시장). 한 번에 도니까 좀 걸려.');
     startTyping(channel);
     const depts = ['cx', 'finance', 'marketing', 'market']; const collected = [];
-    for (const dk of depts) { try { const r = await runDeptLoop(client, channel, dk, false, true); if (r && (r.items.length || r.prose)) collected.push(r); } catch (_) {} }
+    const deptResults = await Promise.all(depts.map(dk => runDeptLoop(client, channel, dk, false, true).catch(() => null))); // 병목 완화: collect 모드라 부작용 없어 병렬(동시성은 MAX_CLAUDE로 캡)
+    for (const r of deptResults) if (r && (r.items.length || r.prose)) collected.push(r);
     const allItems = collected.flatMap(c => c.items || []);
     if (!allItems.length) { stopTyping(channel); await postAs(client, channel, undefined, LEAD, '이번 회의는 부서들이 실행할 제안을 못 냈어(데이터 부족/한도). 지표부터 더 쌓이면 다시 하자.'); return; }
     await postAs(client, channel, undefined, LEAD, `부서 검토 ${collected.length}개 모았어(제안 ${allItems.length}건). 이제 한로로가 우선순위 정하고 안다연이 반박할게.`); // 중간 진행 체크포인트(긴 회의 생존표시)
@@ -1848,7 +1858,7 @@ async function runBoardMeeting(client, channel, manual = false) {
     const scoreCtx = Object.keys(bizData).map(rp => `[${rp.split('/').pop()}]\n${bizScorecard(rp)}`).join('\n\n') || '(지표 없음)';
     const goalCtx = goals.length ? goals.map(g => `- [${g.repo.split('/').pop()}] ${g.text}`).join('\n') : '(설정된 목표 없음 — "목표 등록"으로 추가 가능)';
     // D1(닫힌 루프): 지난 실행 결과 — 추적 중인 과제의 타겟지표 이동. 회의가 "지난 결과"로 시작.
-    const measured = Object.keys(bizData).flatMap(rp => measureExperiments(rp)).filter(e => e.targetKey);
+    const measured = trackedRepos().flatMap(rp => measureExperiments(rp)).filter(e => e.targetKey);
     const resultLines = measured.slice(-8).map(e => { const lbl = BIZ_LABELS[e.targetKey] ? BIZ_LABELS[e.targetKey].ko : e.targetKey; const mv = (e.now != null && typeof e.baseline === 'number') ? `${e.baseline.toLocaleString()}→${e.now.toLocaleString()}${e.pct != null ? ` (${e.pct > 0 ? '+' : ''}${e.pct}%${e.pct >= 10 ? ' 적중' : e.pct <= -10 ? ' 역효과' : ' 미미'})` : ''}` : '측정 대기(다음 수집 후)'; return `#${e.id} [${e.repo.split('/').pop()}] ${e.focus} — ${lbl}: ${mv}`; });
     const resultsCtx = resultLines.length ? resultLines.join('\n') : '(아직 추적·측정된 실행 결과 없음 — 첫 회의거나 승인·실행한 추적 과제가 없음)';
     const staleItems = progressBoard().filter(b => b.state === 'stale'); // D4: 2주+ 진행인데 효과 미확인 — 책임지고 짚을 것
@@ -2287,7 +2297,10 @@ async function handle(event, client) {
         const nums = (raw.match(/\d+/g) || []).map(Number);
         if (nums.length) items = items.filter((_, i) => nums.includes(i + 1));
         const doable = items.filter(x => x.kind !== 'human');
-        for (const it of doable) { if (it.targetKey && !it._exp) { try { it._exp = trackInitiative(it.repo || pd.repo, it.task, it.targetKey, it.source || 'board'); } catch (_) {} } } // D1: 승인=추적 시작(다음 회의가 결과 보고)
+        for (const it of doable) { // D1/H2: 승인=추적 시작. 그로스(_exp 이미있음)는 proposed→executing 전이, 나머지는 trackInitiative로 신규
+          if (it._exp) { const ex = experiments.find(e => e.id === it._exp); if (ex && ex.status === 'proposed') { ex.status = 'executing'; persistExperiments(); } }
+          else if (it.targetKey) { try { it._exp = trackInitiative(it.repo || pd.repo, it.task, it.targetKey, it.source || 'board'); } catch (_) {} }
+        }
         const tracked = doable.filter(x => x._exp).length;
         await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, ${doable.length}개 착수할게 (조사 ${doable.filter(x => x.kind === 'investigate').length}·코드수정 ${doable.filter(x => x.kind === 'build').length}).${tracked ? ` ${tracked}개는 타겟지표 추적 시작 — 다음 회의에서 결과 보고할게.` : ''} 좀 걸려.`);
         dispatchActionItems(client, channel, thread_ts, pd.repo, items).catch(e => postAs(client, channel, thread_ts, LEAD, '실행 오류: ' + String(e).slice(0, 200)));
@@ -2459,6 +2472,8 @@ async function handle(event, client) {
       })().catch(e => postAs(client, channel, thread_ts, win, '코드 가져오기 오류: ' + String(e).slice(0, 200))).finally(() => { activeWork[channel] = null; });
       return;
     }
+    // M2: 서비스 제품 설명 등록 — 신규 서비스 분석 품질용("서비스 설명 sponono 스포일러 차단 앱...")
+    { const sd = raw.match(/^서비스\s*설명\s+(\S+)\s+([\s\S]+)/); if (sd) { const rp = repoFromText(sd[1]) || resolveRepo(sd[1]); if (rp && bizData[rp]) { bizData[rp].product = sd[2].trim().slice(0, 300); persistBiz(); await postAs(client, channel, thread_ts, byName('김채원') || LEAD, `${rp.split('/').pop()} 제품 설명 저장했어. 이제 브리핑·부서검토·경영회의가 이 맥락으로 분석해.`); } else await postAs(client, channel, thread_ts, LEAD, '그 서비스가 아직 등록 안 됐어. "사업 메트릭 등록"이나 신규 빌드로 먼저 올라와야 해.'); return; } }
     // 서비스 등록/목록 — 라이브 URL을 모니터링 대장에 올림(헬스체크·센티넬 대상). "서비스 등록 sponono https://sponono.com"
     {
       const rawU = raw.replace(/<(https?:\/\/[^>|]+)(\|[^>]*)?>/g, '$1'); // Slack이 URL을 <url> / <url|텍스트>로 감싸는 것 해제(등록 정규식이 못 잡던 버그)
@@ -2561,7 +2576,7 @@ async function handle(event, client) {
       return;
     }
     if (/(실험\s*현황|실험\s*목록|그로스\s*현황|실험\s*상태|실행\s*결과|추적\s*현황|성과\s*현황)/i.test(raw)) {
-      const all = Object.keys(bizData).flatMap(rp => measureExperiments(rp)).slice(-15);
+      const all = trackedRepos().flatMap(rp => measureExperiments(rp)).slice(-15);
       if (!all.length) { await postAs(client, channel, thread_ts, byName('김채원') || LEAD, '아직 추적 중인 실행 과제가 없어. "그로스 제안"이나 "경영회의"에서 타겟지표가 붙은 과제를 승인·실행하면, 그때부터 baseline을 잡고 다음 수집에서 지표가 움직였는지 측정해줄게.'); return; }
       const srcLbl = s => s === 'board' ? '경영회의' : s === 'dept' ? '부서' : '그로스';
       const lines = all.map(e => { const tgt = e.targetKey ? (BIZ_LABELS[e.targetKey] ? BIZ_LABELS[e.targetKey].ko : e.targetKey) : '(지표 미측정)'; const eff = (e.now != null && typeof e.baseline === 'number') ? `${e.baseline.toLocaleString()} → ${e.now.toLocaleString()}${e.pct != null ? ` (${e.pct > 0 ? '+' : ''}${e.pct}%${e.pct >= 10 ? ', 적중' : e.pct <= -10 ? ', 역효과' : ', 미미'})` : ''}` : '측정 대기'; return `#${e.id} [${e.repo.split('/').pop()}·${srcLbl(e.source)}] ${e.focus}\n   타겟: ${tgt} / ${eff} / 상태: ${e.status}`; });
@@ -2806,14 +2821,6 @@ app.event('app_mention', async ({ event, client }) => { await handle(event, clie
 app.command(/^\/(도핑|도핑연구소|dope|doping)$/, async ({ ack, respond }) => { try { await ack(); await respond({ response_type: 'ephemeral', text: commandMenuText() }); } catch (e) { try { console.log('[cmd] err', String(e).slice(0, 80)); } catch (_) {} } });
 // L4: App Home 탭 — 봇 홈을 열면 작업·스케줄·판단기록·기억을 한눈에 보는 읽기전용 운영 대시보드(채널 명령 "작업현황" 등과 같은 데이터). Home 탭은 Slack 앱설정에서 켜야(👤) 동작하고, 안 켜져 있으면 조용히 패스.
 function homeSchedTime(s) { if (s.ms) return `${Math.round(s.ms / 60000)}분마다`; const h = s.hour || 0, m = s.minute || 0; const ap = h < 12 ? '오전' : '오후'; const h12 = (h % 12) === 0 ? 12 : h % 12; return `매일 ${ap} ${h12}시${m ? ' ' + m + '분' : ''}`; }
-// 내장 정기 업무(코드 고정) — 홈에서 보이게 명시
-const BUILTIN_OPS = [
-  { when: '매일 오전 10시', what: '헬스체크 · 운영 브리핑 · 사업 브리핑' },
-  { when: '매주 월요일', what: '운영 개선 제안 (승인 게이트)' },
-  { when: '매주 화요일', what: '그로스 실험 제안 (승인 게이트)' },
-  { when: '매주 수요일', what: '봇 자기개선 스캔 (승인 게이트)' },
-  { when: '매주 금요일', what: '전략 경영회의 (부서 수렴 → 승인)' },
-];
 function hbtn(text, action_id, opts) { const b = { type: 'button', text: { type: 'plain_text', text, emoji: true }, action_id }; if (opts && opts.value) b.value = opts.value; if (opts && opts.style) b.style = opts.style; return b; }
 function selOpt(text, value) { return { text: { type: 'plain_text', text: String(text).slice(0, 75), emoji: true }, value: String(value) }; }
 function staticSel(action_id, options, current, ph) { const el = { type: 'static_select', action_id, placeholder: { type: 'plain_text', text: ph, emoji: true }, options }; const init = options.find(o => o.value === String(current)); if (init) el.initial_option = init; return el; }
@@ -3030,6 +3037,7 @@ async function postButtons(channel, thread_ts, buttons) {
   loadLastRepo();
   loadServices();
   loadPending();
+  reconcileServices(); // M1: bizData 서비스도 헬스 모니터링 받게(services 누락분 보충)
   setInterval(persistMemory, 15000);
   setInterval(persistPendingDispatch, 8000); // 대기 제안 주기 플러시(재배포 생존)
   const OPS_HOUR = parseInt(process.env.OPS_HOUR || '10', 10); // (레거시) 일부 분기에서 사용
