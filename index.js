@@ -1631,26 +1631,29 @@ const DEPTS = {
   finance: { name: '재무(CFO)', persona: '윈터', role: '재무(CFO)', prompt: '수익(매출·유료 구독자)과 비용(우리 봇 운영 토큰비용 등) 신호로 번레이트·런웨이·유닛이코노믹스(LTV:CAC·전환율·이탈) 관점에서 진단하고, 비용 이상치·수익 개선을 제안. 데이터 없으면 추정 말고 "이 재무지표부터 잡자"로.' },
   market: { name: '시장·경쟁', persona: '아이유', role: '시장·경쟁 인텔리전스 책임자', prompt: '경쟁사 동향·시장 트렌드·신규 위협을 웹서치로 조사해(예: 스포일러 차단 앱 경쟁사, 분쟁 추적 서비스 경쟁사), 우리한테 주는 시사점과 대응을 제안.' },
 };
-async function runDeptLoop(client, channel, deptKey, manual = false, collect = false) {
+async function runDeptLoop(client, channel, deptKey, manual = false, collect = false, focusRepo = null) {
   const d = DEPTS[deptKey]; if (!d || !channel) return null;
   try {
     if (!collect) startTyping(channel);
-    let svcCtx = Object.keys(bizData).map(rp => `[${rp.split('/').pop()}]\n${bizScorecard(rp)}${BIZ_PRODUCT[rp] ? '\n제품: ' + BIZ_PRODUCT[rp] : ''}`).join('\n\n') || '(등록된 서비스 없음)';
+    const repos = (focusRepo && bizData[focusRepo]) ? [focusRepo] : Object.keys(bizData);
+    const focusName = focusRepo ? focusRepo.split('/').pop() : null;
+    let svcCtx = repos.map(rp => `[${rp.split('/').pop()}]\n${bizScorecard(rp)}${BIZ_PRODUCT[rp] ? '\n제품: ' + BIZ_PRODUCT[rp] : ''}`).join('\n\n') || '(등록된 서비스 없음)';
     if (deptKey === 'cx') { // 인앱 피드백(진짜 사용자 의견) + 정확한 스토어 URL 주입
-      for (const rp of Object.keys(bizData)) { const fb = await bizFeedback(rp); if (fb && fb.recent.length) svcCtx += `\n\n[${rp.split('/').pop()} 인앱 피드백 ${fb.total}건 중 최근]\n` + fb.recent.slice(0, 20).map(f => `- (${f.category || ''}) ${f.message}`).join('\n'); const sr = await storeReviews(rp); if (sr) svcCtx += `\n${sr}`; }
+      for (const rp of repos) { const fb = await bizFeedback(rp); if (fb && fb.recent.length) svcCtx += `\n\n[${rp.split('/').pop()} 인앱 피드백 ${fb.total}건 중 최근]\n` + fb.recent.slice(0, 20).map(f => `- (${f.category || ''}) ${f.message}`).join('\n'); const sr = await storeReviews(rp); if (sr) svcCtx += `\n${sr}`; }
     }
     const days = [...usageHist, usageStat].filter(x => x && x.day).slice(-7); const tot = days.reduce((a, x) => a + (x.outTokens || 0), 0);
     const finCtx = deptKey === 'finance' ? `\n[우리 봇 운영비용 신호] 최근 ${days.length}일 출력토큰 ~${Math.round(tot / 1000)}k(클로드 사용비 비례)` : '';
     const dp = byName(d.persona); const pp = dp ? dp.prompt : '';
-    const out = await runClaude(`${pp}\n너는 지금 ${d.role} 역할로 우리가 운영하는 서비스들을 ${d.name} 관점에서 검토한다.${STYLE}\n${d.prompt}${UNTRUSTED_PREAMBLE}\n[서비스 현황]\n${wrapUntrusted(svcCtx)}${finCtx}\n\n먼저 진단 3~6줄(반말, 메타서술·지문 금지 — "진단하겠다" 같은 말 말고 바로 본론). 그 다음 줄에 액션을 JSON으로만: {"proposals":[{"repo":"sponono|wewantpeace|bot","task":"구체적으로 뭘 할지 한 문장","kind":"investigate|build","target":"올리려는 지표/기대효과(사람말)","target_key":"아래 측정가능 지표키 중 이 과제로 움직일 지표 1개(없으면 null)"}]} (최대 3개, 데이터·웹서치 근거로. 발행계정·결제 등 사람만 가능한 건 빼고).\n측정가능 지표키: ${measurableKeysHint()}`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 220000, true);
+    const scopeLine = focusName ? `너는 지금 "${focusName}" 서비스 하나만 ${d.name} 관점에서 검토한다. 다른 서비스는 섞지 마라.` : `너는 지금 ${d.role} 역할로 우리가 운영하는 서비스들을 ${d.name} 관점에서 검토한다.`;
+    const out = await runClaude(`${pp}\n${scopeLine}${STYLE}\n${d.prompt}${UNTRUSTED_PREAMBLE}\n[서비스 현황]\n${wrapUntrusted(svcCtx)}${finCtx}\n\n먼저 진단 3~6줄(반말, 메타서술·지문 금지 — "진단하겠다" 같은 말 말고 바로 본론). 그 다음 줄에 액션을 JSON으로만: {"proposals":[{"repo":"${focusName || 'sponono|wewantpeace|bot'}","task":"구체적으로 뭘 할지 한 문장","kind":"investigate|build","target":"올리려는 지표/기대효과(사람말)","target_key":"아래 측정가능 지표키 중 이 과제로 움직일 지표 1개(없으면 null)"}]} (최대 3개, 데이터·웹서치 근거로. 발행계정·결제 등 사람만 가능한 건 빼고).\n측정가능 지표키: ${measurableKeysHint()}`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 220000, true);
     const raw = out.text || '';
     const jm = raw.match(/\{[\s\S]*"proposals"[\s\S]*\}/);
     const prose = deMd(raw.replace(/```[\s\S]*?```/g, '').replace(/\{[\s\S]*"proposals"[\s\S]*\}/, '').trim()) || '(검토 생성 실패 — 데이터부족/한도)';
     let items = [];
-    if (jm) { try { const obj = JSON.parse(jm[0]); items = (obj.proposals || []).filter(p => p && p.task && ['investigate', 'build'].includes(p.kind)).slice(0, 3).map(p => { const rr = resolveRepo(p.repo || 'bot'); const nm = rr === SELF_REPO ? '봇' : rr.split('/').pop(); return { who: d.name, repo: rr, task: `[${nm}] ${p.task}${p.target ? ` (타겟: ${p.target})` : ''}`, kind: p.kind, targetKey: validMetricKey(p.target_key), source: 'dept' }; }); } catch (_) {} }
+    if (jm) { try { const obj = JSON.parse(jm[0]); items = (obj.proposals || []).filter(p => p && p.task && ['investigate', 'build'].includes(p.kind)).slice(0, 3).map(p => { const rr = resolveRepo(p.repo || focusRepo || 'bot'); const nm = rr === SELF_REPO ? '봇' : rr.split('/').pop(); return { who: d.name, repo: rr, task: `[${nm}] ${p.task}${p.target ? ` (타겟: ${p.target})` : ''}`, kind: p.kind, targetKey: validMetricKey(p.target_key), source: 'dept' }; }); } catch (_) {} }
     if (collect) return { dept: deptKey, name: d.name, prose, items }; // 경영회의용 — 개별 발의 안 하고 모음
-    log('info', 'dept-loop', { dept: deptKey, manual });
-    await postAs(client, channel, undefined, byName(d.persona) || LEAD, `${d.name} 검토\n${prose.slice(0, 2600)}`); // postAs가 스피너 정리
+    log('info', 'dept-loop', { dept: deptKey, manual, focus: focusName });
+    await postAs(client, channel, undefined, byName(d.persona) || LEAD, `${d.name} 검토${focusName ? ' — ' + focusName : ''}\n${prose.slice(0, 2600)}`); // postAs가 스피너 정리
     if (items.length) await proposeOrAuto(client, channel, items[0].repo, items, `${d.name} 개선 제안`, { forceGate: true });
     return { dept: deptKey, name: d.name, prose, items };
   } catch (e) { try { if (!collect) stopTyping(channel); log('error', 'dept-loop-err', { dept: deptKey, e: String(e).slice(0, 120) }); } catch (_) {} return null; }
@@ -2364,7 +2367,7 @@ async function handle(event, client) {
       else if (/(마케팅\s*검토|마케팅\s*제안|획득\s*전략|seo|geo\b)/i.test(raw)) dk = 'marketing';
       else if (/(재무\s*검토|재무\s*제안|cfo|런웨이|번레이트|유닛이코노믹스|비용\s*검토)/i.test(raw)) dk = 'finance';
       else if (/(경쟁\s*동향|경쟁사|시장\s*분석|시장\s*동향|경쟁\s*검토|트렌드\s*조사)/i.test(raw)) dk = 'market';
-      if (dk) { if (await guardBusy(client, channel, thread_ts)) return; runDeptLoop(client, channel, dk, true).catch(() => {}); return; }
+      if (dk) { if (await guardBusy(client, channel, thread_ts)) return; const fr = repoFromText(raw); runDeptLoop(client, channel, dk, true, false, fr || null).catch(() => {}); return; } // 서비스명 있으면 그 서비스만(예: "스포노노 마케팅 검토")
     }
     // Phase C: 전략 경영회의 — 부서 제안 수렴 → CEO 우선순위 + Critic 반박 → 게이트 발의
     if (/(경영\s*회의|이사회|전략\s*회의|주간\s*회의|board\s*meeting|위클리\s*리뷰)/i.test(raw)) {
@@ -2687,8 +2690,8 @@ function buildHomeBlocksNew() {
     if (!def.perService) els.push(chanSel('opscfg_ch_' + id, o.channel, '실행 채널'));
     els.push(hbtn(o.enabled ? '끄기' : '켜기', 'opscfg_tog_' + id, { value: id, style: o.enabled ? 'danger' : 'primary' }));
     B.push({ type: 'actions', elements: els.slice(0, 5) });
-    if (def.perService) { // 큰 틀(업무) 내에 서비스별 채널 분기
-      homeRepos.forEach((rp, ri) => { const cur = settings.workRoute[rp + ':' + id] || settings.repoChannel[rp]; B.push({ type: 'section', text: { type: 'mrkdwn', text: `↳ ${rp.split('/').pop()}` }, accessory: chanSel('opscfg_psc_' + id + '_' + ri, cur, '채널 선택') }); });
+    if (def.perService) { // 큰 틀(업무) 내에 서비스별 채널 분기 — 드롭다운 왼쪽 정렬(라벨 위, 셀렉트 아래)
+      homeRepos.forEach((rp, ri) => { const cur = settings.workRoute[rp + ':' + id] || settings.repoChannel[rp]; B.push({ type: 'section', text: { type: 'mrkdwn', text: `↳ *${rp.split('/').pop()}*${cur ? ` → <#${cur}>` : ''}` } }); B.push({ type: 'actions', elements: [chanSel('opscfg_psc_' + id + '_' + ri, cur, '채널 선택')] }); });
     }
   }
   if (schedules.length) B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '내가 등록한 스케줄: ' + schedules.map(s => `#${s.id} ${homeSchedTime(s)} ${String(s.label || s.task || '').slice(0, 20)}`).join('  ·  ').slice(0, 1900) }] });
@@ -2698,6 +2701,21 @@ function buildHomeBlocksNew() {
   B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '위 정기 업무에서 채널을 따로 안 정하면 여기 기본 채널로 가. 봇을 먼저 그 채널에 초대해야 글이 가.' }] });
   B.push({ type: 'section', text: { type: 'mrkdwn', text: `*전사* — 경영회의·회사 전체 업무 기본` }, accessory: chanSel('svcroute_hq_x', settings.hqChannel, '전사 채널') });
   homeRepos.forEach((rp, ri) => { B.push({ type: 'section', text: { type: 'mrkdwn', text: `*${rp.split('/').pop()}* — 이 서비스 기본` }, accessory: chanSel('svcroute_' + ri + '_default', settings.repoChannel[rp], '기본 채널') }); });
+  B.push({ type: 'divider' });
+  // 부서 검토 채널 (요청 시·서비스별) — 마케팅/고객/재무/시장 검토를 서비스마다 어느 채널로
+  B.push({ type: 'header', text: { type: 'plain_text', text: '부서 검토 채널 (서비스별)', emoji: true } });
+  B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '홈의 부서 검토 버튼·자동 실행 시 각 서비스 검토가 여기 채널로 가 (드롭다운 순서: 마케팅 · 고객 · 재무 · 시장)' }] });
+  homeRepos.forEach((rp, ri) => {
+    const nm = rp.split('/').pop();
+    const cs = ['marketing', 'cx', 'finance', 'market'].map(fn => settings.workRoute[rp + ':' + fn]).filter(Boolean).length;
+    B.push({ type: 'section', text: { type: 'mrkdwn', text: `*${nm}*${cs ? ` (${cs}/4 지정)` : ''}` } });
+    B.push({ type: 'actions', elements: [
+      chanSel('svcroute_' + ri + '_marketing', settings.workRoute[rp + ':marketing'], '마케팅'),
+      chanSel('svcroute_' + ri + '_cx', settings.workRoute[rp + ':cx'], '고객'),
+      chanSel('svcroute_' + ri + '_finance', settings.workRoute[rp + ':finance'], '재무'),
+      chanSel('svcroute_' + ri + '_market', settings.workRoute[rp + ':market'], '시장'),
+    ] });
+  });
   B.push({ type: 'divider' });
   // 실행 추적(지표 이동)
   const tracked = Object.keys(bizData).flatMap(rp => measureExperiments(rp)).filter(e => e.targetKey).slice(-6);
@@ -2750,7 +2768,16 @@ app.action(/^(home_|opscfg_|svcroute_)/, async ({ ack, body, action, client }) =
       if (pendingDispatch[ch]) await handle({ channel: ch, user: userId, ts: 'home-' + Date.now(), text }, app.client);
       setTimeout(() => publishHome(client, userId).catch(() => {}), 1500); return;
     }
-    const cmdMap = { home_run_board: '경영회의', home_run_bizbrief: '사업 브리핑', home_run_health: '헬스체크', home_run_opsbrief: '운영 브리핑', home_run_growth: '그로스 제안', home_dept_cx: '고객 검토', home_dept_marketing: '마케팅 검토', home_dept_finance: '재무 검토', home_dept_market: '경쟁 동향' };
+    // 부서 검토: 서비스별로 쪼개서 각자 담당 채널에서 실행(라우팅 살림)
+    if (m = aid.match(/^home_dept_(cx|marketing|finance|market)$/)) {
+      const dept = m[1], repos = Object.keys(bizData);
+      if (!repos.length) { try { await client.chat.postMessage({ channel: userId, text: '등록된 서비스가 없어서 부서 검토를 못 돌려.' }); } catch (_) {} return; }
+      const dnm = (DEPTS[dept] && DEPTS[dept].name) || dept;
+      try { await client.chat.postMessage({ channel: userId, text: `${dnm} 검토를 서비스별로 시작했어 — 각 서비스 담당 채널(부서 채널 지정 시 거기, 아니면 서비스 기본)에서 진행돼.` }); } catch (_) {}
+      for (const rp of repos) { const ch = channelForWork(rp, dept, homeTargetChannel(userId)); if (ch) { try { await runDeptLoop(app.client, ch, dept, true, false, rp); } catch (_) {} } }
+      setTimeout(() => publishHome(client, userId).catch(() => {}), 1500); return;
+    }
+    const cmdMap = { home_run_board: '경영회의', home_run_bizbrief: '사업 브리핑', home_run_health: '헬스체크', home_run_opsbrief: '운영 브리핑', home_run_growth: '그로스 제안' };
     const text = cmdMap[aid];
     if (text) {
       const ch = homeTargetChannel(userId); if (!ch) return;

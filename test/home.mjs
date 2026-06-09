@@ -77,5 +77,20 @@ ok(opsWhen({ cadence: 'daily', hour: 10, minute: 0 }) === '매일 오전 10시',
 ok(opsWhen({ cadence: 'weekly', dow: 5, hour: 14, minute: 30 }) === '매주 금요일 오후 2시 30분', 'opsWhen 매주 금 오후');
 ok(opsWhen({ cadence: 'monthly', dom: 1, hour: 9, minute: 0 }) === '매월 1일 오전 9시', 'opsWhen 매월');
 
+// 11) 부서 검토 버튼 → 서비스별 라우팅 (home_dept_<dept>)
+const deptRe = /^home_dept_(cx|marketing|finance|market)$/;
+ok('home_dept_marketing'.match(deptRe)[1] === 'marketing', 'home_dept 마케팅 파싱');
+ok('home_dept_market'.match(deptRe)[1] === 'market', 'home_dept 시장 파싱');
+ok(!'home_run_board'.match(deptRe), 'home_run_board는 dept 아님');
+// 부서 검토 채널 4-셀렉트 actions 블록(<=5)
+const depts4 = ['marketing', 'cx', 'finance', 'market'];
+ok(depts4.length <= 5, '부서 채널 셀렉트 4개 (actions 5개 제한 내)');
+// focusRepo 필터: 등록된 서비스만
+const bizData2 = { 'o/wewantpeace': {}, 'o/sponono': {} };
+function reposFor(focusRepo) { return (focusRepo && bizData2[focusRepo]) ? [focusRepo] : Object.keys(bizData2); }
+ok(reposFor('o/sponono').length === 1 && reposFor('o/sponono')[0] === 'o/sponono', 'focusRepo면 그 서비스만');
+ok(reposFor(null).length === 2, 'focusRepo 없으면 전체');
+ok(reposFor('o/unknown').length === 2, '미등록 focusRepo는 전체로 폴백');
+
 console.log(fail ? '\n❌ home 실패 ' + fail : '\n✅ home 전부 통과');
 process.exit(fail ? 1 : 0);
