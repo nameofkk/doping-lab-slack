@@ -84,6 +84,13 @@ const DESIGN_RULE = `
 5) Polish 패스(필수): 다 만든 뒤 hover/focus/active·loading·empty·error 상태를 빠짐없이 넣고, transition으로 미세 모션을 더한다. gradient·box-shadow 남용은 빼서 premium하게. 그리고 Playwright로 실제 스크린샷 찍어 눈으로 확인 — "될 것이다/잘 나왔을 것이다" 금지, 못 본 건 미확인이라고 말해라.`;
 
 // 신규 웹/사이트/앱 제작 시 항상 — 출시·마케팅·운영까지 준비된 상태로 만들게 하는 규칙
+const MONITORING_RULE = `
+
+[모니터링 훅 — 신규 서비스면 에이전트가 감시할 수 있게 이 포인트들을 코드에 같이 박아라(백엔드/서버 있을 때 필수, 정적 사이트면 1번만)]
+1) 헬스 엔드포인트: GET /health 를 만들어 200과 {"status":"ok"} 반환. DB/외부의존성 있으면 그 ping 결과도 포함(예: {"status":"ok","db":"ok"}). 죽으면 503. 에이전트가 2분마다 이걸로 앱-레벨 생존을 확인한다.
+2) 봇 전용 통계 엔드포인트: GET /admin/bot-stats 를 만들어 그 서비스의 핵심 지표를 JSON으로 줘라 — 최소 total_users(총회원), new_today(오늘 신규), 그리고 노스스타(핵심 가치행동) 카운트. 유료면 subscribers·monthly_revenue도. 반드시 X-Bot-Key 헤더를 env BOT_STATS_KEY와 상수시간 비교(hmac.compare_digest 류)로 인증(키 없거나 틀리면 403). 키는 절대 코드 하드코딩 금지(env). 이게 있어야 에이전트가 사업지표·선제감시·경영회의에서 이 서비스를 추적한다.
+3) 핵심 이벤트 카운트: 노스스타가 되는 핵심 행동(가입 완료·첫 핵심경험 등)을 셀 수 있게 최소한의 카운터/이벤트 로깅을 둬서 2번 통계에 노출해라.
+4) 에러 가시성: 서버 에러는 stderr/로그로 명확히 남겨서(스택 포함) 다운 시 진단이 되게.`;
 const LAUNCH_RULE = `
 
 [출시·마케팅 준비 — 웹/사이트/앱 신규 제작이면 코드에 같이 넣어라]
@@ -881,7 +888,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const fbBuild = drainFeedback(channel); // 제작 직전 들어온 사용자 수정요청도 반영
   const rmap = !newProject ? await repoMap(dir) : ''; // I8: 기존 레포는 구조 맵으로 그라운딩(신규는 빈 레포라 생략)
   const prules = await readProjectRules(dir); // L1: AGENTS.md/CLAUDE.md 컨벤션 주입
-  const res = await runClaude(`${intro}${rulesCtx(channel)}${prules}${repo ? recallFacts(repo, task) : ''}${repo ? recallSkills(repo, task) : ''}${rmap}${PLAIN}${uiish ? DESIGN_RULE : ''}${newProject ? LAUNCH_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}${fbBuild ? '\n\n[사용자가 추가로 준 지시 — 반드시 반영]\n' + wrapUntrusted(fbBuild) : ''}${UNTRUSTED_PREAMBLE}\n\n요청:\n${wrapUntrusted(task)}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 540000, true);
+  const res = await runClaude(`${intro}${rulesCtx(channel)}${prules}${repo ? recallFacts(repo, task) : ''}${repo ? recallSkills(repo, task) : ''}${rmap}${PLAIN}${uiish ? DESIGN_RULE : ''}${newProject ? LAUNCH_RULE : ''}${newProject ? MONITORING_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}${fbBuild ? '\n\n[사용자가 추가로 준 지시 — 반드시 반영]\n' + wrapUntrusted(fbBuild) : ''}${UNTRUSTED_PREAMBLE}\n\n요청:\n${wrapUntrusted(task)}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 540000, true);
   if (res.limited) { jobUpdate(channel, { status: 'limited' }); await postAs(client, channel, thread_ts, LEAD, '⏳ 제작 중에 클로드 사용량 한도에 걸렸어. 지금까지 만든 건 안 올렸어, 한도 리셋되면 이어서 만들게.'); return; }
   jobUpdate(channel, { stage: '코드생성' }); // R9: 진행 단계 체크포인트(재시작 알림용)
   addJobTokens(channel, (res.outTokens || estTokens(res.text)) + estTokens(task) + (prd ? estTokens(prd) : 0)); // I8+Q4: 실 API 출력토큰 우선(한글 len/4 ~2배오차 제거), 없으면 추정
@@ -1347,8 +1354,14 @@ async function onboardNewService(client, channel, thread_ts, repo, url, dir) {
     persistBiz(); // 핵심 싱크: 운영 루프 편입
     if (settings.repoChannel && !settings.repoChannel[repo] && channel) { settings.repoChannel[repo] = channel; persistSettings(); }
     const name = repo.split('/').pop();
-    logDecision(channel, 'service-onboard', `${repo} 운영 루프 편입`);
-    await postAs(client, channel, thread_ts, byName('김채원') || LEAD, `신규 서비스 "${name}" 온보딩 완료.\n이제 사업 브리핑·부서 검토·선제 감시·경영회의에 자동으로 들어가고 헬스체크도 돌아. 홈탭 "서비스 기본 채널"에도 떠.${bizData[repo].product ? '' : `\n제품 한 줄 설명 알려주면 분석이 정확해져 — "서비스 설명 ${name} <한 줄>".`}\n회원·매출 같은 사업 지표까지 보려면 stats만 연결하면 돼 — "사업 메트릭 등록 ${name} <stats_url>".`);
+    // MONITORING_RULE로 빌드에 박은 /health·bot-stats 자동 감지·연결
+    let healthFound = false, statsFound = false; const base = url ? url.replace(/\/$/, '') : null;
+    if (base) {
+      try { const hr = await sh(`curl -s -o /dev/null -w "%{http_code}" --max-time 10 '${(base + '/health').replace(/'/g, '')}'`); if (/^2\d\d/.test((hr.out || '').trim()) && services[repo]) { services[repo].healthUrl = base + '/health'; persistServices(); healthFound = true; } } catch (_) {}
+      try { const sr = await sh(`curl -s -o /dev/null -w "%{http_code}" --max-time 10 '${(base + '/admin/bot-stats').replace(/'/g, '')}'`); const c = (sr.out || '').trim(); if (/^(2\d\d|40[13])/.test(c)) statsFound = true; } catch (_) {} // 403도 "있음"(키만 필요)
+    }
+    logDecision(channel, 'service-onboard', `${repo} 운영 루프 편입${healthFound ? ' +health' : ''}${statsFound ? ' +stats' : ''}`);
+    await postAs(client, channel, thread_ts, byName('김채원') || LEAD, `신규 서비스 "${name}" 온보딩 완료.\n사업 브리핑·부서 검토·선제 감시·경영회의·헬스체크에 자동 편입. 홈탭에도 떠.${healthFound ? '\n· /health 엔드포인트 감지 → 앱-레벨 헬스 자동 연결됨.' : ''}${statsFound ? `\n· /admin/bot-stats 감지됨 — BOT_STATS_KEY를 Railway env(서비스+봇)에 넣으면(👤) 회원·매출 지표가 자동으로 들어와.` : (base ? '\n· 사업 지표 엔드포인트는 아직 — "사업 메트릭 등록 ' + name + ' <stats_url>"로 연결.' : '')}${bizData[repo].product ? '' : `\n· 제품 한 줄 설명 주면 분석이 정확해져 — "서비스 설명 ${name} <한 줄>".`}`);
     if (settings.autoChannel !== false && botClient) { // 전용 채널 best-effort(스코프 없으면 조용히 빌드채널 유지)
       try {
         const chName = ('ops-' + name).toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').slice(0, 70);
@@ -3067,8 +3080,9 @@ function buildHomeBlocksNew() {
   } else B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '_아직 추적 중인 과제 없음 — 경영회의·그로스·부서 검토에서 타겟지표 붙은 과제를 승인·실행하면 여기 쌓여_' }] });
   B.push({ type: 'divider' });
   // 라이브 서비스 + 운영 메트릭
-  const sLine = s => { const last = (s.history || [])[s.history.length - 1]; const ms = last && last.ms != null ? `${last.ms}ms` : '—'; return `${s.lastStatus === 'down' ? '🔴' : '🟢'} ${s.repo.split('/').pop()} (${ms})`; };
-  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*라이브 서비스* (${svcs.length})\n` + (svcs.length ? svcs.map(sLine).join('\n').slice(0, 2600) : '_등록된 서비스 없음_') } });
+  const sLine = s => { const last = (s.history || [])[s.history.length - 1]; const ms = last && last.ms != null ? `${last.ms}ms` : '—'; const issues = (s.issues || []).length; const icon = s.lastStatus === 'down' ? '🔴' : issues ? '🟡' : '🟢'; const extras = [typeof s.sslDays === 'number' ? `SSL ${s.sslDays}일` : null, s.healthUrl ? '헬스EP✓' : '헬스EP✗'].filter(Boolean).join(' · '); return `${icon} ${s.repo.split('/').pop()} (${ms})${extras ? ' · ' + extras : ''}${issues ? '\n   주의: ' + s.issues.join(' / ') : ''}`; };
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*라이브 서비스 헬스* (${svcs.length}) — 2분마다 실시간 감시\n` + (svcs.length ? svcs.map(sLine).join('\n').slice(0, 2600) : '_등록된 서비스 없음_') } });
+  B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '감시 항목: HTTP상태·응답속도·응답크기(껍데기감지)·SSL만료·앱 헬스엔드포인트. 헬스EP 지정: "헬스 항목 <서비스> <헬스URL> [기대문구]"' }] });
   const mdays = [...usageHist, usageStat].filter(d => d && d.day).slice(-7);
   const mtot = mdays.reduce((a, d) => ({ c: a.c + (d.calls || 0), t: a.t + (d.outTokens || 0), l: a.l + (d.limitedHits || 0) }), { c: 0, t: 0, l: 0 });
   const rj = Object.values(jobs).filter(j => Date.now() - (j.createdAt || 0) < 7 * 86400000);
