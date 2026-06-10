@@ -2210,6 +2210,7 @@ async function runOppScout(client, channel, manual = false) {
   if (!manual && Date.now() - oppScoutAt < 6 * 86400000) return; // 주1회
   oppScoutAt = Date.now();
   if (!channel || activeWork[channel] || pendingDispatch[channel] || pendingOpp[channel]) return;
+  activeWork[channel] = { task: '기회 스카우트', started: Date.now() }; // 점유는 가드 통과 후 내부에서
   try {
     const lead = byName('아이유') || LEAD;
     await postAs(client, channel, undefined, lead, '인터넷에서 지금 뜨는 트렌드·핫이슈 훑어서, 우리가 AI 에이전트로 만들어 수익 낼 만한 기회 있나 스카우트해볼게. 웹서치 여러 번 돌리느라 좀 걸려.');
@@ -2228,6 +2229,7 @@ async function runOppScout(client, channel, manual = false) {
     await postButtons(channel, undefined, btns.slice(0, 5));
     logDecision(channel, 'oppscout', cands.map(c => `${c.title}(${c.score})`).join(' / ').slice(0, 200));
   } catch (e) { try { stopTyping(channel); log('error', 'oppscout-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
+  finally { activeWork[channel] = null; }
 }
 async function runOppValidate(client, channel, cand) { // 한 기회의 수요를 WebSearch로 더 깊이 검증(레포 없음)
   const lead = byName('아이유') || LEAD;
@@ -3059,8 +3061,7 @@ async function handle(event, client) {
     // 기회 스카우트 수동 트리거
     if (/(기회\s*스카우트|기회\s*발굴|트렌드\s*사업|사업\s*기회|신사업\s*스카우트|오퍼튜니티|opportunity\s*scout)/i.test(raw)) {
       if (await guardBusy(client, channel, thread_ts)) return;
-      activeWork[channel] = { task: '기회 스카우트', started: Date.now() };
-      runOppScout(client, channel, true).catch(() => {}).finally(() => { activeWork[channel] = null; });
+      runOppScout(client, channel, true).catch(() => {}); // activeWork은 runOppScout 내부에서 관리(여기서 세팅하면 자기 가드에 막힘)
       return;
     }
     // 의존성 업데이트 → 안전하게 올리고 빌드 확인 후 PR
