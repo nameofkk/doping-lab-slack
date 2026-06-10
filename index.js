@@ -196,7 +196,8 @@ function commandMenuText() {
     '• `개선 제안` — 운영 개선 · `자기개선` — 봇 자체 개선',
     '',
     '🧠 *기억·학습·도구*',
-    '• `기억 목록` · `스킬 목록` · `MCP 목록` / `MCP 추천` / `MCP 리로드`',
+    '• `기억 목록` · `스킬 목록` · `스킬 후보`(승격대기) · `스킬 승인/격리 <이름>`',
+    '• `지식맵 <키워드>`(엔티티·관계 그래프) · `제품 혼 <서비스>`(핵심의도·합격기준) · `MCP 목록`/`추천`/`리로드`',
     '',
     '📋 *조회*',
     '• `작업현황` · `스케줄 목록` · `결정 로그` · `내 아이디`',
@@ -818,7 +819,7 @@ async function checkAppGaps(dir) {
   return gaps;
 }
 // R3: Critic — PR/완료 전, 별도 claude가 "요청을 실제로 충족했나" 엄격 심사. FAIL이면 지적대로 1회 고치고 재심사. 빈껍데기·미충족을 거짓완료로 넘기는 것 방지(Devin Critic + evaluator-optimizer).
-async function runCritic(client, channel, thread_ts, dir, task, prd) {
+async function runCritic(client, channel, thread_ts, dir, task, prd, repo) {
   const sec = byName('우정잉') || LEAD;
   for (let attempt = 1; attempt <= 2; attempt++) {
     bumpWork(channel);
@@ -831,7 +832,8 @@ async function runCritic(client, channel, thread_ts, dir, task, prd) {
     if (/typescript/.test(pkg) && (await sh(`test -f ${dir}/tsconfig.json && echo y`, dir)).out.includes('y')) { const tc = await sh('npx --no-install tsc --noEmit 2>&1 | tail -15', dir); signals.push(tc.code === 0 ? '✅ 타입체크(tsc) 통과' : '❌ 타입에러:\n' + (tc.out || '').slice(-800)); }
     if (/"test"\s*:/.test(pkg) && !/no test specified/.test(pkg)) { bumpWork(channel); const ts = await sh('npm test 2>&1 | tail -15', dir, 240000); signals.push(ts.code === 0 ? '✅ 테스트 통과' : '❌ 테스트 실패:\n' + (ts.out || '').slice(-800)); }
     const buildSignal = signals.length ? signals.join('\n') : '(빌드/테스트 스크립트 없음 — 정적/단순 프로젝트)';
-    const c = await runClaude(`너는 깐깐한 심사자(critic)다. 의견이 아니라 아래 [실제 검증 결과(빌드·타입·테스트)]와 코드를 근거로만 판정해라. 후하게 주지 마.\n\n요청: "${task}"\n\n[실제 검증 결과 — 이게 1차 ground truth]\n${buildSignal}\n\n루브릭(각 0~1, 코드 근거로):\n- 요청충족: 요청한 걸 실제 구현(빈껍데기·플레이스홀더·TODO=0)\n- 검증: 위 빌드/타입/테스트 결과 기준(하나라도 실패면 0)\n- 정합성: 명백한 버그·미연결·깨진 import 없음\n- 보안: 하드코딩 시크릿·주입 구멍 없음${prd ? '\n- PRD반영: PRD 핵심기능 구현' : ''}\n\n첫 줄에 반드시 "PASS"(평균 ≥0.7 그리고 검증=1) 또는 "FAIL". 다음 줄에 각 항목 점수, 그 다음 FAIL이면 무엇을·어느 파일을 고쳐야 하는지. 마크다운 금지.`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 300000);
+    const crit = repo ? soulCriteria(repo) : '';
+    const c = await runClaude(`너는 깐깐한 심사자(critic)다. 의견이 아니라 아래 [실제 검증 결과(빌드·타입·테스트)]와 코드를 근거로만 판정해라. 후하게 주지 마.\n\n요청: "${task}"\n\n[실제 검증 결과 — 이게 1차 ground truth]\n${buildSignal}${crit}\n\n루브릭(각 0~1, 코드 근거로):\n- 요청충족: 요청한 걸 실제 구현(빈껍데기·플레이스홀더·TODO=0)\n- 검증: 위 빌드/타입/테스트 결과 기준(하나라도 실패면 0)\n- 정합성: 명백한 버그·미연결·깨진 import 없음\n- 보안: 하드코딩 시크릿·주입 구멍 없음${crit ? '\n- 제품기준: 위 고정 합격기준이 실제로 동작(일부라도 미동작이면 감점)' : ''}${prd ? '\n- PRD반영: PRD 핵심기능 구현' : ''}\n\n첫 줄에 반드시 "PASS"(평균 ≥0.7 그리고 검증=1) 또는 "FAIL". 다음 줄에 각 항목 점수, 그 다음 FAIL이면 무엇을·어느 파일을 고쳐야 하는지. 마크다운 금지.`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 300000);
     const verdict = (c.text || '').trim();
     if (c.limited || /^\s*PASS/i.test(verdict)) { jobUpdate(channel, { critic: 'PASS' }); return true; }
     await postAs(client, channel, thread_ts, sec, `🔎 심사에서 걸렸어(빌드결과 기반). 고치고 갈게:\n${verdict.slice(0, 500)}`);
@@ -906,6 +908,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   if (workCancel[channel]) { delete workCancel[channel]; await postAs(client, channel, thread_ts, LEAD, '기획 단계에서 중단했어. 아무것도 안 올렸어.'); return; }
   if (newProject && prd === null) return; // 한도/중단 → runPRD가 이미 안내함, 제작 안 들어감
   if (newProject) await postAs(client, channel, thread_ts, LEAD, '좋아 PRD 확정됐고, 이제 이 PRD 그대로 실제 코드 짤게. 좀 걸려.');
+  if (newProject && prd && repo) await buildSoul(repo, prd, task).catch(() => {}); // 제품 혼(원래 목적·합격기준) 영속 — 이후 이어서·심사에 주입
   prog.phase('지금 코드 짜는 중이야');
   const assetHeavy = /게임|game|sprite|스프라이트|캐릭터|에셋|asset|픽셀|pixel|애니메이션|아케이드|arcade|2d|3d|canvas|phaser/i.test(task);
   // UI/화면 관련이거나 신규 프로젝트일 때만 디자인 규칙 적용 (백엔드·봇 자가수정 등엔 노이즈라 빼)
@@ -913,7 +916,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const fbBuild = drainFeedback(channel); // 제작 직전 들어온 사용자 수정요청도 반영
   const rmap = !newProject ? await repoMap(dir) : ''; // I8: 기존 레포는 구조 맵으로 그라운딩(신규는 빈 레포라 생략)
   const prules = await readProjectRules(dir); // L1: AGENTS.md/CLAUDE.md 컨벤션 주입
-  const res = await runClaude(`${intro}${rulesCtx(channel)}${prules}${repo ? recallFacts(repo, task) : ''}${repo ? recallSkills(repo, task) : ''}${rmap}${PLAIN}${uiish ? DESIGN_RULE : ''}${newProject ? LAUNCH_RULE : ''}${newProject ? MONITORING_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}${fbBuild ? '\n\n[사용자가 추가로 준 지시 — 반드시 반영]\n' + wrapUntrusted(fbBuild) : ''}${UNTRUSTED_PREAMBLE}\n\n요청:\n${wrapUntrusted(task)}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 540000, true);
+  const res = await runClaude(`${intro}${rulesCtx(channel)}${prules}${repo ? recallFacts(repo, task) : ''}${repo ? recallSkills(repo, task) : ''}${repo ? ontologyQuery(task, repo) : ''}${repo ? soulContext(repo) : ''}${rmap}${PLAIN}${uiish ? DESIGN_RULE : ''}${newProject ? LAUNCH_RULE : ''}${newProject ? MONITORING_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}${fbBuild ? '\n\n[사용자가 추가로 준 지시 — 반드시 반영]\n' + wrapUntrusted(fbBuild) : ''}${UNTRUSTED_PREAMBLE}\n\n요청:\n${wrapUntrusted(task)}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 540000, true);
   if (res.limited) { jobUpdate(channel, { status: 'limited' }); await postAs(client, channel, thread_ts, LEAD, '⏳ 제작 중에 클로드 사용량 한도에 걸렸어. 지금까지 만든 건 안 올렸어, 한도 리셋되면 이어서 만들게.'); return; }
   jobUpdate(channel, { stage: '코드생성' }); // R9: 진행 단계 체크포인트(재시작 알림용)
   addJobTokens(channel, (res.outTokens || estTokens(res.text)) + estTokens(task) + (prd ? estTokens(prd) : 0)); // I8+Q4: 실 API 출력토큰 우선(한글 len/4 ~2배오차 제거), 없으면 추정
@@ -951,7 +954,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   if (workCancel[channel]) { delete workCancel[channel]; jobUpdate(channel, { status: 'cancelled' }); await postAs(client, channel, thread_ts, LEAD, '작업 중단했어. main엔 아무것도 안 올렸어.'); return; }
   // R3: 커밋된 깨끗한 상태에서 critic 심사 (신규·UI 작업만). FAIL이면 runCritic이 1회 고치고 재심사 → 고친 것 추가 커밋.
   let criticPass = true;
-  if ((newProject || uiish) && !workCancel[channel]) { prog.phase('요청대로 됐는지 심사하는 중'); criticPass = await runCritic(client, channel, thread_ts, dir, task, prd); await sh('git add -A', dir); if ((await sh('git diff --cached --quiet; echo $?', dir)).out.trim().endsWith('1')) await sh(`git commit -m "도핑연구소: ${cmsg} 심사보완"`, dir); }
+  if ((newProject || uiish) && !workCancel[channel]) { prog.phase('요청대로 됐는지 심사하는 중'); criticPass = await runCritic(client, channel, thread_ts, dir, task, prd, repo); await sh('git add -A', dir); if ((await sh('git diff --cached --quiet; echo $?', dir)).out.trim().endsWith('1')) await sh(`git commit -m "도핑연구소: ${cmsg} 심사보완"`, dir); }
   jobUpdate(channel, { stage: '빌드·배포' }); // R9: 체크포인트
   prog.phase('빌드 되나 돌려보고 라이브로 띄우는 중');
   // C: 법무·규제 검토 — 신규 빌드 OR 규제 건드리는 기존작업. 단 레포별 쿨다운(12h)으로 "이어서·피드백 반복"마다 재실행 방지(같은 프로젝트 매번 검토 X)
@@ -959,6 +962,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   if (!workCancel[channel] && legalDue) { legalReviewedAt[repo] = Date.now(); await runLegalReview(client, channel, thread_ts, dir, repo, task).catch(() => {}); }
   const finalGaps = (newProject || uiish) ? await checkAppGaps(dir) : []; // 최종 빈구멍 — "다 끝냈어 상용수준" 거짓완료 방지
   const incomplete = finalGaps.length > 0 || !criticPass; // R3: 심사 미통과도 미완성으로
+  if (repo && souls[repo]) soulUpdateLoops(repo, finalGaps); // 제품 혼 미해결(open loops) 갱신 — 다음 "이어서"가 이걸 우선 채움(드리프트 방지)
   const doneHead = incomplete ? `⚠️ 초안은 올렸는데 아직 미완성이야 — ${finalGaps.length ? finalGaps.join(', ') : '심사에서 일부 미충족(위 지적 확인)'}. 이대로는 상용 아니고, 더 채워야 진짜 동작해. ("이어서"라고 하면 계속 채울게)` : '다 끝냈어! (심사 통과)';
   // 결과 요약 — 비개발자용 "뭐가 바뀜 / 기대효과 / 다음 할 것"(실제 diff 근거). 역할별 기술보고와 별개로 한눈에 이해되게.
   let summaryMsg = '';
@@ -1099,6 +1103,15 @@ function extractRepo(raw) {
   if (m) return `${GH_OWNER}/${m[1].toLowerCase()}`;
   return null;
 }
+// 조사 보고 결과 → 후속 실행안을 승인 게이트로(읽기전용 조사에 실행 선택지). 채널 한가할 때만.
+async function gateReportFollowup(client, channel, thread_ts, repo, reportOut) {
+  try {
+    if (!reportOut || pendingDispatch[channel]) return;
+    const items = await extractActionItems(reportOut).catch(() => []);
+    const acts = (items || []).filter(i => i && i.task && i.kind !== 'human').slice(0, 4).map(i => { const r = repo || resolveRepo(i.task); const nm = r === SELF_REPO ? '봇' : (r || '').split('/').pop(); return { who: '조사후속', repo: r, task: `[${nm}] ${i.task}`, kind: ['investigate', 'build'].includes(i.kind) ? i.kind : 'investigate', source: 'report' }; });
+    if (acts.length) { await proposeOrAuto(client, channel, acts[0].repo, acts, '조사 결과 — 다음 실행 제안 ("실행"/"실행 1,3", 버튼). 안 할 거면 "넘어가"', { forceGate: true }); await postAs(client, channel, thread_ts, LEAD, '조사 결과 바탕으로 다음 실행안 위에 제안해놨어 — "실행"으로 승인하면 착수할게.'); }
+  } catch (_) {}
+}
 async function runReport(client, channel, thread_ts, reporter, repo, task) {
   let reportOut = ''; // 조사 최종안 텍스트(후속 제안 추출용)
   ensureJob(channel, 'report', task, repo); // R1: 보드에 기록
@@ -1111,7 +1124,7 @@ async function runReport(client, channel, thread_ts, reporter, repo, task) {
     const cl = await sh(`rm -rf ${dir} && git clone --depth 1 https://x-access-token:${GITHUB_TOKEN}@github.com/${repo}.git ${dir} && chmod -R 777 ${dir}`);
     if (cl.code !== 0) { await postAs(client, channel, thread_ts, reporter, `${mention(channel)}${repo} 레포를 못 찾았어ㅠ (이름 확인 필요)\n${(cl.err || '').slice(0, 200)}`); return; }
     const GROUND = '\n\n[사실 근거 규칙 — 엄격] 레포 코드/파일로 직접 확인되는 것만 사실로 말해라. 배포 여부, 앱스토어·플레이스토어 제출/승인 여부, 실제 유저 수, 매출, 광고 활성화 여부 같은 외부·운영 상태는 코드만으론 절대 알 수 없다. 코드에 준비/설정이 있어도 "제출됨/출시됨/활성화됨"이라고 단정하지 마. 그런 건 "코드엔 준비돼 있는데 실제 제출/활성화 여부는 확인 안 됨"으로 표시해라. 지어내면 안 된다.';
-    const res = await runClaude(`이 저장소를 실제로 열어보고, 아래 UNTRUSTED 마커 안의 사용자 요청에 직접 답해라.${UNTRUSTED_PREAMBLE}\n사용자 요청:\n${wrapUntrusted(task)}\n 단순 현황 나열이 아니라, 레포에서 확인한 사실을 근거로 실제 답·제안·전략을 내라. 코드는 읽기만 해. 레포에 없는 시장·경쟁사·트렌드·벤치마크는 웹서치(WebSearch)로 찾아서 근거로 써도 돼.${GROUND}${rulesCtx(channel)}${recallFacts(repo, task)}\n\n역할별로 각자 그 요청에 대한 자기 분야의 답/제안을 줘. 각 줄 "역할: 답/제안" 형식(관련된 역할만, PM/리서처/UX/아키텍트/보안/마케터). 질문 분야의 담당이 메인으로 구체적인 안을 내고(예: 마케팅 질문이면 마케터가 채널·메시지·실행안까지), 나머지는 거들어. 한 역할당 2~4줄.${PLAIN}`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 540000);
+    const res = await runClaude(`이 저장소를 실제로 열어보고, 아래 UNTRUSTED 마커 안의 사용자 요청에 직접 답해라.${UNTRUSTED_PREAMBLE}\n사용자 요청:\n${wrapUntrusted(task)}\n 단순 현황 나열이 아니라, 레포에서 확인한 사실을 근거로 실제 답·제안·전략을 내라. 코드는 읽기만 해. 레포에 없는 시장·경쟁사·트렌드·벤치마크는 웹서치(WebSearch)로 찾아서 근거로 써도 돼.${GROUND}${rulesCtx(channel)}${recallFacts(repo, task)}${ontologyQuery(task, repo)}\n\n역할별로 각자 그 요청에 대한 자기 분야의 답/제안을 줘. 각 줄 "역할: 답/제안" 형식(관련된 역할만, PM/리서처/UX/아키텍트/보안/마케터). 질문 분야의 담당이 메인으로 구체적인 안을 내고(예: 마케팅 질문이면 마케터가 채널·메시지·실행안까지), 나머지는 거들어. 한 역할당 2~4줄.${PLAIN}`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 540000);
     if (res.limited) { await postAs(client, channel, thread_ts, reporter, `${mention(channel)}⏳ 조사 중에 클로드 사용량 한도에 걸렸어. 리셋되면 다시 봐줄게.`); return; }
     const n = await distributeReport(client, channel, thread_ts, res.text);
     if (!n) await postAs(client, channel, thread_ts, reporter, (res.text || '(내용 없음)').trim().slice(0, 9000));
@@ -1299,14 +1312,16 @@ let facts = {}; // facts[repoOrChannel] = [{text, at}]
 function loadFacts() { try { if (fs.existsSync(FACTS_FILE)) facts = JSON.parse(fs.readFileSync(FACTS_FILE, 'utf8')) || {}; } catch { facts = {}; } }
 function persistFacts() { try { fs.writeFileSync(FACTS_FILE, JSON.stringify(facts)); } catch {} }
 const FACT_TTL_MS = parseInt(process.env.FACT_TTL_DAYS || '90', 10) * 86400000; // I6: 사실 만료(기본 90일) — stale/poisoned 메모리 방어
-// I6: source(출처)·TTL·충돌(근사중복 갱신) 추가. 신뢰소스(commit/test/work)만 들어옴.
-function addFact(key, text, source) {
+// I6 + Heph차용: source(출처)·TTL·충돌 갱신 + 신뢰도(conf)·증거(ev) + 코로보레이션 시 신뢰도 상승. 신뢰소스(commit/test/work)만 들어옴.
+function factConf(source) { return /incident|critic|build|test|verify|commit|커밋|실행/i.test(source || '') ? 0.9 : /debate|토론|brief|브리핑|추정/i.test(source || '') ? 0.55 : 0.7; } // 실행·검증 근거=강, LLM추론=약(Heph 증거위계)
+function addFact(key, text, source, ev) {
   const t = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 220); if (!t || t.length < 6) return;
   const arr = (facts[key] = facts[key] || []);
   const sig = t.toLowerCase().replace(/[^a-z가-힣0-9]/g, '').slice(0, 24); // 근사중복 키
   const dup = arr.findIndex(f => f.text === t || (f.text.toLowerCase().replace(/[^a-z가-힣0-9]/g, '').slice(0, 24) === sig));
-  if (dup >= 0) { arr[dup] = { text: t, at: Date.now(), source: source || arr[dup].source }; persistFacts(); return; } // 충돌/중복 → 최신으로 갱신(superseded)
-  arr.push({ text: t, at: Date.now(), source: source || 'work' });
+  const conf = factConf(source);
+  if (dup >= 0) { arr[dup] = { text: t, at: Date.now(), source: source || arr[dup].source, conf: Math.min(0.98, Math.max(conf, arr[dup].conf || 0.7) + 0.05), ev: ev || arr[dup].ev }; persistFacts(); return; } // 코로보레이션 → 최신·신뢰도↑
+  arr.push({ text: t, at: Date.now(), source: source || 'work', conf, ev: ev || null });
   if (arr.length > 40) facts[key] = arr.slice(-40); persistFacts();
 }
 function recallFacts(key, taskText) {
@@ -1314,16 +1329,18 @@ function recallFacts(key, taskText) {
   if (arr.length !== (facts[key] || []).length) { facts[key] = arr; persistFacts(); } // 만료된 건 정리
   if (!arr.length) return '';
   const words = String(taskText || '').toLowerCase().match(/[a-z가-힣0-9]{2,}/g) || [];
-  const scored = arr.map(f => ({ f, s: words.filter(w => f.text.toLowerCase().includes(w)).length }));
-  const rel = scored.filter(x => x.s > 0).sort((a, b) => b.s - a.s).slice(0, 6).map(x => x.f);
-  const use = rel.length ? rel : arr.slice(-5);
-  return '\n\n[이 프로젝트에 대해 전에 확인·결정된 것(기억) — 참고하되 코드와 다르면 코드 우선]\n' + use.map(f => '- ' + f.text).join('\n');
+  // 점수 = (키워드매치+0.1) × 신뢰도 × 최신성감쇠(6개월) — 신뢰도·최근 것 우선
+  const scored = arr.map(f => { const km = words.filter(w => f.text.toLowerCase().includes(w)).length; const rec = Math.max(0.3, 1 - (now - (f.at || 0)) / (180 * 86400000)); return { f, km, s: (km + 0.1) * (f.conf || 0.7) * rec }; });
+  const rel = scored.filter(x => x.km > 0).sort((a, b) => b.s - a.s).slice(0, 6).map(x => x.f);
+  const use = rel.length ? rel : scored.sort((a, b) => b.s - a.s).slice(0, 5).map(x => x.f);
+  return '\n\n[이 프로젝트에 대해 전에 확인·결정된 것(기억) — 참고하되 코드와 다르면 코드 우선]\n' + use.map(f => '- ' + f.text + (f.conf && f.conf < 0.6 ? ' (미검증)' : '')).join('\n');
 }
 async function extractFacts(key, contextText, source) { // 작업/대화(신뢰소스: 봇이 코드/실행으로 확인한 결과)에서 durable 사실 0~3개 뽑아 저장
   if (!key) return;
   try {
     const r = await runClaude(`다음 작업/대화에서 "앞으로도 계속 유효할 durable 사실"만 0~3개 뽑아 한 줄씩 출력(없으면 빈 출력). 일회성·진행상황·인사는 빼고, 프로젝트 컨벤션·기술결정·구조·사용자 선호처럼 다음에 또 쓸 것만. 각 줄 12~40자, 군더더기·번호·마크다운 없이.\n\n${String(contextText || '').slice(0, 2500)}`, MODEL.FAST);
     for (const line of (r.text || '').split('\n').map(s => s.replace(/^[-*\d.\s]+/, '').trim()).filter(Boolean).slice(0, 3)) addFact(key, line, source || 'work');
+    ontologyIngest(key, contextText, key.includes('/') ? key : null).catch(() => {}); // 같은 작업 산출물에서 엔티티·관계 그래프도 적재
   } catch {}
 }
 
@@ -1332,34 +1349,93 @@ const SKILLS_FILE = process.env.SKILLS_FILE || '/data/skills.json';
 let skills = {}; // skills[repoOrGlobal] = [{name, when, recipe, uses, at}]
 function loadSkills() { try { if (fs.existsSync(SKILLS_FILE)) skills = JSON.parse(fs.readFileSync(SKILLS_FILE, 'utf8')) || {}; } catch { skills = {}; } }
 function persistSkills() { try { fs.writeFileSync(SKILLS_FILE, JSON.stringify(skills)); } catch {} }
-function addSkill(key, name, when, recipe) {
+// Heph 스킬 생명주기 차용: candidate → (독립 2회 확인) → active. 위험군(결제·권한·배포·법무 등)은 자동승격 금지(review, 사람 승인). recall은 active만 주입(1회 플루크 오염 차단).
+const RISKY_SKILL = /결제|payment|구독|환불|credential|secret|token|api[\s_-]?key|배포|deploy|delete|\bdrop\b|truncate|권한|permission|법무|legal|금융|의료|개인정보|마이그|migration|prod|main\s*직행/i;
+function skillHash(s) { let h = 0; const t = String(s || ''); for (let i = 0; i < t.length; i++) { h = (h * 31 + t.charCodeAt(i)) | 0; } return String(h); } // 추출 출처 식별(작성자≠검증자 — 다른 작업이어야 코로보레이션)
+function addSkill(key, name, when, recipe, srcId) {
   name = String(name || '').replace(/\s+/g, ' ').trim().slice(0, 60); recipe = String(recipe || '').replace(/\s+/g, ' ').trim().slice(0, 400);
   if (!name || recipe.length < 12) return;
   const arr = (skills[key] = skills[key] || []);
+  const risky = RISKY_SKILL.test(name + ' ' + when + ' ' + recipe);
   const dup = arr.findIndex(s => s.name.toLowerCase() === name.toLowerCase());
-  if (dup >= 0) { arr[dup] = { ...arr[dup], when: when || arr[dup].when, recipe, at: Date.now() }; persistSkills(); return; } // 같은 이름 → 갱신(개선)
-  arr.push({ name, when: String(when || '').slice(0, 120), recipe, uses: 0, at: Date.now() });
-  if (arr.length > 30) skills[key] = arr.slice(-30); persistSkills();
+  if (dup >= 0) {
+    const s = arr[dup]; s.srcs = s.srcs || (s.srcId ? [s.srcId] : []);
+    if (srcId && !s.srcs.includes(srcId)) s.srcs.push(srcId); // 다른 작업에서 또 도출 = 독립 증거
+    s.corrob = Math.max(s.corrob || 1, s.srcs.length); s.when = when || s.when; s.recipe = recipe; s.at = Date.now();
+    if (s.tier !== 'quarantine' && s.tier !== 'review' && s.corrob >= 2) { if (s.tier !== 'active') { s.tier = 'active'; logDecision(key, 'skill-promote', `${name} (독립 ${s.corrob}회 확인 → active)`); } } // 승격
+    persistSkills(); return;
+  }
+  arr.push({ name, when: String(when || '').slice(0, 120), recipe, tier: risky ? 'review' : 'candidate', corrob: 1, srcs: srcId ? [srcId] : [], uses: 0, trials: { pass: 0, fail: 0 }, at: Date.now() });
+  if (risky) logDecision(key, 'skill-review', `${name} (위험군 — 자동승격 금지, "스킬 승인" 필요)`);
+  if (arr.length > 40) skills[key] = arr.slice(-40); persistSkills();
 }
 function recallSkills(key, taskText) {
-  const arr = skills[key] || []; if (!arr.length) return '';
+  const arr = (skills[key] || []).filter(s => s.tier === 'active'); if (!arr.length) return ''; // 검증된(active) 스킬만 주입
   const words = String(taskText || '').toLowerCase().match(/[a-z가-힣0-9]{2,}/g) || [];
   const scored = arr.map(s => ({ s, sc: words.filter(w => (s.name + ' ' + s.when + ' ' + s.recipe).toLowerCase().includes(w)).length }));
   const rel = scored.filter(x => x.sc > 0).sort((a, b) => b.sc - a.sc).slice(0, 3).map(x => x.s);
   if (!rel.length) return '';
   rel.forEach(s => { s.uses = (s.uses || 0) + 1; }); persistSkills(); // 재사용 카운트
-  return '\n\n[전에 비슷한 작업에서 통한 방식(스킬) — 맞으면 재사용, 안 맞으면 무시]\n' + rel.map(s => `· ${s.name}: ${s.recipe}`).join('\n');
+  return '\n\n[전에 검증된(독립 2회+ 확인) 방식 — 맞으면 재사용, 안 맞으면 무시]\n' + rel.map(s => `· ${s.name}: ${s.recipe}`).join('\n');
 }
 // 사업 추론(부서검토·경영회의·그로스·브리핑·선제)용 학습 주입 — 서비스별 스킬+사실 + 전역. 닫힌 루프의 "학습→다음 제안 반영"을 사업 쪽도 닫음.
-function recallForBiz(repos, taskText) { const rs = (Array.isArray(repos) ? repos : [repos]).filter(Boolean); let out = ''; for (const rp of rs) out += recallSkills(rp, taskText) + recallFacts(rp, taskText); out += recallSkills('global', taskText); return out; }
+function recallForBiz(repos, taskText) { const rs = (Array.isArray(repos) ? repos : [repos]).filter(Boolean); let out = ''; for (const rp of rs) out += recallSkills(rp, taskText) + recallFacts(rp, taskText); out += recallSkills('global', taskText) + ontologyQuery(taskText, rs[0]); return out; } // 그래프 슬라이스도 함께 회상(GraphRAG-lite)
 async function extractSkill(key, contextText) { // 성공한 작업에서 재사용 레시피 0~2개 추출
   if (!key) return;
   try {
     const r = await runClaude(`다음은 방금 성공적으로 끝낸 작업이야. 여기서 "다음에 비슷한 작업에 그대로 재사용할 수 있는 구체적 방식(스킬)"만 0~2개 뽑아라. 추상적 교훈·일회성은 빼고, 실제로 또 써먹을 수 있는 구체 절차/패턴만. 형식(JSON 배열만): [{"name":"짧은 이름","when":"언제 쓰는지 한 줄","recipe":"구체적으로 어떻게 하는지 1~3문장"}]. 없으면 [].\n\n${String(contextText || '').slice(0, 2500)}`, MODEL.FAST);
     const m = (r.text || '').match(/\[[\s\S]*\]/); const arr = m ? JSON.parse(m[0]) : [];
-    for (const s of (Array.isArray(arr) ? arr : []).slice(0, 2)) if (s && s.name && s.recipe) addSkill(key, s.name, s.when, s.recipe);
+    const srcId = skillHash(String(contextText || '').slice(0, 200)); // 이 작업(추출 출처) 식별 — 다른 작업에서 같은 스킬 또 나오면 코로보레이션
+    for (const s of (Array.isArray(arr) ? arr : []).slice(0, 2)) if (s && s.name && s.recipe) addSkill(key, s.name, s.when, s.recipe, srcId);
   } catch {}
 }
+
+// ── Heph 온톨로지 런타임 차용(경량 JSON판) — 작업/사실에서 엔티티·관계 그래프를 쌓고, 질의 시 텍스트+그래프 슬라이스를 같이 회상(GraphRAG-lite). SQLite 대신 JSON, 키워드+그래프 1홉. ──
+const ONTOLOGY_FILE = process.env.ONTOLOGY_FILE || '/data/ontology.json';
+let ontology = { ent: {}, rel: [] }; // ent[key]={name,type,repos[],n,at}; rel=[{a,r,b,at,src,conf}]
+function loadOntology() { try { if (fs.existsSync(ONTOLOGY_FILE)) ontology = JSON.parse(fs.readFileSync(ONTOLOGY_FILE, 'utf8')) || { ent: {}, rel: [] }; } catch { ontology = { ent: {}, rel: [] }; } ontology.ent = ontology.ent || {}; ontology.rel = ontology.rel || []; }
+function persistOntology() { try { fs.writeFileSync(ONTOLOGY_FILE, JSON.stringify({ ent: ontology.ent, rel: ontology.rel.slice(-1500) })); } catch {} }
+function ontEntKey(n) { return String(n || '').toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 50); }
+function ontAddEntity(name, type, repo) { const k = ontEntKey(name); if (!k || k.length < 2) return null; const e = ontology.ent[k] = ontology.ent[k] || { name: String(name).slice(0, 50), type: type || '기타', repos: [], n: 0, at: 0 }; e.n++; e.at = Date.now(); if (type && e.type === '기타') e.type = type; if (repo && !e.repos.includes(repo)) e.repos.push(repo); return k; }
+function ontAddRel(a, r, b, src, conf) { const ka = ontEntKey(a), kb = ontEntKey(b); if (!ka || !kb || ka === kb) return; const dup = ontology.rel.find(x => x.a === ka && x.b === kb && x.r === r); if (dup) { dup.at = Date.now(); dup.conf = Math.min(0.98, (dup.conf || 0.6) + 0.05); return; } ontology.rel.push({ a: ka, r: String(r || '관련').slice(0, 24), b: kb, at: Date.now(), src: src || null, conf: conf || 0.6 }); if (ontology.rel.length > 1500) ontology.rel = ontology.rel.slice(-1500); }
+async function ontologyIngest(srcKey, text, repo) { // 실질 텍스트만 FAST 1콜로 엔티티·관계 추출 → 그래프 병합(메모리 큐레이터 브릿지: 코드/실행 산출물에서만)
+  try {
+    const t = String(text || '').trim(); if (t.length < 120) return;
+    const r = await runClaude(`다음 텍스트에서 이 프로젝트의 핵심 엔티티(서비스·기능·컴포넌트·지표·에러·기술·사람)와 그들 사이 관계만 뽑아 JSON만 출력. 일반어·일회성 제외, 고유하고 또 참조될 것만. 형식: {"entities":[{"name":"이름","type":"서비스|기능|컴포넌트|지표|에러|기술|사람|기타"}],"relations":[{"a":"엔티티","r":"관계(의존|사용|일으킴|측정|담당|포함 등)","b":"엔티티"}]}. 각 최대 8개. 없으면 빈 배열.\n\n${t.slice(0, 2000)}`, MODEL.FAST);
+    const m = (r.text || '').match(/\{[\s\S]*\}/); if (!m) return; let o; try { o = JSON.parse(m[0]); } catch { return; }
+    for (const e of (o.entities || []).slice(0, 8)) if (e && e.name) ontAddEntity(e.name, e.type, repo);
+    for (const rel of (o.relations || []).slice(0, 8)) if (rel && rel.a && rel.b) { ontAddEntity(rel.a, null, repo); ontAddEntity(rel.b, null, repo); ontAddRel(rel.a, rel.r, rel.b, srcKey, 0.6); }
+    persistOntology();
+  } catch {}
+}
+function ontologyQuery(q, repo) { // 키워드로 엔티티 매칭 → 1홉 관계+연결 엔티티 슬라이스(LLM 없이, 빠름)
+  const words = String(q || '').toLowerCase().match(/[a-z가-힣0-9]{2,}/g) || []; if (!words.length || !Object.keys(ontology.ent).length) return '';
+  const hits = Object.keys(ontology.ent).filter(k => { const e = ontology.ent[k]; return (!repo || !e.repos.length || e.repos.includes(repo)) && words.some(w => k.includes(w) || e.name.toLowerCase().includes(w)); }).sort((a, b) => (ontology.ent[b].n || 0) - (ontology.ent[a].n || 0)).slice(0, 6);
+  if (!hits.length) return '';
+  const lines = hits.map(k => { const e = ontology.ent[k]; const edges = ontology.rel.filter(x => x.a === k || x.b === k).slice(-4); const rels = edges.map(x => x.a === k ? `${x.r}→${ontology.ent[x.b] ? ontology.ent[x.b].name : x.b}` : `←${x.r} ${ontology.ent[x.a] ? ontology.ent[x.a].name : x.a}`); return `· ${e.name}(${e.type})${rels.length ? ': ' + rels.join(', ') : ''}`; });
+  return '\n\n[지식맵 — 관련 엔티티·관계(그래프 회상)]\n' + lines.join('\n');
+}
+
+// ── Heph PM Soul 차용 — 서비스별 "제품 혼": 사용자 문제(intent)·합격기준·미해결(open loops)을 영속. 매 빌드/이어서에 주입 + 합격기준 심사 + 드리프트 가드(구조 최적화하다 제품 본질 잃기 방지). ──
+const SOULS_FILE = process.env.SOULS_FILE || '/data/souls.json';
+let souls = {}; // souls[repo] = {intent, audience, criteria:[], openLoops:[], at}
+function loadSouls() { try { if (fs.existsSync(SOULS_FILE)) souls = JSON.parse(fs.readFileSync(SOULS_FILE, 'utf8')) || {}; } catch { souls = {}; } }
+function persistSouls() { try { fs.writeFileSync(SOULS_FILE, JSON.stringify(souls)); } catch {} }
+async function buildSoul(repo, prd, task) { // PRD/요청에서 제품 혼 추출(신규 빌드 시 1회)
+  if (!repo) return;
+  try {
+    const r = await runClaude(`다음은 한 제품의 기획(PRD)/요청이야. 이 제품의 "변하지 않을 핵심"만 JSON으로 뽑아. 형식: {"intent":"이 제품이 사용자에게 해결해주는 핵심 한 문장","audience":"핵심 사용자 한 줄","criteria":["완성으로 인정되려면 반드시 동작해야 할 사용자 기준 3~6개, 각 한 줄, 기능·플로우 관점, 검증 가능하게"]}. 추상 구호 금지.\n\n${String(prd || task || '').slice(0, 3000)}`, MODEL.FAST);
+    const m = (r.text || '').match(/\{[\s\S]*\}/); if (!m) return; let o; try { o = JSON.parse(m[0]); } catch { return; }
+    const s = souls[repo] = souls[repo] || { criteria: [], openLoops: [] };
+    if (o.intent) s.intent = String(o.intent).slice(0, 200);
+    if (o.audience) s.audience = String(o.audience).slice(0, 120);
+    if (Array.isArray(o.criteria) && o.criteria.length) s.criteria = o.criteria.map(c => String(c).slice(0, 120)).slice(0, 8);
+    s.at = Date.now(); persistSouls();
+  } catch {}
+}
+function soulContext(repo) { const s = souls[repo]; if (!s || !s.intent) return ''; return `\n\n[제품 혼 — 이 프로젝트가 존재하는 이유. 구조·기술 최적화하느라 이걸 잃지 마라]\n핵심: ${s.intent}${s.audience ? '\n사용자: ' + s.audience : ''}${s.criteria && s.criteria.length ? '\n반드시 동작해야 할 기준:\n' + s.criteria.map(c => '- ' + c).join('\n') : ''}${s.openLoops && s.openLoops.length ? '\n아직 미해결(이번에 우선 채워라):\n' + s.openLoops.slice(0, 6).map(c => '- ' + c).join('\n') : ''}`; }
+function soulCriteria(repo) { const s = souls[repo]; return (s && s.criteria && s.criteria.length) ? '\n\n[이 제품의 고정 합격기준 — 이게 실제로 동작하는지로 판정. 일부라도 안 되면 FAIL]\n' + s.criteria.map(c => '- ' + c).join('\n') : ''; }
+function soulUpdateLoops(repo, loops) { if (!repo || !souls[repo]) return; souls[repo].openLoops = (loops || []).filter(Boolean).map(c => String(c).slice(0, 120)).slice(0, 8); souls[repo].at = Date.now(); persistSouls(); }
 
 // 채널이 마지막으로 다룬 레포 (재배포에도 살아남게 영구저장 → "어느 레포?" 무한반복 방지)
 const LASTREPO_FILE = process.env.LASTREPO_FILE || '/data/lastrepo.json';
@@ -1646,6 +1722,12 @@ async function runBizBriefing(client, channel, manual = false, startLine = null)
       if (postCh) { const res = await replyTyping(client, postCh, undefined, byName('김채원') || LEAD, async () => { const g = await gen(); return { ...g, text: `사업 브리핑 — ${name}\n${g.text}` }; }); text = (res && res.text) || ''; }
       else { const g = await gen(); text = `사업 브리핑 — ${name}\n${g.text}`; }
       if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(text) }).catch(() => {});
+      // 브리핑 끝에 "지금 하면 효과 큰 것" → 착수 가능한 액션으로 뽑아 그 서비스 채널에 승인 게이트(읽기전용→실행유도). 채널 한가할 때만.
+      if (postCh && text && !pendingDispatch[postCh] && !activeWork[postCh]) {
+        const its = await extractActionItems(text).catch(() => []);
+        const acts = (its || []).filter(i => i && i.task && i.kind !== 'human').slice(0, 4).map(i => ({ who: '그로스', repo: rp, task: i.task, kind: ['investigate', 'build'].includes(i.kind) ? i.kind : 'investigate', source: 'bizbrief' }));
+        if (acts.length) await proposeOrAuto(client, postCh, rp, acts, `${name} 개선 액션 — 착수할 거 골라("실행"/"실행 1,3", 버튼). 안 할 거면 "넘어가"`, { forceGate: true });
+      }
     }
     if (!any && manual) await postAs(client, channel, undefined, LEAD, '지금 사업 수치를 못 받았어(서비스 stats URL/인증 확인). "사업 지표"로 점검해줘.');
   } catch (e) { try { log('error', 'biz-briefing-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
@@ -2241,7 +2323,7 @@ function launchWork(client, channel, thread_ts, repo, task, newProject, forcePR,
 // 작업(신규 제작이든 기존 수정이든) 시작 전, 정말 방향이 갈리는 중요한 결정이 있으면 사용자에게 먼저 물어봄 (없으면 그냥 진행)
 async function planQuestions(task, newProject) {
   try {
-    const r = await runClaude(`${newProject ? '새 프로젝트' : '기존 프로젝트 수정/작업'} 요청: ${JSON.stringify(task)}\n\n이걸 ${newProject ? '만들기' : '작업하기'} 전에 사용자한테 꼭 확인해야 할 중요한 결정이 있으면 1~3개만 질문으로 뽑아. 정말 방향이 크게 갈려서 잘못 정하면 다시 해야 하는 것만(예: 핵심 컨셉/타겟, 꼭 필요한 기능 범위, 톤·스타일, 플랫폼, 어떤 방식으로 구현할지 갈리는 선택). 특히 "봇이 임의로 정하면 안 되고 사용자만 정할 수 있는 사업·취향 결정"이 있으면 우선 물어라 — 예: 로그인/인증 방식(이메일·구글·카카오·네이버·애플 중 뭐), 유료면 가격·플랜 구조, 핵심 외부 서비스/연동 선택(지도·알림·이메일 등), 브랜드명·톤. (결제사 선택은 따로 물으니 여기선 빼) 요청에 이미 답이 있거나 사소하면 절대 묻지 마(빈 배열).\n\n[중요·반드시 지켜] 오직 위 요청 텍스트만 보고 판단해라. 파일시스템·현재 디렉토리·주변 코드를 들여다보지 마라(거기 뭐가 있든 무관). 그리고 다음은 절대 묻지 마라: 어떤 프로젝트/레포인지, 파일·폴더 경로, 현재 코드가 뭔지, 어디에 있는지 — 그건 시스템이 이미 정했고 너가 물을 게 아니다. 질문은 반드시 한국어로 자연스럽게(영어 금지). JSON만 출력: {"questions":["한국어 질문","..."]}`, MODEL.FAST);
+    const r = await runClaude(`${newProject ? '새 프로젝트' : '기존 프로젝트 수정/작업'} 요청: ${JSON.stringify(task)}\n\n이걸 ${newProject ? '만들기' : '작업하기'} 전에 사용자한테 꼭 확인해야 할 중요한 결정이 있으면 1~3개만 질문으로 뽑아. 정말 방향이 크게 갈려서 잘못 정하면 다시 해야 하는 것만(예: 핵심 컨셉/타겟, 꼭 필요한 기능 범위, 톤·스타일, 플랫폼, 어떤 방식으로 구현할지 갈리는 선택). 특히 "봇이 임의로 정하면 안 되고 사용자만 정할 수 있는 사업·취향 결정"이 있으면 우선 물어라 — 예: 로그인/인증 방식(이메일·구글·카카오·네이버·애플 중 뭐), 유료면 가격·플랜 구조, 핵심 외부 서비스/연동 선택(지도·알림·이메일 등), 브랜드명·톤. (결제사 선택은 따로 물으니 여기선 빼) 요청에 이미 답이 있거나 사소하면 절대 묻지 마(빈 배열).\n\n[질문 규율 — Heph 차용] (1) 안전하게 기본값으로 정하고 나중에 고쳐도 되는 건 묻지 마라(빈 배열). (2) 출력물이나 안전경계가 실제로 갈리는 것만. (3) 각 질문은 한 문장/한 선택으로 답할 수 있게, 가능하면 보기나 기본값을 같이 제시("A/B/C 중? (기본: A)"). (4) 시크릿(키·비번)은 묻지 마. (5) 내부 구현 디테일(어떤 라이브러리·폴더구조 등 봇이 알아서 정할 것)은 묻지 마.\n\n[중요·반드시 지켜] 오직 위 요청 텍스트만 보고 판단해라. 파일시스템·현재 디렉토리·주변 코드를 들여다보지 마라(거기 뭐가 있든 무관). 그리고 다음은 절대 묻지 마라: 어떤 프로젝트/레포인지, 파일·폴더 경로, 현재 코드가 뭔지, 어디에 있는지 — 그건 시스템이 이미 정했고 너가 물을 게 아니다. 질문은 반드시 한국어로 자연스럽게(영어 금지). JSON만 출력: {"questions":["한국어 질문","..."]}`, MODEL.FAST);
     const m = (r.text || '').match(/\{[\s\S]*\}/);
     const o = m ? JSON.parse(m[0]) : {};
     return Array.isArray(o.questions) ? o.questions.filter(q => typeof q === 'string' && q.trim()).slice(0, 3) : [];
@@ -2599,10 +2681,35 @@ async function handle(event, client) {
     if (/^(mcp|엠씨피|툴)\s*(추가|연결|등록|넣)/i.test(raw)) { await postAs(client, channel, thread_ts, byName('윈터') || LEAD, `MCP 툴 추가는 ${USER_MCP_FILE}에 {"mcpServers":{"이름":{"command":"...","args":[...],"env":{...}}}} 넣고 "MCP 리로드"하면 재시작 없이 붙어(B2). API키/시크릿 필요한 건 너가 넣어줘야 해(👤). 검증된 후보를 봇이 알아서 제안하게 하려면 그냥 작업 시키면 돼(B3). 지금 연결: ${mcpServerNames().join(', ') || '없음'}.`); return; }
     // R7: 저장된 장기 기억 조회 ("기억 목록" / "스포노노 기억")
     if ((/(^|\s)(기억|메모리)(\s*(목록|리스트|보여줘?|뭐\s*있어|있어\??|봐줘?|확인))?\s*[?？]?\s*$/.test(raw) || /^뭐\s*기억/.test(raw)) && !/(기억해|해줘|하지\s?마|지워|삭제|넣어)/.test(raw)) { const key = extractRepo(raw) || lastRepo[channel] || channel; const now = Date.now(); const arr = (facts[key] || facts[channel] || []).filter(f => now - (f.at || 0) < FACT_TTL_MS); await postAs(client, channel, thread_ts, LEAD, arr.length ? `🧠 ${key.split('/').pop()}에 대해 기억하는 것 (출처·경과):\n` + arr.slice(-15).map(f => `- ${f.text} _(${f.source || 'work'}${f.at ? '·' + Math.round((now - f.at) / 86400000) + 'd' : ''})_`).join('\n') : '아직 이 프로젝트에 대해 따로 기억해둔 게 없어. 작업·조사·토론하면 쌓여(90일 후 자동 만료).'); return; }
+    // 스킬 후보/큐레이터 — candidate·review 목록 + 사람 승인/격리 (Heph 메모리 큐레이터)
+    if (/스킬\s*(후보|큐레이|검토|대기)/.test(raw)) {
+      const key = extractRepo(raw) || lastRepo[channel] || channel; const arr = (skills[key] || []).filter(s => s.tier === 'candidate' || s.tier === 'review');
+      await postAs(client, channel, thread_ts, LEAD, arr.length ? `🧪 ${key.split('/').pop()} 스킬 후보 (아직 active 아님 — recall에 안 쓰임):\n` + arr.slice(-12).map(s => `· ${s.name} [${s.tier === 'review' ? '위험군·사람승인필요' : '후보·독립 ' + (s.corrob || 1) + '/2회'}] — ${s.recipe.slice(0, 70)}`).join('\n') + `\n\n승격: "스킬 승인 <이름>" · 폐기: "스킬 격리 <이름>"` : '대기 중인 스킬 후보 없어. (성공 작업에서 도출돼 독립 2회 확인되면 자동 active, 위험군은 사람 승인 대기)'); return;
+    }
+    if ((tm = raw.match(/스킬\s*(승인|승격|격리|폐기)\s+(.+)$/))) {
+      const key = extractRepo(raw) || lastRepo[channel] || channel; const nm = tm[2].trim().toLowerCase(); const arr = skills[key] || []; const s = arr.find(x => x.name.toLowerCase().includes(nm));
+      if (!s) { await postAs(client, channel, thread_ts, LEAD, `"${tm[2].trim()}" 스킬 못 찾겠어. "스킬 후보"로 목록 봐.`); return; }
+      if (/승인|승격/.test(tm[1])) { s.tier = 'active'; logDecision(key, 'skill-approve', `${s.name} 사람승인→active`); await postAs(client, channel, thread_ts, LEAD, `"${s.name}" 승인했어 — 이제 비슷한 작업에 재사용돼.`); }
+      else { s.tier = 'quarantine'; logDecision(key, 'skill-quarantine', `${s.name} 격리`); await postAs(client, channel, thread_ts, LEAD, `"${s.name}" 격리했어 — 다신 recall에 안 써.`); }
+      persistSkills(); return;
+    }
     // B1: 스킬 라이브러리 조회 ("스킬 목록" / "스포노노 스킬")
     if (/(^|\s)스킬(\s*(목록|리스트|보여줘?|있어\??|확인))?\s*[?？]?\s*$/.test(raw) && !/(추가|만들|배워|넣어|지워|삭제)/.test(raw)) {
-      const key = extractRepo(raw) || lastRepo[channel] || channel; const arr = skills[key] || [];
-      await postAs(client, channel, thread_ts, LEAD, arr.length ? `🧰 ${key.split('/').pop()} 스킬 (성공 작업에서 쌓인 재사용 노하우):\n` + arr.slice(-12).map(s => `· ${s.name} (재사용 ${s.uses || 0}회) — ${s.recipe.slice(0, 80)}`).join('\n') : '아직 쌓인 스킬이 없어. 작업을 성공적으로 끝내면 그 방식이 스킬로 저장돼서 다음에 비슷한 일에 자동으로 끌어와 써.'); return;
+      const key = extractRepo(raw) || lastRepo[channel] || channel; const arr = skills[key] || []; const act = arr.filter(s => s.tier === 'active' || !s.tier), cand = arr.filter(s => s.tier === 'candidate' || s.tier === 'review');
+      await postAs(client, channel, thread_ts, LEAD, arr.length ? `🧰 ${key.split('/').pop()} 스킬 (검증된 것만 재사용):\n` + (act.length ? act.slice(-12).map(s => `· ${s.name} (재사용 ${s.uses || 0}회) — ${s.recipe.slice(0, 80)}`).join('\n') : '  (active 없음)') + (cand.length ? `\n후보 ${cand.length}개 대기 ("스킬 후보"로 확인)` : '') : '아직 쌓인 스킬이 없어. 작업을 성공적으로 끝내면 그 방식이 후보로 저장되고, 독립 2회 확인되면 자동으로 재사용 스킬이 돼.'); return;
+    }
+    // 온톨로지/지식맵 — 엔티티·관계 그래프 조회
+    if (/(지식맵|온톨로지|knowledge\s*map|지식\s*그래프)/i.test(raw)) {
+      const q = raw.replace(/(지식맵|온톨로지|knowledge\s*map|지식\s*그래프|보여줘?|조회|확인|이거|좀)/gi, '').trim();
+      const repo = extractRepo(raw) || lastRepo[channel];
+      const slice = ontologyQuery(q || (repo ? repo.split('/').pop() : '') || Object.keys(ontology.ent).slice(0, 5).join(' '), repo);
+      const nE = Object.keys(ontology.ent).length, nR = ontology.rel.length;
+      await postAs(client, channel, thread_ts, LEAD, nE ? `🕸️ 지식맵 (엔티티 ${nE} · 관계 ${nR})${slice || '\n(해당 키워드로 매칭된 엔티티 없음 — 키워드 같이 줘봐, 예 "지식맵 결제")'}` : '아직 지식 그래프가 비어있어. 작업·조사를 하면 엔티티·관계가 쌓여.'); return;
+    }
+    // 제품 혼 — 서비스의 핵심 의도·합격기준·미해결
+    if (/(제품\s*혼|제품\s*소울|product\s*soul|제품\s*정의|핵심\s*의도)/i.test(raw)) {
+      const repo = extractRepo(raw) || lastRepo[channel]; const s = repo && souls[repo];
+      await postAs(client, channel, thread_ts, LEAD, s && s.intent ? `🫀 ${repo.split('/').pop()} 제품 혼\n핵심: ${s.intent}${s.audience ? '\n사용자: ' + s.audience : ''}${s.criteria && s.criteria.length ? '\n합격기준:\n' + s.criteria.map(c => '- ' + c).join('\n') : ''}${s.openLoops && s.openLoops.length ? '\n아직 미해결:\n' + s.openLoops.map(c => '- ' + c).join('\n') : ''}` : `${repo ? repo.split('/').pop() + '의 ' : ''}제품 혼이 아직 없어. 신규 빌드 때 PRD에서 자동으로 잡혀(기존 서비스는 한 번 빌드/이어서 하면 생겨).`); return;
     }
     if ((tm = raw.match(/^태스크\s*완료\s*(\d+)/))) { const t = (tasks[channel] || []).find(x => x.id === parseInt(tm[1])); if (t) { t.done = true; persistTasks(); await postAs(client, channel, thread_ts, LEAD, `#${tm[1]} 완료 처리했어.`); } else await postAs(client, channel, thread_ts, LEAD, '그 태스크 못 찾겠어.'); return; }
     if ((tm = raw.match(/^태스크\s*삭제\s*(\d+)/))) { tasks[channel] = (tasks[channel] || []).filter(x => x.id !== parseInt(tm[1])); persistTasks(); await postAs(client, channel, thread_ts, LEAD, `#${tm[1]} 삭제했어.`); return; }
@@ -3006,7 +3113,7 @@ async function handle(event, client) {
       if (await guardBusy(client, channel, thread_ts)) return;
       const reporter = pickPersona(raw) || LEAD;
       activeWork[channel] = { task: raw, started: Date.now(), by: lastRequester[channel] };
-      runReport(client, channel, event.thread_ts || event.ts, reporter, projRepo, raw).catch(e => { jobUpdate(channel, { status: 'failed', error: String(e).slice(0, 150) }); failNotifyOwner('조사', null, e); postAs(client, channel, thread_ts, LEAD, '조사 오류: ' + String(e).slice(0, 300)); }).finally(() => { endJob(channel); activeWork[channel] = null; });
+      runReport(client, channel, event.thread_ts || event.ts, reporter, projRepo, raw).then(out => gateReportFollowup(client, channel, event.thread_ts || event.ts, projRepo, out)).catch(e => { jobUpdate(channel, { status: 'failed', error: String(e).slice(0, 150) }); failNotifyOwner('조사', null, e); postAs(client, channel, thread_ts, LEAD, '조사 오류: ' + String(e).slice(0, 300)); }).finally(() => { endJob(channel); activeWork[channel] = null; });
       return;
     }
     // 작업 중 자유발화 = 피드백으로 캡처(버튼/모달이 주 경로지만 타이핑도 안 놓침). 제어·조회 명령은 위에서 이미 처리됨. 페르소나 호출·질문·맞장구는 잡담으로 통과.
@@ -3061,7 +3168,7 @@ async function handle(event, client) {
     if (intent && intent.action === 'report' && intent.task) {
       const reporter = pickPersona(event.text || '') || LEAD;
       activeWork[channel] = { task: intent.task, started: Date.now() };
-      runReport(client, channel, event.thread_ts || event.ts, reporter, resolveR(intent.repo), intent.task).catch(e => { jobUpdate(channel, { status: 'failed', error: String(e).slice(0, 150) }); failNotifyOwner('조사', null, e); postAs(client, channel, thread_ts, LEAD, '조사 오류: ' + String(e).slice(0, 300)); }).finally(() => { endJob(channel); activeWork[channel] = null; });
+      runReport(client, channel, event.thread_ts || event.ts, reporter, resolveR(intent.repo), intent.task).then(out => gateReportFollowup(client, channel, event.thread_ts || event.ts, resolveR(intent.repo), out)).catch(e => { jobUpdate(channel, { status: 'failed', error: String(e).slice(0, 150) }); failNotifyOwner('조사', null, e); postAs(client, channel, thread_ts, LEAD, '조사 오류: ' + String(e).slice(0, 300)); }).finally(() => { endJob(channel); activeWork[channel] = null; });
       return;
     }
     if (intent && intent.action === 'debate' && intent.task) {
@@ -3345,7 +3452,7 @@ async function postButtons(channel, thread_ts, buttons) {
   loadMemory();
   loadRules();
   loadSettings();
-  loadTasks(); loadJobs(); loadFacts(); loadSkills(); buildMcpConfig(); loadDecisions(); loadUsage(); loadBiz(); loadExperiments(); loadPendingDispatch(); loadOpsConfig();
+  loadTasks(); loadJobs(); loadFacts(); loadSkills(); loadOntology(); loadSouls(); buildMcpConfig(); loadDecisions(); loadUsage(); loadBiz(); loadExperiments(); loadPendingDispatch(); loadOpsConfig();
   loadLastRepo();
   loadServices();
   loadPending();
