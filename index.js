@@ -195,7 +195,7 @@ function commandMenuText() {
     '',
     '🤖 *자율(오토파일럿)*',
     '• `오토파일럿 켜` / `끄` / `상태` — 위험도별 자동실행',
-    '• `개선 제안` — 운영 개선 · `자기개선` — 봇 자체 개선',
+    '• `개선 제안` — 운영 개선 · `자기개선` — 봇 자체 개선 · `기회 스카우트` — 트렌드→신사업 발굴',
     '',
     '🧠 *기억·학습·도구*',
     '• `기억 목록` · `스킬 목록` · `스킬 후보`(승격대기) · `스킬 승인/격리 <이름>`',
@@ -395,7 +395,7 @@ async function runLegalReview(client, channel, thread_ts, dir, repo, task) {
   } catch (_) {}
 }
 // ── 실제 작업 모드: 레포 클론 → claude 코드 작업 → 브랜치 push → PR → 보고 ──
-let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {}; const pendingPlan = {}; const pendingSchedule = {}; const pendingMcp = {}; const pendingRhythm = {}; const pendingDesign = {}; const pendingPayment = {}; const limitedResume = {}; // 한도로 멈춘 작업 자동 재개 대기
+let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {}; const pendingPlan = {}; const pendingSchedule = {}; const pendingMcp = {}; const pendingRhythm = {}; const pendingDesign = {}; const pendingPayment = {}; const limitedResume = {}; const pendingOpp = {}; // 한도로 멈춘 작업 자동 재개 대기 + 기회 스카우트 게이트
 const legalReviewedAt = {}; // repo → ts (법무·규제 검토 레포별 쿨다운 — 이어서/피드백 반복마다 재실행 방지)
 // B3: 검증된 MCP 후보를 승인 게이트로 제안(자동설치 금지). 승인 시 config 추가+핫리로드, 키 필요하면 👤 안내.
 async function proposeMcp(client, channel, cand, why) {
@@ -1968,9 +1968,10 @@ const OPS_DEFS = { // id → 표시정보 + 기본값(주기/시각/요일)
   growth: { label: '그로스 실험 제안', desc: '사업 데이터 기반 타겟지표+가설 실험을 승인 게이트로 발의', defCad: 'weekly', defHour: 10, defDow: 2, perService: true },
   selfimprove: { label: '봇 자기개선 스캔', desc: '봇 자체 코드 개선점을 스캔해 승인 게이트로 발의', defCad: 'weekly', defHour: 10, defDow: 3 },
   board: { label: '전략 경영회의', desc: '부서 검토 수렴→CEO 우선순위→반론→최종결정→승인. 회사 이사회', defCad: 'weekly', defHour: 10, defDow: 5 },
+  oppscout: { label: '기회 스카우트', desc: '인터넷 트렌드·핫이슈 모니터링→수익 가능한 AI 에이전트 사업화 기회 발굴(근거 기반 채점)→승인 게이트', defCad: 'weekly', defHour: 10, defDow: 4 },
   rhythm: { label: '운영 리듬 점검', desc: '스케줄을 실제 활동·지연 과제·경보 빈도에 맞게 조정 제안(승인하면 적용)', defCad: 'monthly', defHour: 10 },
 };
-const OPS_ORDER = ['health', 'opsbrief', 'bizbrief', 'improve', 'growth', 'selfimprove', 'board', 'rhythm'];
+const OPS_ORDER = ['health', 'opsbrief', 'bizbrief', 'improve', 'growth', 'selfimprove', 'oppscout', 'board', 'rhythm'];
 let opsConfig = {};
 function seedOpsConfig() { for (const id of OPS_ORDER) { const d = OPS_DEFS[id]; if (!opsConfig[id]) opsConfig[id] = { cadence: d.defCad, hour: d.defHour, minute: 0, dow: d.defDow != null ? d.defDow : 1, dom: 1, channel: null, enabled: true, lastRunDay: null }; } }
 function loadOpsConfig() { try { if (fs.existsSync(OPS_CONFIG_FILE)) opsConfig = JSON.parse(fs.readFileSync(OPS_CONFIG_FILE, 'utf8')) || {}; } catch { opsConfig = {}; } seedOpsConfig(); }
@@ -1999,6 +2000,7 @@ async function runOpsTask(id, ch) {
     if (id === 'improve') return void runImprovementProposal(botClient, ch, false).catch(() => {});
     if (id === 'growth') return void runBizGrowth(botClient, ch, false, startLine).catch(() => {});
     if (id === 'selfimprove') return void runSelfImproveScan(botClient, ch, false).catch(() => {});
+    if (id === 'oppscout') return void runOppScout(botClient, ch, false).catch(() => {});
     if (id === 'board') { if (!activeWork[ch]) { activeWork[ch] = { task: '경영회의', started: Date.now() }; runBoardMeeting(botClient, ch, false).catch(() => {}).finally(() => { activeWork[ch] = null; }); } return; }
     if (id === 'rhythm') return void runRhythmProposal(botClient, ch, false).catch(() => {});
   } catch (e) { try { log('error', 'ops-task-err', { id, e: String(e).slice(0, 120) }); } catch (_) {} }
@@ -2201,6 +2203,51 @@ async function runImprovementProposal(client, channel, manual = false) {
 
 // B4: 능동 자기개선 루프 — 봇 자신의 운영 신호(자체 판단·실패·반복 마찰)를 스캔해 "내 코드(index.js) 개선" 제안. selfHeal(에러 반응)의 능동 버전. 실행은 승인 게이트 + 코드수정=PR(머지·배포는 사람, Q1 eval 통과해야 나감). 주1회 + "자기개선" 수동.
 let selfImproveAt = 0;
+// ── 기회 스카우트 — 인터넷 트렌드·핫이슈를 WebSearch로 모니터링→AI 에이전트로 수익화 가능한 기회를 근거 기반 채점→상위 1~2개 게이트(검증조사 or 신규빌드). 아이디어 스팸 방지: demand_evidence 필수, 점수 컷, 신규빌드는 정상 기획 플로우로. ──
+function oppSlug(title) { return String(title || 'opportunity').toLowerCase().replace(/[^a-z0-9가-힣\s-]/g, '').replace(/\s+/g, '-').replace(/[가-힣]/g, '').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 30) || 'opportunity'; }
+let oppScoutAt = 0;
+async function runOppScout(client, channel, manual = false) {
+  if (!manual && Date.now() - oppScoutAt < 6 * 86400000) return; // 주1회
+  oppScoutAt = Date.now();
+  if (!channel || activeWork[channel] || pendingDispatch[channel] || pendingOpp[channel]) return;
+  try {
+    const lead = byName('아이유') || LEAD;
+    await postAs(client, channel, undefined, lead, '인터넷에서 지금 뜨는 트렌드·핫이슈 훑어서, 우리가 AI 에이전트로 만들어 수익 낼 만한 기회 있나 스카우트해볼게. 웹서치 여러 번 돌리느라 좀 걸려.');
+    startTyping(channel);
+    const known = Object.keys(bizData).map(r => r.split('/').pop()).join(', ');
+    const r = await runClaude(`너는 도핑연구소의 신사업 기회 스카우트(리서처)다. WebSearch 도구로 지금 인터넷에서 뜨는 트렌드·핫이슈·반복되는 사용자 불만을 실제로 검색해서(Reddit, Hacker News, Product Hunt, 뉴스, 구글 검색 트렌드, X 등) "AI 에이전트로 구현 가능하고 수익이 날 만한 사업 기회"를 발굴해라.${GROUNDING_RULE}\n\n반드시 WebSearch를 여러 번 써서 실제 최신 신호를 근거로 삼아라(머릿속 추측 금지). 각 후보를 아래 5축으로 냉정하게 채점(합 0~10):\n1) 지속성: 반짝 유행 vs 6개월+ 지속 성장\n2) 실수요: 돈 내겠다는 신호(불만글·기존 유료 대안 존재·검색 성장). "무료면 쓴다"는 수요 아님\n3) AI에이전트 구현가능성: 에이전트로 실제 자동화 가능한가\n4) 수익경로: 어떻게 돈 받나(구독·건당·B2B), 결제 가능한가\n5) 우리적합성: 웹앱+Railway 배포 + Claude 에이전트 스택으로 우리가 만들 수 있나\n\n이미 하는 것(${known || '없음'})과 겹치는 건 빼라. 점수 6 미만이거나 근거 약한 건 버려라. 상위 1~2개만.\n\nJSON만(앞뒤 설명 금지): {"scout":[{"title":"기회 한 줄","trend":"무슨 트렌드/핫이슈","demand_evidence":"실수요 근거 — 검색에서 본 구체 신호(어느 커뮤니티 불만/검색성장/기존 유료대안 등)","ai_build":"AI 에이전트로 어떻게 구현","monetize":"수익 모델","needs":"우리가 추가로 필요한 것(키·데이터·계정, 없으면 빈문자열)","score":0,"rec":"validate|build","why_first":"왜 그 1차 액션인지 한 줄"}]}\ndemand_evidence 없는 건 절대 넣지 마. 아직 수요 검증 안 된 새 기회면 rec=validate(소규모 수요검증 먼저), 근거가 이미 충분하면 rec=build.`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 360000, false);
+    stopTyping(channel);
+    const m = (r.text || '').match(/\{[\s\S]*\}/); if (!m) { if (manual) await postAs(client, channel, undefined, lead, '지금은 마땅한 기회가 안 잡혀. 다음에 또 훑어볼게.'); return; }
+    let obj; try { obj = JSON.parse(m[0]); } catch { if (manual) await postAs(client, channel, undefined, lead, '기회 정리하다 꼬였어, 다음에 다시.'); return; }
+    const cands = (obj.scout || []).filter(x => x && x.title && x.demand_evidence && (x.score == null || x.score >= 6)).slice(0, 2);
+    if (!cands.length) { if (manual) await postAs(client, channel, undefined, lead, '훑어봤는데 지금 "근거 있는 + 수익 나는 + 우리가 만들 수 있는" 기회는 안 보여. 트렌드는 많은데 대부분 반짝이거나 수익화가 약해. 무리해서 만들 바엔 패스하는 게 나아.'); return; }
+    const card = cands.map((c, i) => `${i + 1}. ${c.title}  (점수 ${c.score ?? '?'}/10 · 1차: ${c.rec === 'build' ? 'MVP 빌드' : '수요 검증'})\n   트렌드: ${c.trend}\n   실수요 근거: ${c.demand_evidence}\n   AI 구현: ${c.ai_build}\n   수익: ${c.monetize}${c.needs ? `\n   필요(너): ${c.needs}` : ''}`).join('\n\n');
+    await postAs(client, channel, undefined, lead, `🔭 기회 스카우트 — 트렌드에서 발굴한 사업 기회 (근거 기반, 상위 ${cands.length})\n\n${card}\n\n바로 만들려면 "기회 N 만들자", 수요 더 파보려면 "기회 N 검증", 둘 다 아니면 "넘어가". (빌드는 정상 기획·시안·결제·법무 게이트 다 거쳐)`);
+    pendingOpp[channel] = { cands, at: Date.now() };
+    const btns = []; cands.forEach((c, i) => { btns.push({ text: `▶ ${i + 1} 만들기`, id: `opp_build_${i}`, style: 'primary' }); }); btns.push({ text: '더 검증(1)', id: 'opp_val_0' }); btns.push({ text: '넘어가', id: 'opp_skip' });
+    await postButtons(channel, undefined, btns.slice(0, 5));
+    logDecision(channel, 'oppscout', cands.map(c => `${c.title}(${c.score})`).join(' / ').slice(0, 200));
+  } catch (e) { try { stopTyping(channel); log('error', 'oppscout-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
+}
+async function runOppValidate(client, channel, cand) { // 한 기회의 수요를 WebSearch로 더 깊이 검증(레포 없음)
+  const lead = byName('아이유') || LEAD;
+  try {
+    await postAs(client, channel, undefined, lead, `"${cand.title}" 수요를 더 깊게 파볼게. 웹서치로 실제 근거 모으는 중.`);
+    startTyping(channel);
+    const r = await runClaude(`너는 신사업 검증 리서처다. 아래 기회의 "진짜 수요와 수익성"을 WebSearch로 깊게 검증해라. 낙관 금지, 반증도 적극적으로 찾아라.${GROUNDING_RULE}\n\n[기회]\n제목: ${cand.title}\n트렌드: ${cand.trend}\n초기 수요근거: ${cand.demand_evidence}\nAI구현안: ${cand.ai_build}\n수익모델: ${cand.monetize}\n\nWebSearch로 확인할 것: (1) 실제 수요 크기·성장(검색추이·커뮤니티 규모·반복 불만) (2) 이미 있는 경쟁/대안과 그들의 약점 (3) 사람들이 돈을 내고 있는 증거(유료 대안·가격대) (4) 만들 때 걸림돌(데이터·API·규제·ToS). 마지막에 "지금 만들 가치: 강함/중간/약함 + 한 줄 이유"와 "만든다면 MVP 핵심 1가지". 마크다운 금지, 반말, 근거(어디서 봤는지) 명시.`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 360000, false);
+    stopTyping(channel);
+    const t = deMd((r.text || '').trim()) || '검증 결과를 못 뽑았어(웹서치 실패/한도).';
+    await postAs(client, channel, undefined, lead, `🔬 "${cand.title}" 수요 검증\n${t.slice(0, 3500)}`);
+    await postAs(client, channel, undefined, LEAD, '만들 가치 있어 보이면 "기회 1 만들자", 아니면 넘어가자.');
+    pendingOpp[channel] = { cands: [cand], at: Date.now() };
+    await postButtons(channel, undefined, [{ text: '▶ 1 만들기', id: 'opp_build_0', style: 'primary' }, { text: '넘어가', id: 'opp_skip' }]);
+  } catch (e) { try { stopTyping(channel); await postAs(client, channel, undefined, lead, '검증 중에 막혔어: ' + String(e).slice(0, 150)); } catch (_) {} }
+}
+function startOppBuild(client, channel, thread_ts, cand) { // 기회 → 신규 프로젝트 정상 빌드 플로우로
+  delete pendingOpp[channel];
+  const brief = `${cand.title}. 이 서비스의 핵심: ${cand.ai_build}. 트렌드 배경: ${cand.trend}. 타겟 수요 근거: ${cand.demand_evidence}. 수익 모델: ${cand.monetize}. AI 에이전트 기반 웹 서비스로 실제 동작하게 만들어줘.`;
+  return startWork(client, channel, thread_ts, WORK_DEFAULT_REPO, brief, true, !!settings.approval[channel], oppSlug(cand.title));
+}
 async function runSelfImproveScan(client, channel, manual = false) {
   if (!manual && Date.now() - selfImproveAt < 6 * 86400000) return; // 주1회
   selfImproveAt = Date.now();
@@ -3002,6 +3049,20 @@ async function handle(event, client) {
       runSelfImproveScan(client, channel, true).catch(() => {});
       return;
     }
+    // 기회 스카우트 게이트 — "기회 N 만들자/검증" (pendingOpp 활성 시)
+    if (pendingOpp[channel] && (tm = raw.match(/기회\s*(\d+)?\s*(만들|제작|빌드|가자|ㄱㄱ|검증|파|조사)/))) {
+      if (pendingOpp[channel].at && Date.now() - pendingOpp[channel].at > 60 * 60 * 1000) { delete pendingOpp[channel]; }
+      else { const idx = Math.max(0, (parseInt(tm[1], 10) || 1) - 1); const c = pendingOpp[channel].cands[idx]; if (!c) { await postAs(client, channel, thread_ts, LEAD, '그 번호 기회가 없어. 1번부터야.'); return; }
+        if (/검증|파|조사/.test(tm[2])) { delete pendingOpp[channel]; if (await guardBusy(client, channel, thread_ts)) return; activeWork[channel] = { task: '기회 검증', started: Date.now() }; runOppValidate(client, channel, c).catch(() => {}).finally(() => { activeWork[channel] = null; }); return; }
+        if (await guardBusy(client, channel, thread_ts)) return; await postAs(client, channel, thread_ts, LEAD, `좋아, "${c.title}" 만들기 들어갈게 — 정상 기획 플로우(PRD→시안→빌드→법무) 다 거쳐.`); startOppBuild(client, channel, thread_ts, c); return; }
+    }
+    // 기회 스카우트 수동 트리거
+    if (/(기회\s*스카우트|기회\s*발굴|트렌드\s*사업|사업\s*기회|신사업\s*스카우트|오퍼튜니티|opportunity\s*scout)/i.test(raw)) {
+      if (await guardBusy(client, channel, thread_ts)) return;
+      activeWork[channel] = { task: '기회 스카우트', started: Date.now() };
+      runOppScout(client, channel, true).catch(() => {}).finally(() => { activeWork[channel] = null; });
+      return;
+    }
     // 의존성 업데이트 → 안전하게 올리고 빌드 확인 후 PR
     if (/(의존성|디펜던시|패키지|dependency).*(업데이트|갱신|올려|올리|update)/.test(raw)) {
       const eng = byName('윈터') || LEAD; // 의존성 업데이트 = 유지보수/엔지니어링
@@ -3234,7 +3295,7 @@ function buildHomeBlocksNew() {
   // 헤더 + 요약 + 빠른 실행
   B.push({ type: 'header', text: { type: 'plain_text', text: '도핑연구소 운영 콘솔', emoji: true } });
   B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `서비스 ${svcs.length}개(정상 ${upN}) · 진행 작업 ${active.length} · 승인 대기 ${pendCount} · 추적 ${experiments.length}` }] });
-  B.push({ type: 'actions', elements: [hbtn('경영회의 열기', 'home_run_board', { style: 'primary' }), hbtn('사업 브리핑', 'home_run_bizbrief'), hbtn('헬스체크', 'home_run_health'), hbtn('운영 브리핑', 'home_run_opsbrief'), hbtn('새로고침', 'home_refresh')] });
+  B.push({ type: 'actions', elements: [hbtn('경영회의 열기', 'home_run_board', { style: 'primary' }), hbtn('사업 브리핑', 'home_run_bizbrief'), hbtn('헬스체크', 'home_run_health'), hbtn('기회 스카우트', 'home_run_oppscout'), hbtn('새로고침', 'home_refresh')] });
   B.push({ type: 'section', text: { type: 'mrkdwn', text: settings.paused ? '*전체 자율: 멈춤* — 모든 자동(정기업무·선제감시·브리핑·경영회의) 정지됨' : '*전체 자율: 가동 중* — 자동 운영 작동 중' }, accessory: hbtn(settings.paused ? '자율 재개' : '전체 정지', 'home_pause_toggle', { style: settings.paused ? 'primary' : 'danger' }) });
   const senOn = !settings.sentinel || settings.sentinel.enabled !== false;
   const senCh = settings.sentinel && settings.sentinel.channel;
@@ -3387,7 +3448,7 @@ app.action(/^(home_|opscfg_|svcroute_)/, async ({ ack, body, action, client }) =
       for (const rp of repos) { const ch = settings.deptRunChannel || channelForWork(rp, dept, homeTargetChannel(userId)); if (ch) { try { await runDeptLoop(app.client, ch, dept, true, false, rp); } catch (_) {} } } // 지정 채널 있으면 거기로, 없으면 서비스별 라우팅
       setTimeout(() => publishHome(client, userId).catch(() => {}), 1500); return;
     }
-    const cmdMap = { home_run_board: '경영회의', home_run_bizbrief: '사업 브리핑', home_run_health: '헬스체크', home_run_opsbrief: '운영 브리핑', home_run_growth: '그로스 제안' };
+    const cmdMap = { home_run_board: '경영회의', home_run_bizbrief: '사업 브리핑', home_run_health: '헬스체크', home_run_opsbrief: '운영 브리핑', home_run_growth: '그로스 제안', home_run_oppscout: '기회 스카우트' };
     const text = cmdMap[aid];
     if (text) {
       const ch = homeTargetChannel(userId); if (!ch) return;
@@ -3417,6 +3478,21 @@ app.action(/^(dispatch|plan|sched|mcp|design|pay)_/, async ({ ack, body, action 
     if (!pend[channel]) { try { console.log('[action] stale', action.action_id, channel); } catch (_) {} return; }
     await handle({ channel, user: body.user && body.user.id, ts: 'btn-' + (action.action_ts || (body.actions && body.actions[0] && body.actions[0].action_ts) || '0'), text }, app.client);
   } catch (e) { try { console.log('[action] err', String(e).slice(0, 120)); } catch (_) {} }
+});
+// 기회 스카우트 버튼 — 만들기/더검증/넘어가
+app.action(/^opp_/, async ({ ack, body, action }) => {
+  await ack();
+  try {
+    const channel = (body.channel && body.channel.id) || (body.container && body.container.channel_id); if (!channel) return;
+    const bm = action.action_id.match(/^opp_build_(\d+)$/); const vm = action.action_id.match(/^opp_val_(\d+)$/);
+    const lbl = bm ? `${+bm[1] + 1}번 만들기` : vm ? '더 검증' : '넘어가';
+    const msgTs = body.message && body.message.ts;
+    if (msgTs) { try { await botClient.chat.update({ channel, ts: msgTs, text: `✅ ${lbl}`, blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `✅ 선택: *${lbl}*` } }] }); } catch (_) {} }
+    if (!pendingOpp[channel]) { try { console.log('[opp] stale', action.action_id); } catch (_) {} return; }
+    if (action.action_id === 'opp_skip') { delete pendingOpp[channel]; try { await postAs(botClient, channel, undefined, LEAD, '오케이, 이 기회는 넘어갈게.'); } catch (_) {} return; }
+    const text = bm ? `기회 ${+bm[1] + 1} 만들자` : `기회 ${+(vm ? vm[1] : 0) + 1} 검증`;
+    await handle({ channel, user: body.user && body.user.id, ts: 'btn-opp', text }, app.client);
+  } catch (e) { try { console.log('[opp-action] err', String(e).slice(0, 120)); } catch (_) {} }
 });
 // ── 피드백 루프 UI: 버튼 → 텍스트박스(모달) → 큐 적재 → 단계 경계에서 반영 ──
 app.action('fb_open', async ({ ack, body, action, client }) => { // [피드백 주기] 버튼 → 모달 열기

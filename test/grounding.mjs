@@ -30,5 +30,20 @@ ok(kept.length === 2, 'evidence 없는 항목은 버림(B 제외) — 코드 검
 const RULE = '증상이지 "원인"이 아니다 단정하지 마라 investigate 원인 수정 근거';
 ok(/증상/.test(RULE) && /원인/.test(RULE) && /investigate/.test(RULE) && /근거/.test(RULE), 'GROUNDING_RULE 4원칙(증상/원인/investigate우선/근거)');
 
+// 6) 기회 스카우트 필터 — demand_evidence 필수 + 점수 6+ + 상위 2
+const scout = [
+  { title: 'A', demand_evidence: '레딧 불만 다수', score: 8 },
+  { title: 'B', score: 9 }, // 근거 없음 → 버림
+  { title: 'C', demand_evidence: '검색 급증', score: 4 }, // 점수 낮음 → 버림
+  { title: 'D', demand_evidence: '유료 대안 존재', score: 7 },
+  { title: 'E', demand_evidence: 'x', score: 7 },
+];
+const cands = scout.filter(x => x && x.title && x.demand_evidence && (x.score == null || x.score >= 6)).slice(0, 2);
+ok(cands.length === 2, '기회: 근거+점수6이상만, 상위 2개');
+ok(cands[0].title === 'A' && cands[1].title === 'D', '근거 없는 B·저점수 C 탈락');
+function oppSlug(t) { return String(t || 'opportunity').toLowerCase().replace(/[^a-z0-9가-힣\s-]/g, '').replace(/\s+/g, '-').replace(/[가-힣]/g, '').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 30) || 'opportunity'; }
+ok(oppSlug('AI Recipe Agent!') === 'ai-recipe-agent', '기회 제목 → 레포 슬러그');
+ok(oppSlug('한글만') === 'opportunity', '한글만이면 기본 슬러그');
+
 console.log(fail ? '\n❌ grounding 실패 ' + fail : '\n✅ grounding 전부 통과');
 process.exit(fail ? 1 : 0);
