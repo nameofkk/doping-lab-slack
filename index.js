@@ -36,10 +36,11 @@ const ROUNDS = parseInt(DEBATE_ROUNDS, 10) || 2;
 //  TEAM = 실제 제작·리포트·토론·코드비평·리뷰·계획 등 추론 필요한 일 → sonnet
 //  FAST = 분류·가드레일·의도일치·질문생성·사실추출 같은 짧고 잦은 판정 → haiku (싸고 빠름)
 const MODEL = {
-  LEAD: process.env.LEAD_MODEL || 'opus',
+  LEAD: process.env.LEAD_MODEL || 'claude-fable-5', // 팀장(한로로) = 최신 최상위 모델 Claude Fable 5(2026-06-09 출시, Opus 4.8 능가). 접근 불가 시 자동으로 opus 폴백.
   TEAM: process.env.AGENT_MODEL || 'sonnet',
   FAST: process.env.FAST_MODEL || 'haiku',
 };
+const MODEL_FALLBACK = 'opus'; // 새 모델(fable 등) 접근 불가일 때 폴백
 
 // ── 직원(페르소나). tokenEnv 에 토큰이 있으면 진짜 별도 멤버로 게시 ──
 const TEAM = [
@@ -272,7 +273,15 @@ async function runClaude(prompt, model, cwd = WORKDIR, perm = CLAUDE_PERMISSION_
   if (Date.now() < claudeBreaker.openUntil) return { ok: false, limited: true, text: '⏳ 클로드가 연속으로 막혀서 잠깐 쉬는 중이야(자동 회복 대기). 조금 있다 다시 시도해줘.' };
   for (let attempt = 0; attempt < 3; attempt++) {
     const r = await runClaudeOnce(prompt, model, cwd, perm, timeoutMs, useMcp);
-    if (!r.limited) { breakerBump(r.ok !== false); return r; } // 성공/일반오류는 여기서 종료(오류는 fail 카운트)
+    if (!r.limited) {
+      // 새 모델(fable 등) 접근 불가/미지원 에러면 opus로 1회 폴백(핵심 역할 안 끊기게). 표준 별칭엔 적용 안 함.
+      if (r.ok === false && model && /fable|mythos/i.test(model) && /model|not[_ ]?found|404|invalid|does not exist|unknown|not available|access/i.test(r.text || '')) {
+        const f = await runClaudeOnce(prompt, MODEL_FALLBACK, cwd, perm, timeoutMs, useMcp);
+        if (!f.limited) { breakerBump(f.ok !== false); return f; }
+        return f;
+      }
+      breakerBump(r.ok !== false); return r; // 성공/일반오류는 여기서 종료(오류는 fail 카운트)
+    }
     if (attempt < 2) await new Promise(s => setTimeout(s, 8000 * (attempt + 1))); // 8s, 16s 백오프
   }
   breakerBump(false); // 3회 다 한도 → 지속 장애로 카운트
@@ -3091,6 +3100,8 @@ function selOpt(text, value) { return { text: { type: 'plain_text', text: String
 function staticSel(action_id, options, current, ph) { const el = { type: 'static_select', action_id, placeholder: { type: 'plain_text', text: ph, emoji: true }, options }; const init = options.find(o => o.value === String(current)); if (init) el.initial_option = init; return el; }
 function timeSel(action_id, hour, minute) { return { type: 'timepicker', action_id, initial_time: `${String(hour).padStart(2, '0')}:${String(minute || 0).padStart(2, '0')}`, placeholder: { type: 'plain_text', text: '시각', emoji: true } }; }
 function chanSel(action_id, channel, ph) { const el = { type: 'conversations_select', action_id, placeholder: { type: 'plain_text', text: ph || '채널 선택', emoji: true }, filter: { include: ['public', 'private'], exclude_bot_users: true } }; if (channel) el.initial_conversation = channel; return el; }
+// 홈 채널 설정 드롭다운에 노출할 서비스 목록 — bizData(지표 등록) ∪ 라이브 서비스(헬스). 인덱스로 핸들러와 매핑되니 빌더·핸들러가 같은 함수를 써야 함.
+function homeServiceRepos() { return [...new Set([...Object.keys(bizData), ...Object.values(services).filter(s => s.url && s.repo).map(s => s.repo)])]; }
 function buildHomeBlocksNew() {
   const B = [];
   const js = Object.values(jobs).sort((a, b) => b.id - a.id);
@@ -3130,7 +3141,7 @@ function buildHomeBlocksNew() {
   B.push({ type: 'header', text: { type: 'plain_text', text: '정기 업무 (자동) — 주기·시각·채널 설정', emoji: true } });
   const cadOpts = [selOpt('매일', 'daily'), selOpt('매주', 'weekly'), selOpt('매월', 'monthly')];
   const dowOpts = DOW_KO.map((d, i) => selOpt(d + '요일', i));
-  const homeRepos = Object.keys(bizData);
+  const homeRepos = homeServiceRepos();
   for (const id of OPS_ORDER) {
     const o = opsConfig[id], def = OPS_DEFS[id]; if (!o) continue;
     const chTxt = def.perService ? '서비스별 (아래에서 각각 지정)' : (o.channel ? `<#${o.channel}>` : (settings.hqChannel ? `<#${settings.hqChannel}>(기본)` : '기본 채널'));
@@ -3147,11 +3158,11 @@ function buildHomeBlocksNew() {
   }
   if (schedules.length) B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '내가 등록한 스케줄: ' + schedules.map(s => `#${s.id} ${homeSchedTime(s)} ${String(s.label || s.task || '').slice(0, 20)}`).join('  ·  ').slice(0, 1900) }] });
   B.push({ type: 'divider' });
-  // 서비스 기본 채널(폴백) — 위 정기 업무에서 채널 안 정한 업무가 갈 기본값
-  B.push({ type: 'header', text: { type: 'plain_text', text: '서비스 기본 채널 (폴백)', emoji: true } });
-  B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '위 정기 업무에서 채널을 따로 안 정하면 여기 기본 채널로 가. 봇을 먼저 그 채널에 초대해야 글이 가.' }] });
-  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*전사* — 경영회의·회사 전체 업무 기본` }, accessory: chanSel('svcroute_hq_x', settings.hqChannel, '전사 채널') });
-  homeRepos.forEach((rp, ri) => { B.push({ type: 'section', text: { type: 'mrkdwn', text: `*${rp.split('/').pop()}* — 이 서비스 기본` }, accessory: chanSel('svcroute_' + ri + '_default', settings.repoChannel[rp], '기본 채널') }); });
+  // 서비스 담당 채널 — 이 서비스의 헬스·다운 경보·진단·브리핑·정기업무(채널 미지정 시)가 모두 여기로
+  B.push({ type: 'header', text: { type: 'plain_text', text: '서비스 담당 채널', emoji: true } });
+  B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '여기서 정한 채널로 그 서비스의 헬스체크·다운 경보·자동 진단·사업브리핑이 가(한 채널에 남 서비스 안 섞임). 채널 안 정하면 전사 채널로 폴백. 봇을 먼저 그 채널에 초대해야 글이 가.' }] });
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*전사(경영)* — 경영회의·운영 브리핑 등 회사 전체 업무${settings.hqChannel ? '' : '  _(미지정 → 서비스 채널로 폴백)_'}` }, accessory: chanSel('svcroute_hq_x', settings.hqChannel, '전사 채널') });
+  homeRepos.forEach((rp, ri) => { const cur = settings.repoChannel[rp]; B.push({ type: 'section', text: { type: 'mrkdwn', text: `*${rp.split('/').pop()}* — 헬스·경보·브리핑 채널${cur ? ` → <#${cur}>` : '  _(미지정)_'}` }, accessory: chanSel('svcroute_' + ri + '_default', cur, '담당 채널') }); });
   B.push({ type: 'divider' });
   // 부서 검토 채널 (요청 시·서비스별) — 마케팅/고객/재무/시장 검토를 서비스마다 어느 채널로
   B.push({ type: 'header', text: { type: 'plain_text', text: '부서 검토 채널 (서비스별)', emoji: true } });
@@ -3231,7 +3242,7 @@ app.action(/^(home_|opscfg_|svcroute_)/, async ({ ack, body, action, client }) =
     }
     // D5: 업무 블록 내 서비스별 채널(perService task) — workRoute[repo:taskId]
     if (m = aid.match(/^opscfg_psc_(\w+)_(\d+)$/)) {
-      const taskId = m[1], rp = Object.keys(bizData)[parseInt(m[2], 10)], chosen = action.selected_conversation || null;
+      const taskId = m[1], rp = homeServiceRepos()[parseInt(m[2], 10)], chosen = action.selected_conversation || null;
       if (rp) { const key = rp + ':' + taskId; if (chosen) settings.workRoute[key] = chosen; else delete settings.workRoute[key]; persistSettings(); }
       await publishHome(client, userId); return;
     }
@@ -3239,7 +3250,7 @@ app.action(/^(home_|opscfg_|svcroute_)/, async ({ ack, body, action, client }) =
     if (m = aid.match(/^svcroute_(hq|\d+)_(\w+)$/)) {
       const chosen = action.selected_conversation || null;
       if (m[1] === 'hq') { settings.hqChannel = chosen; }
-      else { const rp = Object.keys(bizData)[parseInt(m[1], 10)]; if (rp) { if (m[2] === 'default') { if (chosen) settings.repoChannel[rp] = chosen; else delete settings.repoChannel[rp]; } else { const key = rp + ':' + m[2]; if (chosen) settings.workRoute[key] = chosen; else delete settings.workRoute[key]; } } }
+      else { const rp = homeServiceRepos()[parseInt(m[1], 10)]; if (rp) { if (m[2] === 'default') { if (chosen) settings.repoChannel[rp] = chosen; else delete settings.repoChannel[rp]; } else { const key = rp + ':' + m[2]; if (chosen) settings.workRoute[key] = chosen; else delete settings.workRoute[key]; } } }
       persistSettings(); await publishHome(client, userId); return;
     }
     if (m = aid.match(/^home_disp_(run|skip)_(.+)$/)) { // 특정 채널 대기제안 승인/넘어가
