@@ -291,7 +291,7 @@ async function runClaude(prompt, model, cwd = WORKDIR, perm = CLAUDE_PERMISSION_
   if (Date.now() < claudeBreaker.openUntil) return { ok: false, limited: true, text: '⏳ 클로드가 연속으로 막혀서 잠깐 쉬는 중이야(자동 회복 대기). 조금 있다 다시 시도해줘.' };
   for (let attempt = 0; attempt < 3; attempt++) {
     const r = await runClaudeOnce(prompt, model, cwd, perm, timeoutMs, useMcp);
-    if (r.timedout && attempt < 1) continue; // 타임아웃은 1회 재시도(응답이 길어 끊긴 경우 다시 받으면 되는 일 많음 — "다시 시도해줘" 노출 줄임)
+    if (r.timedout && attempt < 1 && timeoutMs <= 300000) continue; // 타임아웃 1회 재시도 — 단 짧은 콜(조사종합·요약 5분이하)만. 긴 빌드(9분)는 재시도하면 2배 되니 제외
     if (!r.limited) {
       // 새 모델(fable 등) 접근 불가/미지원 에러면 opus로 1회 폴백(핵심 역할 안 끊기게). 표준 별칭엔 적용 안 함.
       if (r.ok === false && model && /fable|mythos/i.test(model) && /model|not[_ ]?found|404|invalid|does not exist|unknown|not available|access/i.test(r.text || '')) {
@@ -3592,8 +3592,10 @@ function buildHomeBlocksNew() {
   else B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '_대기 중인 제안 없음_' }] });
   B.push({ type: 'divider' });
   // 진행 중 작업
-  const jline = j => `${icon[j.status] || '•'} #${j.id} ${j.type} · ${String(j.title || '').slice(0, 48)}${j.repo ? ' (' + j.repo.split('/').pop() + ')' : ''}`;
-  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*진행 중 작업* (${active.length})\n` + (active.length ? active.map(jline).join('\n').slice(0, 2800) : '_지금 도는 작업 없음_') } });
+  const jline = j => `${icon[j.status] || '•'} #${j.id} ${j.type} · ${String(j.title || '').slice(0, 60)}${j.repo ? ' (' + j.repo.split('/').pop() + ')' : ''}${j.status === 'awaiting-approval' ? ' — 승인/머지 대기' : j.status === 'interrupted' ? ' — 끊김' : ''}`;
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*진행 중 작업* (${active.length})` } });
+  if (active.length) { for (const j of active.slice(0, 5)) { B.push({ type: 'section', text: { type: 'mrkdwn', text: jline(j) } }); B.push({ type: 'actions', elements: [hbtn('▶ 재개', 'home_job_resume_' + j.id, { value: String(j.id) }), hbtn('🗑 삭제', 'home_job_del_' + j.id, { value: String(j.id), style: 'danger' })] }); } }
+  else B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '_지금 도는 작업 없음_' }] });
   const recent = js.filter(j => !isActive(j)).slice(0, 4);
   if (recent.length) B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '최근: ' + recent.map(j => `${icon[j.status] || '•'} ${String(j.title || j.type).slice(0, 26)}`).join('   ') }] });
   B.push({ type: 'divider' });
@@ -3728,6 +3730,14 @@ app.action(/^(home_|opscfg_|svcroute_)/, async ({ ack, body, action, client }) =
     if (m = aid.match(/^home_disp_(run|skip)_(.+)$/)) { // 특정 채널 대기제안 승인/넘어가
       const ch = m[2], text = m[1] === 'run' ? '실행' : '넘어가';
       if (pendingDispatch[ch]) await handle({ channel: ch, user: userId, ts: 'home-' + Date.now(), text }, app.client);
+      setTimeout(() => publishHome(client, userId).catch(() => {}), 1500); return;
+    }
+    // 진행작업 재개/삭제 (홈에서 끊긴·대기 작업 관리)
+    if (m = aid.match(/^home_job_(resume|del)_(\d+)$/)) {
+      const id = parseInt(m[2], 10), jb = jobs[id];
+      if (!jb) { await publishHome(client, userId); return; }
+      if (m[1] === 'del') { if (jb.channel && activeWork[jb.channel] && activeWork[jb.channel].jobId === id) workCancel[jb.channel] = true; jb.status = 'cancelled'; jb.note = '홈에서 삭제'; jb.updatedAt = Date.now(); persistJobs(); try { await postAs(botClient, jb.channel || userId, undefined, LEAD, `#${id} "${String(jb.title || '').slice(0, 40)}" 작업 정리했어.`); } catch (_) {} }
+      else { const ch = jb.channel || userId; if (activeWork[ch]) { try { await postAs(botClient, ch, undefined, LEAD, '지금 그 채널에 도는 작업이 있어 — 끝나고 재개하거나 채널에서 "이어서 #' + id + '".'); } catch (_) {} } else await handle({ channel: ch, user: userId, ts: 'home-' + Date.now(), text: `이어서 #${id}` }, app.client); }
       setTimeout(() => publishHome(client, userId).catch(() => {}), 1500); return;
     }
     // 부서 검토: 서비스별로 쪼개서 각자 담당 채널에서 실행(라우팅 살림)
