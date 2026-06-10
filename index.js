@@ -3414,17 +3414,20 @@ async function postButtons(channel, thread_ts, buttons) {
     if (n.m === 0 && n.h % 4 === 0 && !settings.paused && (!settings.sentinel || settings.sentinel.enabled !== false) && Object.keys(bizData).length) {
       runBizSentinel(botClient, null, false).catch(() => {});
     }
-    // Q3: 드리프트 알림 — 최근 1시간 잡 실패율 급증 / 한도걸림 스파이크 시 OWNER에게 1회 DM(쿨다운 1h). OWNER_USER_ID 없으면 스킵.
-    if (OWNER_USER_ID && Date.now() - driftAt > 3600000) {
+    // Q3: 드리프트 알림 — OWNER에게 DM. 잡 실패율 급증=1h 쿨다운, 한도걸림 스파이크=하루 1회(영속 dedup, 재시작에도 안 되풀이). OWNER_USER_ID 없으면 스킵.
+    if (OWNER_USER_ID) {
       const recent = Object.values(jobs).filter(j => Date.now() - (j.updatedAt || 0) < 3600000);
       const fails = recent.filter(j => j.status === 'failed').length, total = recent.filter(j => /^(done|failed|cancelled|limited)$/.test(j.status)).length;
       const failRate = total >= 4 ? fails / total : 0;
-      const limitSpike = (usageStat.limitedHits || 0) >= 10;
-      if (failRate > 0.3 || limitSpike) {
+      const today = kstNow().day;
+      if (failRate > 0.3 && Date.now() - driftAt > 3600000) { // 실패율 급증 — 1h 쿨다운
         driftAt = Date.now();
-        const msg = failRate > 0.3 ? `⚠️ 드리프트 감지 — 최근 1시간 잡 실패율 ${Math.round(failRate * 100)}% (${fails}/${total}). 로그 확인 필요.` : `⚠️ 드리프트 감지 — 오늘 클로드 한도걸림 ${usageStat.limitedHits}회. 사용량 과부하.`;
-        log('warn', 'drift-alert', { failRate: Math.round(failRate * 100), fails, total, limitedHits: usageStat.limitedHits });
-        botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(msg) }).catch(() => {});
+        log('warn', 'drift-alert', { kind: 'failrate', failRate: Math.round(failRate * 100), fails, total });
+        botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`⚠️ 드리프트 감지 — 최근 1시간 잡 실패율 ${Math.round(failRate * 100)}% (${fails}/${total}). 로그 확인 필요.`) }).catch(() => {});
+      } else if ((usageStat.limitedHits || 0) >= 10 && settings.driftLimitDay !== today) { // 한도걸림 스파이크 — 하루 1회만
+        settings.driftLimitDay = today; persistSettings();
+        log('warn', 'drift-alert', { kind: 'limit', limitedHits: usageStat.limitedHits });
+        botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`⚠️ 오늘 클로드 한도걸림 ${usageStat.limitedHits}회 — 사용량 좀 많아. 자동 작업이 한도 리셋 후 알아서 재개돼(따로 안 해도 됨). 계속 많으면 팀장 모델을 가볍게(Railway env LEAD_MODEL=opus) 하거나 정기업무 주기를 늘려봐. (이 알림은 하루 한 번만)`) }).catch(() => {});
       }
     }
   }, 60000);
