@@ -384,6 +384,7 @@ async function runLegalReview(client, channel, thread_ts, dir, repo, task) {
 }
 // ── 실제 작업 모드: 레포 클론 → claude 코드 작업 → 브랜치 push → PR → 보고 ──
 let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {}; const pendingPlan = {}; const pendingSchedule = {}; const pendingMcp = {}; const pendingRhythm = {}; const pendingDesign = {}; const pendingPayment = {}; const limitedResume = {}; // 한도로 멈춘 작업 자동 재개 대기
+const legalReviewedAt = {}; // repo → ts (법무·규제 검토 레포별 쿨다운 — 이어서/피드백 반복마다 재실행 방지)
 // B3: 검증된 MCP 후보를 승인 게이트로 제안(자동설치 금지). 승인 시 config 추가+핫리로드, 키 필요하면 👤 안내.
 async function proposeMcp(client, channel, cand, why) {
   if (!cand || pendingMcp[channel]) return;
@@ -930,22 +931,33 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
       if (cont.limited) { await postAs(client, channel, thread_ts, LEAD, '⏳ 이어서 채우다가 한도에 걸렸어. 지금까지 만든 만큼만 올릴게, 리셋되면 "이어서"라고 해줘.'); break; }
     }
   }
-  // R3: PR/완료 전 critic 심사 (신규·UI 작업만 — 작은 수정엔 과함). FAIL이면 runCritic이 1회 고치고 재심사.
-  let criticPass = true;
-  if ((newProject || uiish) && !workCancel[channel]) { prog.phase('요청대로 됐는지 심사하는 중'); criticPass = await runCritic(client, channel, thread_ts, dir, task, prd); }
-  await sh('git add -A', dir);
   const repoUrl = `https://github.com/${repo}`;
-  const chk = await sh('git diff --cached --quiet; echo $?', dir);
-  if (chk.out.trim().endsWith('0')) { jobUpdate(channel, { status: 'done', note: '변경 없음' }); await postAs(client, channel, thread_ts, LEAD, `변경/생성된 게 없었어.\n${repoUrl}\n\n` + (res.text || '').trim().slice(0, 1500)); return; }
-  if (workCancel[channel]) { delete workCancel[channel]; jobUpdate(channel, { status: 'cancelled' }); await postAs(client, channel, thread_ts, LEAD, '작업 중단했어. main엔 아무것도 안 올렸어.'); return; }
   const cmsg = task.slice(0, 60).replace(/[`$"\\!\r\n;|&<>()]/g, '').trim() || '작업'; // 셸 명령치환/인젝션 방지 (백틱·$·따옴표 등 제거)
-  await sh(`git commit -m "도핑연구소: ${cmsg}"`, dir);
+  // 빈 커밋 방지: 에이전트가 언스테이지로 남기거나 빈 커밋만 만들어도 여기서 전량 커밋 → 워킹트리 깨끗하게(critic이 깔끔한 상태를 봄). 변경 판정은 origin 대비 커밋 차이로.
+  await sh('git add -A', dir);
+  const stagedNow = (await sh('git diff --cached --quiet; echo $?', dir)).out.trim().endsWith('1'); // 1=스테이지된 변경 있음
+  if (stagedNow) await sh(`git commit -m "도핑연구소: ${cmsg}"`, dir);
+  const aheadN = parseInt(((await sh(`git rev-list --count origin/${WORK_BASE}..HEAD 2>/dev/null || echo 0`, dir)).out || '0').trim(), 10) || 0; // origin보다 앞선 커밋 수(에이전트가 이미 커밋했어도 잡힘)
+  if (!stagedNow && aheadN === 0) { jobUpdate(channel, { status: 'done', note: '변경 없음' }); await postAs(client, channel, thread_ts, LEAD, `변경/생성된 게 없었어.\n${repoUrl}\n\n` + (res.text || '').trim().slice(0, 1500)); return; }
+  if (workCancel[channel]) { delete workCancel[channel]; jobUpdate(channel, { status: 'cancelled' }); await postAs(client, channel, thread_ts, LEAD, '작업 중단했어. main엔 아무것도 안 올렸어.'); return; }
+  // R3: 커밋된 깨끗한 상태에서 critic 심사 (신규·UI 작업만). FAIL이면 runCritic이 1회 고치고 재심사 → 고친 것 추가 커밋.
+  let criticPass = true;
+  if ((newProject || uiish) && !workCancel[channel]) { prog.phase('요청대로 됐는지 심사하는 중'); criticPass = await runCritic(client, channel, thread_ts, dir, task, prd); await sh('git add -A', dir); if ((await sh('git diff --cached --quiet; echo $?', dir)).out.trim().endsWith('1')) await sh(`git commit -m "도핑연구소: ${cmsg} 심사보완"`, dir); }
   jobUpdate(channel, { stage: '빌드·배포' }); // R9: 체크포인트
   prog.phase('빌드 되나 돌려보고 라이브로 띄우는 중');
-  if (!workCancel[channel] && (newProject || regulatedTask(task))) await runLegalReview(client, channel, thread_ts, dir, repo, task).catch(() => {}); // C: 법무·규제 검토 — 신규 빌드 OR 규제 건드리는 기존작업(개인정보·결제·콘텐츠수집 등)
+  // C: 법무·규제 검토 — 신규 빌드 OR 규제 건드리는 기존작업. 단 레포별 쿨다운(12h)으로 "이어서·피드백 반복"마다 재실행 방지(같은 프로젝트 매번 검토 X)
+  const legalDue = newProject || (regulatedTask(task) && Date.now() - (legalReviewedAt[repo] || 0) > 12 * 3600000);
+  if (!workCancel[channel] && legalDue) { legalReviewedAt[repo] = Date.now(); await runLegalReview(client, channel, thread_ts, dir, repo, task).catch(() => {}); }
   const finalGaps = (newProject || uiish) ? await checkAppGaps(dir) : []; // 최종 빈구멍 — "다 끝냈어 상용수준" 거짓완료 방지
   const incomplete = finalGaps.length > 0 || !criticPass; // R3: 심사 미통과도 미완성으로
   const doneHead = incomplete ? `⚠️ 초안은 올렸는데 아직 미완성이야 — ${finalGaps.length ? finalGaps.join(', ') : '심사에서 일부 미충족(위 지적 확인)'}. 이대로는 상용 아니고, 더 채워야 진짜 동작해. ("이어서"라고 하면 계속 채울게)` : '다 끝냈어! (심사 통과)';
+  // 결과 요약 — 비개발자용 "뭐가 바뀜 / 기대효과 / 다음 할 것"(실제 diff 근거). 역할별 기술보고와 별개로 한눈에 이해되게.
+  let summaryMsg = '';
+  try {
+    const changed = (await sh(`git diff --stat origin/${WORK_BASE}..HEAD 2>/dev/null | tail -25`, dir)).out.trim();
+    const sr = await runClaude(`아래는 방금 끝낸 작업이야. 비개발자 사용자한테 쉽게 알려줘. 딱 세 덩어리로(각 1~3줄, 마크다운·별표 금지, 반말, 코드용어 최소화):\n바뀐 것: 기능 관점에서 뭐가 어떻게 달라졌는지 쉬운 말로\n기대 효과: 사용자나 지표에 뭐가 좋아지는지\n다음 할 것: 사용자가 지금 뭘 하면 되는지(확인/머지/배포/피드백 중 실제 필요한 것)${incomplete ? ' — 아직 미완성이라 "이어서로 마저 완성"을 꼭 포함' : ''}\n\n[작업 요청]\n${wrapUntrusted(task)}\n[바뀐 파일]\n${changed || '(파악 안됨)'}\n[팀 보고]\n${(res.text || '').slice(0, 1500)}`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 100000);
+    summaryMsg = deMd((sr.text || '').trim());
+  } catch (_) {}
   let mainErr = '';
   if (!forcePR) {
     const pushMain = await sh(`git push origin HEAD:${WORK_BASE}`, dir);
@@ -957,6 +969,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
       extractFacts(repo, `[작업] ${task}\n[한 일] ${(res.text || '').slice(0, 1500)}`, '작업').catch(() => {}); // R7: 이 작업에서 기억할 사실 저장
       if (!incomplete) extractSkill(repo, `[성공한 작업] ${task}\n[한 일] ${(res.text || '').slice(0, 1500)}`).catch(() => {}); // B1: 성공 작업에서 재사용 스킬 추출(Voyager)
       await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}${doneHead} ${repoUrl} (${WORK_BASE}에 반영)\n코드 브라우저로 보려면: https://github.dev/${repo}\n빌드·라이브·스크린샷은 위에 확인해줘. (코드 파일로 받고 싶으면 "코드 줘"라고 해)`);
+      if (summaryMsg) await postAs(client, channel, thread_ts, LEAD, `결과 요약\n${summaryMsg}`);
       postFeedbackButtons(channel, thread_ts, '화면·결과 보고 바꿀 점 있으면 "피드백 주기"로 줘 — "이어서"로 그 부분만 다시 손볼게.').catch(() => {});
       if (newProject && !incomplete) await handoffChecklist(client, channel, thread_ts, repo, task); // 미완성이면 "상용 오픈 체크리스트" 안 띄움(거짓 신호 방지)
       return;
@@ -975,6 +988,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   await verifyBuild(client, channel, thread_ts, dir, repo, branch); // PR 경로 → 빌드 자동수정도 PR 브랜치로(main 직행 금지)
   jobUpdate(channel, { status: 'awaiting-approval', artifacts: [url], note: 'PR 머지 대기' });
   await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}${doneHead} ${forcePR ? '승인모드라 PR로 올렸어 (머지하면 반영).' : 'PR로 올렸어.'}\nPR: ${url}\n코드 브라우저로 보려면: https://github.dev/${repo}`);
+  if (summaryMsg) await postAs(client, channel, thread_ts, LEAD, `결과 요약\n${summaryMsg}`);
   postFeedbackButtons(channel, thread_ts, '결과 보고 바꿀 점 있으면 "피드백 주기"로 줘 — "이어서"로 그 부분만 다시 손볼게.').catch(() => {});
   if (newProject && !incomplete) await handoffChecklist(client, channel, thread_ts, repo, task);
   } finally { await prog.done(); try { await sh(`rm -rf ${dir}`); } catch {} } // I7: 작업 후 임시 작업디렉토리 정리(디스크 보호·격리)
@@ -1881,13 +1895,12 @@ async function runOpsTask(id, ch) {
     const n = kstNow(); const ymd = `${Math.floor(n.day / 10000)}년 ${Math.floor(n.day / 100) % 100}월 ${n.day % 100}일`;
     const cadKo = o ? (o.cadence === 'weekly' ? '주간' : o.cadence === 'monthly' ? '월간' : '일간') : '일간';
     const label = (OPS_DEFS[id] && OPS_DEFS[id].label) || id;
-    const startCh = id === 'health' ? ([...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))][0] || ch) : ch;
     const startLine = `${ymd} · ${o ? (o.runCount || 1) : 1}차 ${cadKo} ${label} 자동 실행 시작할게.`;
-    // 서비스별로 결과가 흩어지는 업무(그로스·사업브리핑)는 시작 멘트도 각 서비스 채널로(작업함수가 제안 바로 위에 붙임). 그 외 단일채널 업무만 여기서 시작 멘트.
-    const PER_SVC = id === 'growth' || id === 'bizbrief';
+    // 서비스별로 결과가 흩어지는 업무(그로스·사업브리핑·헬스)는 시작 멘트도 각 서비스 채널로(작업함수가 결과 바로 위에 붙임). 그 외 단일채널 업무만 여기서 시작 멘트.
+    const PER_SVC = id === 'growth' || id === 'bizbrief' || id === 'health';
     // 자동화 시작 멘트 — 작업함수의 startTyping("입력 중" 스피너)보다 먼저 올라가도록 await(레이스로 스피너가 위에 붙는 것 방지)
-    if (botClient && startCh && !PER_SVC) await botClient.chat.postMessage({ channel: startCh, text: scrubOutput(startLine) }).catch(() => {});
-    if (id === 'health') { const chans = [...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))]; (chans.length ? chans : [ch]).forEach(c => checkServices(botClient, c, false).catch(() => {})); return; }
+    if (botClient && ch && !PER_SVC) await botClient.chat.postMessage({ channel: ch, text: scrubOutput(startLine) }).catch(() => {});
+    if (id === 'health') return void checkServices(botClient, null, false, false, startLine).catch(() => {}); // 전체 라이브를 서비스별 담당 채널로 분리 점검
     if (id === 'opsbrief') return void runOpsBriefing(botClient, ch, false).catch(() => {});
     if (id === 'bizbrief') return void runBizBriefing(botClient, ch, false, startLine).catch(() => {});
     if (id === 'improve') return void runImprovementProposal(botClient, ch, false).catch(() => {});
@@ -1967,11 +1980,12 @@ async function runBoardMeeting(client, channel, manual = false) {
   } catch (e) { try { stopTyping(channel); log('error', 'board-meeting-err', { e: String(e).slice(0, 150) }); await postAs(client, channel, undefined, LEAD, '경영회의 중 오류가 났어: ' + String(e).slice(0, 200)); } catch (_) {} }
 }
 // 운영 헬스체크 — 각 라이브 서비스 curl로 상태 확인 → 우정잉(QA/SRE)이 보고, 다운이면 윈터가 알림
-async function checkServices(client, channel, announce = true, onlyAlert = false) {
+async function checkServices(client, channel, announce = true, onlyAlert = false, startLine = null) {
   const sre = byName('윈터') || LEAD; // 운영·헬스체크 = 인프라
-  const list = svcList(channel).filter(s => s.url);
+  const list = (channel ? svcList(channel) : Object.values(services)).filter(s => s.url); // channel=null이면 전체 라이브(자동 점검)
   if (!list.length) { if (announce && !onlyAlert) await postAs(client, channel, undefined, sre, '아직 등록된 라이브 서비스가 없어. 뭐 하나 만들어서 배포되면 여기 대장에 올라가.'); return; }
-  const lines = [];
+  const routed = s => channelForWork(s.repo, 'health', s.channel || channel); // 서비스별 헬스 알림 채널(홈/명령으로 변경 가능) — 한 채널에 남 서비스 안 섞이게
+  const lines = []; const lineByRepo = {};
   for (const s of list) {
     const r = await sh(`curl -s -o /dev/null -w "%{http_code} %{time_total}s %{size_download}" --max-time 15 '${String(s.url).replace(/'/g, '')}' 2>/dev/null || echo "000 0 0"`);
     const out = (r.out || '').trim();
@@ -1996,32 +2010,45 @@ async function checkServices(client, channel, announce = true, onlyAlert = false
     }
     const tr = svcTrend(s);
     const sslTxt = (typeof s.sslDays === 'number') ? ` · SSL ${s.sslDays}일` : '';
-    lines.push(`${degraded ? '🟡' : up ? '🟢' : '🔴'} ${s.repo} · ${s.url} (${code}${ms != null ? ', ' + ms + 'ms' : ', no response'}${size != null ? ', ' + (size > 1024 ? Math.round(size / 1024) + 'KB' : size + 'B') : ''})${sslTxt}${s.healthUrl ? ' · 헬스EP' : ''}${tr ? ' ' + tr : ''}${issues.length ? '\n    주의: ' + issues.join(' / ') : ''}`);
+    const lineStr = `${degraded ? '🟡' : up ? '🟢' : '🔴'} ${s.repo} · ${s.url} (${code}${ms != null ? ', ' + ms + 'ms' : ', no response'}${size != null ? ', ' + (size > 1024 ? Math.round(size / 1024) + 'KB' : size + 'B') : ''})${sslTxt}${s.healthUrl ? ' · 헬스EP' : ''}${tr ? ' ' + tr : ''}${issues.length ? '\n    주의: ' + issues.join(' / ') : ''}`;
+    lines.push(lineStr); lineByRepo[s.repo] = lineStr;
   }
   persistServices();
   const down = list.filter(s => s.lastStatus === 'down');
   // onlyAlert(시간별 감시)면 새로 죽은 게 있을 때만 알림, 평소엔 조용
   if (onlyAlert) {
-    const newlyDown = down.filter(s => s.wasUp);
-    if (newlyDown.length) {
-      const past = newlyDown.map(s => { const h = recallFacts('svc:' + s.repo, '인시던트 다운 복구'); return h ? `\n   ↳ ${s.repo} 과거 이력:${h.replace(/\n+/g, ' ').slice(0, 300)}` : ''; }).join('');
-      await postAs(client, channel, undefined, byName('윈터') || LEAD, `🔴 방금 다운 감지: ${newlyDown.map(s => `${s.repo}(HTTP ${s.downCode || '?'})`).join(', ')}. 라이브가 죽었어, 바로 확인할게.${past}`);
-      if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`🔴 [다운] ${newlyDown.map(s => s.repo).join(', ')}`) }).catch(() => {});
+    // 새로 다운 — 각 서비스의 담당 채널로(남 채널에 안 뜨게)
+    for (const s of down.filter(s => s.wasUp)) {
+      const tch = routed(s); if (!tch) continue;
+      const h = recallFacts('svc:' + s.repo, '인시던트 다운 복구'); const past = h ? `\n   ↳ 과거 이력:${h.replace(/\n+/g, ' ').slice(0, 300)}` : '';
+      await postAs(client, tch, undefined, sre, `🔴 방금 다운 감지: ${s.repo}(HTTP ${s.downCode || '?'}). 라이브가 죽었어, 바로 확인할게.${past}`);
+      if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`🔴 [다운] ${s.repo}`) }).catch(() => {});
     }
-    // 새로 degraded(up이지만 이상: 빈응답·SSL임박·헬스EP이상) — 처음 감지 시 1회 공유
-    for (const s of list) { const has = (s.issues || []).length; if (s.lastStatus !== 'down' && has && !s.degAlerted) { s.degAlerted = true; await postAs(client, channel, undefined, byName('윈터') || LEAD, `🟡 ${s.repo} 이상 감지(다운은 아닌데): ${s.issues.join(' / ')}. 확인 필요.`); } if (!has) s.degAlerted = false; }
-    // 지속 다운(2연속) → 자동 진단·픽스 제안 1회 (프로드 픽스는 게이트, 봇이 알아서 안 머지)
+    // 새로 degraded(up이지만 이상) — 담당 채널로 1회
+    for (const s of list) { const has = (s.issues || []).length; const tch = routed(s); if (s.lastStatus !== 'down' && has && !s.degAlerted && tch) { s.degAlerted = true; await postAs(client, tch, undefined, sre, `🟡 ${s.repo} 이상 감지(다운은 아닌데): ${s.issues.join(' / ')}. 확인 필요.`); } if (!has) s.degAlerted = false; }
+    // 지속 다운(2연속) → 자동 진단·픽스 제안 1회 (담당 채널에서, 프로드 픽스는 게이트)
     for (const s of list) {
-      if (s.lastStatus === 'down' && s.failStreak === 2 && s.repo && s.repo !== SELF_REPO && s.channel && !activeWork[s.channel] && !settings.paused && GITHUB_TOKEN) {
-        await postAs(botClient, s.channel, undefined, byName('윈터') || LEAD, `${s.repo} 2연속 다운 — 원인 진단하고 고칠 수 있는 건 제안할게.`);
-        activeWork[s.channel] = { task: '다운 진단', started: Date.now() };
-        runReport(botClient, s.channel, undefined, byName('윈터') || LEAD, s.repo, `이 서비스가 방금 다운됐어(HTTP ${s.downCode || '?'}). 배포·환경변수·의존성·런타임 에러·최근 변경 관점에서 가능한 원인을 코드 근거로 진단하고, 즉시 조치할 수 있는 구체 액션(설정 수정·핫픽스 등)을 제안해. 추측 말고 코드/로그 근거로.`).catch(() => {}).finally(() => { activeWork[s.channel] = null; });
+      const tch = routed(s);
+      if (s.lastStatus === 'down' && s.failStreak === 2 && s.repo && s.repo !== SELF_REPO && tch && !activeWork[tch] && !settings.paused && GITHUB_TOKEN) {
+        await postAs(botClient, tch, undefined, sre, `${s.repo} 2연속 다운 — 원인 진단하고 고칠 수 있는 건 제안할게.`);
+        activeWork[tch] = { task: '다운 진단', started: Date.now() };
+        runReport(botClient, tch, undefined, sre, s.repo, `이 서비스가 방금 다운됐어(HTTP ${s.downCode || '?'}). 배포·환경변수·의존성·런타임 에러·최근 변경 관점에서 가능한 원인을 코드 근거로 진단하고, 즉시 조치할 수 있는 구체 액션(설정 수정·핫픽스 등)을 제안해. 추측 말고 코드/로그 근거로.`).catch(() => {}).finally(() => { activeWork[tch] = null; });
       }
     }
     return;
   }
-  await postAs(client, channel, undefined, sre, '서비스 헬스체크 결과\n' + lines.join('\n'));
-  if (down.length) await postAs(client, channel, undefined, byName('윈터') || LEAD, `⚠️ ${down.length}개 다운됐어. 확인 필요: ${down.map(s => s.repo).join(', ')}. 라이브가 진짜 죽은 건지 내가 로그 봐야겠어.`);
+  if (announce) { // 수동 "헬스체크" — 물어본 채널에 다 보여줌
+    await postAs(client, channel, undefined, sre, '서비스 헬스체크 결과\n' + lines.join('\n'));
+    if (down.length) await postAs(client, channel, undefined, sre, `⚠️ ${down.length}개 다운됐어. 확인 필요: ${down.map(s => s.repo).join(', ')}. 라이브가 진짜 죽은 건지 내가 로그 봐야겠어.`);
+  } else { // 자동 — 서비스별 담당 채널로 분리(남 서비스 안 섞임)
+    const chans = [...new Set(list.map(routed).filter(Boolean))];
+    for (const tch of chans) {
+      const ls = list.filter(s => routed(s) === tch);
+      if (startLine) await client.chat.postMessage({ channel: tch, text: scrubOutput(startLine) }).catch(() => {});
+      await postAs(client, tch, undefined, sre, '서비스 헬스체크 결과\n' + ls.map(s => lineByRepo[s.repo]).filter(Boolean).join('\n'));
+      const dch = ls.filter(s => s.lastStatus === 'down'); if (dch.length) await postAs(client, tch, undefined, sre, `⚠️ ${dch.length}개 다운: ${dch.map(s => s.repo).join(', ')}. 로그 봐야겠어.`);
+    }
+  }
 }
 
 // A3: 자율 운영 브리핑 — services/jobs/usage/decisions/facts를 종합해 LEAD 1콜로 "건강·악화·주의·예측·개선후보" 요약(읽기전용). 일1회 자동 + "운영 브리핑" 수동. 데이터는 wrapUntrusted로 격리(Q2).
@@ -2044,6 +2071,12 @@ async function runOpsBriefing(client, channel, manual = false) {
     log('info', 'ops-briefing', { manual, jobs7d: rj.length, fails: fN, svcs: svcs.length });
     if (channel) await postAs(client, channel, undefined, LEAD, `🗞️ 운영 브리핑\n${text}`);
     if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: `🗞️ 운영 브리핑\n${scrubOutput(text)}` }).catch(() => {});
+    // ④개선 후보 → 착수 가능한 액션으로 뽑아 승인 게이트(읽기전용 브리핑에 실행 유도). 채널 한가할 때만.
+    if (channel && r.ok !== false && !pendingDispatch[channel] && !activeWork[channel]) {
+      const items = await extractActionItems(text).catch(() => []);
+      const acts = (items || []).filter(i => i && i.task && i.kind !== 'human').slice(0, 4).map(i => { const k = ['sponono', '스포노노', 'wewantpeace', '위원트피스', 'myungjak', '명작'].find(a => i.task.includes(a)); return { who: '운영', repo: k ? resolveRepo(k) : (Object.keys(bizData)[0] || SELF_REPO), task: i.task, kind: ['investigate', 'build'].includes(i.kind) ? i.kind : 'investigate', source: 'opsbrief' }; });
+      if (acts.length) await proposeOrAuto(client, channel, acts[0].repo, acts, '운영 브리핑 개선 후보 — 착수할 거 골라("실행"/"실행 1,3", 버튼). 안 할 거면 "넘어가"', { forceGate: true });
+    }
   } catch (e) { try { log('error', 'ops-briefing-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
 }
 
@@ -3359,8 +3392,8 @@ async function postButtons(channel, thread_ts, buttons) {
       }
     }
     // 실시간 헬스 감시 — 전체는 2분마다 onlyAlert(다운·이상 즉시 공유), 이미 실패/이상난 서비스는 매분 즉시 재확인(빠른 확정·복구·자동진단)
-    if (n.m % 2 === 0) { for (const ch of [...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))]) checkServices(botClient, ch, false, true).catch(() => {}); }
-    else { for (const ch of [...new Set(svcList().filter(s => s.url && s.channel && ((s.failStreak || 0) >= 1 || (s.issues || []).length)).map(s => s.channel))]) checkServices(botClient, ch, false, true).catch(() => {}); }
+    if (n.m % 2 === 0) checkServices(botClient, null, false, true).catch(() => {}); // 전체를 서비스별 담당 채널로 라우팅 점검
+    else if (Object.values(services).some(s => s.url && ((s.failStreak || 0) >= 1 || (s.issues || []).length))) checkServices(botClient, null, false, true).catch(() => {}); // 이상난 게 있을 때만 매분 재확인
     // M3: 일별 사업 지표 수집 전용(경보·LLM 없이 history만 쌓음) — 선제감시 "전일 대비" prev/cur 일관 확보. 매일 새벽 첫 틱 1회.
     if (bizFetchDay !== n.day && n.h >= 5 && Object.keys(bizData).length) {
       bizFetchDay = n.day;
