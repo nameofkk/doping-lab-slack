@@ -1860,7 +1860,7 @@ async function runBizSentinel(client, channel, manual = false) {
       if (!fresh.length) continue;
       fresh.forEach(b => { bizAlertSeen[rp + '|' + b.key] = day; });
       anyAlert = true;
-      const name = rp.split('/').pop(); const ch = channelForWork(rp, 'sentinel', (settings.sentinel && settings.sentinel.channel) || defCh); // 선제경보 전용 채널 > 서비스 sentinel override > 전사기본
+      const name = rp.split('/').pop(); const ch = channelForWork(rp, 'sentinel', (services[rp] && services[rp].channel) || (settings.sentinel && settings.sentinel.channel) || defCh); // workRoute > repoChannel > 서비스 자기채널(다운경보와 동일) > 선제override > 전사기본
       const lines = fresh.map(b => `- ${b.crit ? '[긴급] ' : ''}${b.label}: ${b.why}${b.pct != null ? ` (${(b.from != null ? b.from.toLocaleString() : '?')}→${b.to.toLocaleString()}, ${b.pct > 0 ? '+' : ''}${b.pct}%)` : ''}`).join('\n');
       if (ch) await postAs(client, ch, undefined, byName('김채원') || LEAD, `선제 경보 — ${name}\n지표 이상이 잡혀서 정기 회의 안 기다리고 바로 올려.\n${lines}`);
       if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`[선제 경보] ${name}\n${lines}`) }).catch(() => {});
