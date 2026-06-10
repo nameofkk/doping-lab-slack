@@ -65,7 +65,9 @@ const LEAD = { name: '한로로 (팀장)', kw: ['한로로','로로','팀장'], 
 // 모든 발언에 적용되는 말투/가독성 규칙
 const STYLE = '\n\n[말투 규칙] 실제 한국 여성이 친한 동료랑 메신저로 편하게 수다 떨듯 자연스러운 구어체로 써라. 무조건 반말로 일관되게 써라 — 존댓말(~요, ~습니다, ~에요)을 절대 섞지 마라(한 메시지 안에서 반말/존댓말 왔다갔다 금지). 딱딱한 문어체나 설명조, 번역투 금지. 대시 기호(—, –, ㅡ, -)는 절대 쓰지 마라. 끊고 싶으면 문장을 나누거나 쉼표나 줄바꿈으로 해라. AI 티 나는 말투(도와드릴 수 있어요, ~에 대해 말씀드리면, 불필요한 사과나 안내) 금지. 마크다운 볼드 별표(**)나 머리표(#)도 쓰지 마라. 이모지(그림문자)는 웬만하면 쓰지 마라 — 꼭 필요한 상태표시 아니면 텍스트로. 핵심만 2~4문장으로 짧고 친근하게, 읽기 쉽게. 중요: 네 속생각이나 "이렇게 답하자, 솔직하게 말하고 넘어가자, 사용자 화났네" 같은 메타 서술·지문은 절대 쓰지 말고, 실제로 상대한테 할 말만 바로 해라.';
 // 너희 자신에 대해 물으면 정직하게 답할 사실 (모델 등)
-const SELF = '\n\n[너에 대한 사실 — 물어보면 이것만 정직하게, 모르면 모른다고 해] 너는 도핑연구소 팀원이고 Claude Code(클코)를 구독 토큰으로 헤드리스 실행해서 돌아가. 팀장 한로로는 Claude Opus, 나머지 팀원들은 Claude Sonnet으로 동작해(사용량 한도 아끼려고 팀원은 sonnet, 팀장만 opus로 맞춰놨어). 메시지 의도분류는 haiku로 돌아. 이게 전부야. 중요: 한도가 왜 걸렸는지, 모델별 쿼터가 어떻게 나뉘는지, 인프라가 어떻게 도는지 같은 내부 동작은 네가 정확히 알 수 없는 거야. 그럴듯하게 추측해서 사실처럼 설명하지 마. 모르면 "그건 나도 정확힌 몰라"라고 솔직히 말해.';
+const SELF = '\n\n[너에 대한 사실 — 물어보면 이것만 정직하게, 모르면 모른다고 해] 너는 도핑연구소 팀원이고 Claude Code(클코)를 구독 토큰으로 헤드리스 실행해서 돌아가. 팀장 한로로는 Claude Fable 5(최신 최상위 모델), 나머지 팀원들은 Claude Sonnet으로 동작해(사용량 한도 아끼려고 팀원은 sonnet, 팀장만 최상위로 맞춰놨어). 메시지 의도분류는 haiku로 돌아. 이게 전부야. 중요: 한도가 왜 걸렸는지, 모델별 쿼터가 어떻게 나뉘는지, 인프라가 어떻게 도는지 같은 내부 동작은 네가 정확히 알 수 없는 거야. 그럴듯하게 추측해서 사실처럼 설명하지 마. 모르면 "그건 나도 정확힌 몰라"라고 솔직히 말해.';
+// 자기분석·제안 함수 공통 — "증상(로그·지표)만 보고 코드/원인을 단정하지 마라" 원칙. 봇이 자기 코드/운영을 그라운딩 없이 추론해 틀린 제안 내는 것 방지(코드를 보는 나 vs 로그만 보는 봇의 격차를 메움).
+const GROUNDING_RULE = '\n\n[근거·검증 원칙 — 반드시] 너에게 주어진 로그·지표는 "증상"이지 "원인"이 아니다. (1) 코드·데이터로 직접 확인하기 전엔 어떤 주장도 사실로 단정하지 마라(가설로만 다뤄). (2) 코드를 직접 못 본 상태면 build(수정) 대신 investigate(열어서 확인)를 제안해라. (3) 증상 억제(캐시·우회)보다 원인 수정을 우선해라. (4) 각 제안은 근거(어느 로그·지표·파일:줄에 기댔는지)를 명시하고, 근거 없는 제안은 내지 마라.';
 // 작업/조사 보고용 — 마크다운 금지 + 사람 말투 (길이는 제한 안 함)
 const PLAIN = '\n\n[형식·말투 규칙 — 항상] 마크다운 절대 금지: 별표(**), 샵(#), 표(|), 대시(—,–,ㅡ). 무조건 반말로 일관되게(존댓말 ~요/~습니다 섞지 마). 딱딱한 보고체("~다", "~상태다", "~된다", "~음") 쓰지 말고, 친한 동료한테 말하듯 편한 구어체로 써(예: ~야, ~거든, ~더라, ~인데). AI 말투(말씀드리면, ~할 수 있습니다) 금지. 어려운 전문용어는 그냥 쓰지 말고 쉬운 말로 풀어서, 모르는 사람도 한 번에 이해되게 써. 내용은 충분히 쓰되 짧은 문장과 줄바꿈으로 읽기 쉽게.';
 // 디자인 작업 시 항상 적용 — 사용자가 늘 쓰던 디자인 기준(PRD 기반)
@@ -1872,7 +1874,7 @@ async function runBizSentinel(client, channel, manual = false) {
 async function runSentinelMini(client, channel, repo, breaches) {
   try {
     const name = repo.split('/').pop(); const sc = bizScorecard(repo); const bl = breaches.map(b => `${b.label}: ${b.why}`).join(' / ');
-    const out = await runClaude(`너는 "${name}" 그로스/운영 책임자다. 방금 선제 감시에서 이상 신호가 잡혔다: ${bl}.${UNTRUSTED_PREAMBLE}\n[현재 지표]\n${wrapUntrusted(sc)}${recallForBiz(repo, 'sentinel ' + name)}\n\n이 이상의 가장 가능성 높은 원인 가설과, 지금 바로 확인/대응할 액션을 제안해라. 진단 2~4줄(반말, 지문 금지). 그 다음 JSON만: {"proposals":[{"repo":"${name}","task":"구체 한 문장","kind":"investigate|build","target":"정상화할 지표","target_key":"아래 키 또는 null"}]} (최대 2개).\n측정가능 지표키: ${measurableKeysHint()}`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 150000);
+    const out = await runClaude(`너는 "${name}" 그로스/운영 책임자다. 방금 선제 감시에서 이상 신호가 잡혔다: ${bl}.${GROUNDING_RULE}${UNTRUSTED_PREAMBLE}\n[현재 지표]\n${wrapUntrusted(sc)}${recallForBiz(repo, 'sentinel ' + name)}\n\n이 이상의 가장 가능성 높은 원인 가설과, 지금 바로 확인/대응할 액션을 제안해라(원인을 코드·데이터로 아직 확인 못 했으면 build 말고 investigate로). 진단 2~4줄(반말, 지문 금지). 그 다음 JSON만: {"proposals":[{"repo":"${name}","task":"구체 한 문장","kind":"investigate|build","target":"정상화할 지표","target_key":"아래 키 또는 null"}]} (최대 2개).\n측정가능 지표키: ${measurableKeysHint()}`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 150000);
     const raw = out.text || ''; const jm = raw.match(/\{[\s\S]*"proposals"[\s\S]*\}/);
     const prose = deMd(raw.replace(/```[\s\S]*?```/g, '').replace(/\{[\s\S]*"proposals"[\s\S]*\}/, '').trim());
     if (prose) await postAs(client, channel, undefined, byName('김채원') || LEAD, `긴급 진단 — ${name}\n${prose.slice(0, 1500)}`);
@@ -2183,12 +2185,14 @@ async function runImprovementProposal(client, channel, manual = false) {
     const decCount = {}; decisions.slice(-40).forEach(d => { decCount[d.kind] = (decCount[d.kind] || 0) + 1; });
     const svcs = Object.values(services).filter(s => s.url).map(s => `${s.repo}:${s.lastStatus} ${svcTrend(s)}`.trim());
     const ctx = `[최근 실패 잡]\n${fails.join('\n') || '없음'}\n\n[판단패턴 빈도(많을수록 반복/마찰 신호)]\n${Object.entries(decCount).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}:${v}`).join(', ')}\n\n[서비스]\n${svcs.join('\n') || '없음'}`;
-    const r = await runClaude(`너는 도핑연구소 개선 책임자다. 아래 운영 데이터에서 "지금 착수하면 가장 효과 큰 개선" 1개 영역을 골라 그 구체 액션아이템을 뽑아라. 데이터 근거로만, 지어내지 마.${UNTRUSTED_PREAMBLE}\n${wrapUntrusted(ctx)}\n\nJSON만 출력: {"focus":"한 줄 요약","repo":"sponono|wewantpeace|myungjak|bot 중 대상(봇 자체개선이면 bot)","items":[{"who":"담당","task":"구체적 한 문장","kind":"investigate|build"}]}. items 최대 3개. 데이터에 개선거리 없으면 items 빈 배열.`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 150000);
+    const r = await runClaude(`너는 도핑연구소 개선 책임자다. 아래 운영 데이터에서 "지금 착수하면 가장 효과 큰 개선" 1개 영역을 골라 그 구체 액션아이템을 뽑아라. 데이터 근거로만, 지어내지 마.${GROUNDING_RULE}${UNTRUSTED_PREAMBLE}\n${wrapUntrusted(ctx)}\n\nJSON만 출력: {"focus":"한 줄 요약","repo":"sponono|wewantpeace|myungjak|bot 중 대상(봇 자체개선이면 bot)","items":[{"who":"담당","task":"구체적 한 문장","kind":"investigate|build","evidence":"어느 실패/패턴/지표에 기댄 건지"}]}. items 최대 3개. 코드를 직접 못 본 상태이니 코드수정(build)은 확실할 때만, 애매하면 investigate(열어서 확인)로. 데이터에 개선거리 없으면 items 빈 배열.`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 150000);
     const m = (r.text || '').match(/\{[\s\S]*\}/); if (!m) return;
     let obj; try { obj = JSON.parse(m[0]); } catch { return; }
-    const items = (obj.items || []).filter(x => x && x.task && ['investigate', 'build'].includes(x.kind)).slice(0, 3);
+    const tgtRepo = resolveRepo(obj.repo || 'bot');
+    const items = (obj.items || []).filter(x => x && x.task && ['investigate', 'build'].includes(x.kind)).slice(0, 3)
+      .map(x => ({ ...x, kind: (x.kind === 'build' && !x.evidence && (tgtRepo === SELF_REPO || PROD_REPOS.includes(tgtRepo))) ? 'investigate' : x.kind, task: x.evidence ? `${x.task} (근거: ${String(x.evidence).slice(0, 70)})` : x.task })); // 근거 없는 코드/프로드 수정은 조사로 강등(코드 안 보고 build 금지)
     if (!items.length) { if (manual) await postAs(client, channel, undefined, LEAD, '운영 데이터 훑어봤는데 지금 당장 착수할 개선거리는 딱히 안 보여. 깨끗해.'); return; }
-    const repo = resolveRepo(obj.repo || 'bot');
+    const repo = tgtRepo;
     logDecision(channel, 'improve-proposal', `${obj.focus || ''} (${repo})`);
     log('info', 'improve-proposal', { manual, repo, focus: (obj.focus || '').slice(0, 60), n: items.length });
     await proposeOrAuto(client, channel, repo, items, `💡 능동 개선 제안 (${manual ? '수동' : '주간 자동'}) · 초점: ${obj.focus || ''} · 대상: ${repo.split('/').pop()}`);
@@ -2201,19 +2205,26 @@ async function runSelfImproveScan(client, channel, manual = false) {
   if (!manual && Date.now() - selfImproveAt < 6 * 86400000) return; // 주1회
   selfImproveAt = Date.now();
   if (!channel || activeWork[channel] || pendingDispatch[channel]) return;
+  if (!GITHUB_TOKEN) return;
+  const id = ++workSeq; const dir = `/tmp/si${id}`;
   try {
-    const selfDec = decisions.slice(-50).filter(d => /self|heal|injection|drift|breaker|route|schedule-|iac|noop/i.test(d.kind)).slice(-20).map(d => `[${d.kind}] ${String(d.detail || '').slice(0, 50)}`);
-    const recentFails = Object.values(jobs).filter(j => j.status === 'failed' && Date.now() - (j.createdAt || 0) < 14 * 86400000).slice(-6).map(j => `${j.type}:${j.error ? String(j.error).slice(0, 50) : (j.title || '').slice(0, 40)}`);
-    const ctx = `[봇 자체 관련 최근 판단(반복 많을수록 마찰)]\n${selfDec.join('\n') || '없음'}\n\n[최근 실패]\n${recentFails.join('\n') || '없음'}`;
-    const r = await runClaude(`너는 이 슬랙 봇(도핑연구소)의 자체 품질 책임자다. 아래는 봇 자신의 최근 운영 신호야. 여기서 "봇 코드(index.js)를 개선하면 좋을 것" 1~3개를 구체적으로 뽑아라. 기술부채·반복 마찰(같은 판단 반복)·안정성·관측성 관점. 데이터 근거로만, 지어내지 마.${UNTRUSTED_PREAMBLE}\n${wrapUntrusted(ctx)}\n\nJSON만: {"focus":"한 줄","items":[{"who":"담당","task":"index.js에서 뭘 어떻게 고칠지 구체적으로","kind":"investigate|build"}]}. items 최대 3개. 개선거리 없으면 빈 배열.`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 150000);
+    const selfDec = decisions.slice(-50).filter(d => /self|heal|injection|drift|breaker|route|schedule-|iac|noop/i.test(d.kind)).slice(-25).map(d => `[${d.kind}] ${String(d.detail || '').slice(0, 90)}`);
+    const recentFails = Object.values(jobs).filter(j => j.status === 'failed' && Date.now() - (j.createdAt || 0) < 14 * 86400000).slice(-6).map(j => `${j.type}:${j.error ? String(j.error).slice(0, 60) : (j.title || '').slice(0, 40)}`);
+    const leads = `[봇 최근 판단 — 단서일 뿐, 진실은 코드다. 반복 많을수록 마찰 신호]\n${selfDec.join('\n') || '없음'}\n\n[최근 실패]\n${recentFails.join('\n') || '없음'}`;
+    // 코드 그라운딩: 봇 레포를 실제로 클론해 index.js를 직접 읽고 검증한 것만 제안(로그-온리 원샷 추론의 오진 제거)
+    const cl = await sh(`rm -rf ${dir} && git clone --depth 1 https://x-access-token:${GITHUB_TOKEN}@github.com/${SELF_REPO}.git ${dir} && chmod -R 777 ${dir}`);
+    if (cl.code !== 0) { log('error', 'self-improve-clone', { e: (cl.err || '').slice(0, 120) }); return; }
+    const r = await runClaude(`너는 이 슬랙 봇(도핑연구소)의 자체 품질 책임자다. 너는 지금 봇 코드 레포 안에 있어 — index.js를 직접 grep/read로 열어볼 수 있다.${GROUNDING_RULE}${UNTRUSTED_PREAMBLE}\n\n${wrapUntrusted(leads)}\n\n작업: 단서에서 의심되는 마찰·기술부채·안정성·관측성 문제를 잡되, 제안하기 전에 반드시 index.js의 해당 부분을 직접 열어 사실을 확인해라(로그만 보고 단정 금지 — 예: "로그에 필드가 없다"는 주장은 그 로그를 만드는 코드를 열어 실제로 없는지 확인). 확인된 것만, 각 항목에 근거(파일:줄 또는 함수명)와 증상/원인 구분을 적어라. 증상 억제(캐시·우회)보다 원인 수정을 우선.\n\nJSON만: {"focus":"한 줄","items":[{"task":"index.js에서 뭘 어떻게 고칠지 구체적으로","kind":"investigate|build","evidence":"코드에서 확인한 파일:줄/함수 + 증상인지 원인인지","root":"증상 억제가 아니라 원인 수정인 이유 한 줄"}]}. 코드에서 확인 못 한 건 절대 넣지 마. 개선거리 없으면 빈 배열.`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 300000);
     const m = (r.text || '').match(/\{[\s\S]*\}/); if (!m) return; let obj; try { obj = JSON.parse(m[0]); } catch { return; }
-    const items = (obj.items || []).filter(x => x && x.task && ['investigate', 'build'].includes(x.kind)).slice(0, 3);
-    if (!items.length) { if (manual) await postAs(client, channel, undefined, LEAD, '내 코드 훑어봤는데 지금 당장 고칠 자체 개선거리는 안 보여. 깨끗해.'); return; }
+    const items = (obj.items || []).filter(x => x && x.task && x.evidence && ['investigate', 'build'].includes(x.kind)).slice(0, 3) // 근거(evidence) 없는 항목은 버림 — 코드 검증된 것만
+      .map(x => ({ who: '자기개선', repo: SELF_REPO, task: `${x.task} (근거: ${String(x.evidence).slice(0, 90)})`, kind: x.kind, source: 'self-improve' }));
+    if (!items.length) { if (manual) await postAs(client, channel, undefined, LEAD, '내 코드 실제로 열어서 훑었는데, 코드로 확인되는 개선거리는 지금 안 보여. 깨끗해.'); return; }
     logDecision(channel, 'self-improve-proposal', `${obj.focus || ''}`);
     log('info', 'self-improve-proposal', { manual, focus: (obj.focus || '').slice(0, 60), n: items.length });
     // self(bot) repo라 코드수정은 apTier에서 항상 gate(자가브릭 방지) — 조사만 자동, 머지·배포는 사람+Q1 eval
-    await proposeOrAuto(client, channel, SELF_HEAL_REPO, items, `🛠️ 자기개선 제안 (${manual ? '수동' : '주간 자동'}) — 내 코드(index.js) · 초점: ${obj.focus || ''}`);
+    await proposeOrAuto(client, channel, SELF_REPO, items, `🛠️ 자기개선 제안 (${manual ? '수동' : '주간 자동'}) — 내 코드(index.js) · 초점: ${obj.focus || ''} · (코드 직접 검증한 것만)`);
   } catch (e) { try { log('error', 'self-improve-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
+  finally { try { await sh(`rm -rf ${dir}`); } catch (_) {} }
 }
 
 // 제작 끝나고 핸드오프 — 에이전트가 끝낸 것(✅)과 사람만 할 수 있는 것(☐ 체크리스트)을 구분해서 보고
@@ -2452,7 +2463,7 @@ async function handle(event, client) {
   // Q2: 입력 인젝션 가드 — 전 경로(chat/report/work) 공통. 지시무시·시크릿출력·역할탈취 신호면 거부.
   if (injectionScan(raw)) {
     recordMsg(channel, '사용자', raw);
-    try { logDecision(channel, 'injection-block', `인젝션 의심 입력 거부: "${raw.slice(0, 60)}"`); } catch (_) {}
+    try { logDecision(channel, 'injection-block', `user=${event.user || '?'} 인젝션 의심 입력 거부: "${raw.slice(0, 60)}"`); } catch (_) {} // #3: user_id 포함(사후 감사·반복 공격 추적)
     await postAs(client, channel, event.thread_ts, LEAD, `${mention(channel)}그건 못 들어줘 — 지시 무시·토큰/시크릿 노출·역할 변경 같은 요청은 안 따라. 코드 만들기·고치기·조사 쪽으로 다시 말해줘.`);
     return;
   }
@@ -3076,7 +3087,9 @@ async function handle(event, client) {
     // 주기 스케줄 등록 (간격 또는 매일 특정시각)
     const daily = parseDaily(raw);
     const ims = daily ? null : parseIntervalMs(raw);
-    if ((daily || ims) && !/만들|제작|개발|처음부터|새\s*프로젝트|짜줘|짜봐|구현|변경|전환|바꿔|바꾸|적용|개편|리팩터|마이그레이|형식으로|방식으로|기능\s*(추가|넣)/.test(raw) && !/(앱|어플|사이트|웹사이트|홈페이지|랜딩|게임|서비스|플랫폼|툴|봇)\s*$/.test(raw)) { // 스케줄=반복 모니터링/유지보수(점검·백업·리포트)만. 신규제작·일회성 기능변경(변경/전환/바꿔/형식으로 등)에 '매일'이 든 건 스케줄 아님(그 시각은 기능 스펙이지 스케줄 지시가 아님)
+    // 봇 자기개선 #2: 명시적 단발 마커(1회만/딱 한 번/이번만 등)가 있고 반복 빈도어(매일/매주/마다)가 없으면 = 명백한 단발 → 스케줄 의심 자체를 스킵(불필요한 확인 마찰 제거)
+    const singleShot = /1\s*회만|한\s*번만|딱\s*한\s*번|한번만|일회만|이번\s*한\s*번|이번만\s*한|지금\s*한\s*번|오늘\s*한\s*번|한\s*차례만|\bonce\b/i.test(raw) && !/매일|매주|매시간|매달|매월|마다|주기적/.test(raw);
+    if ((daily || ims) && !singleShot && !/만들|제작|개발|처음부터|새\s*프로젝트|짜줘|짜봐|구현|변경|전환|바꿔|바꾸|적용|개편|리팩터|마이그레이|형식으로|방식으로|기능\s*(추가|넣)/.test(raw) && !/(앱|어플|사이트|웹사이트|홈페이지|랜딩|게임|서비스|플랫폼|툴|봇)\s*$/.test(raw)) { // 스케줄=반복 모니터링/유지보수(점검·백업·리포트)만. 신규제작·일회성 기능변경(변경/전환/바꿔/형식으로 등)에 '매일'이 든 건 스케줄 아님(그 시각은 기능 스펙이지 스케줄 지시가 아님)
       const taskText = raw.replace(/(\d+\s*(초|분|시간|일|주)\s*마다|매일|매주|매시간|주기적으로|주기별로|(오전|아침|오후|저녁|밤)?\s*\d{1,2}\s*시(?:\s*\d{1,2}\s*분)?)/g, '').replace(/\s+/g, ' ').trim();
       const it = await classifyIntent(taskText || raw);
       const id = ++schedSeq;
