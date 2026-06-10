@@ -1166,7 +1166,7 @@ function jobFor(s) {
     activeWork[s.channel] = { task: s.task || s.label, started: Date.now(), beat: Date.now(), repo, scheduled: true }; // 스케줄 작업도 채널 점유(진행중 새작업 차단 + beat로 워치독 적용)
     try {
       if (s.action === 'work' && s.task) await runWork(botClient, s.channel, undefined, repo, s.task, !!s.newProject, true);
-      else await runReport(botClient, s.channel, undefined, reporter, repo, s.task || s.label);
+      else { const out = await runReport(botClient, s.channel, undefined, reporter, repo, s.task || s.label); await gateReportFollowup(botClient, s.channel, undefined, repo, out).catch(() => {}); } // 정기 조사도 결과서 실행안 게이트로
     } catch (e) { /* 스케줄 작업 오류는 조용히 — 다음 회차에 재시도 */ }
     finally {
       // 서킷 브레이커(deadman) — 스케줄 work가 "변경 없음"(이미 적용돼 멱등)을 반복하면 무의미한 재실행이므로 자동 일시정지. wewantpeace 매일10시류 방어.
@@ -2127,7 +2127,7 @@ async function checkServices(client, channel, announce = true, onlyAlert = false
       if (s.lastStatus === 'down' && s.failStreak === 2 && s.repo && s.repo !== SELF_REPO && tch && !activeWork[tch] && !settings.paused && GITHUB_TOKEN) {
         await postAs(botClient, tch, undefined, sre, `${s.repo} 2연속 다운 — 원인 진단하고 고칠 수 있는 건 제안할게.`);
         activeWork[tch] = { task: '다운 진단', started: Date.now() };
-        runReport(botClient, tch, undefined, sre, s.repo, `이 서비스가 방금 다운됐어(HTTP ${s.downCode || '?'}). 배포·환경변수·의존성·런타임 에러·최근 변경 관점에서 가능한 원인을 코드 근거로 진단하고, 즉시 조치할 수 있는 구체 액션(설정 수정·핫픽스 등)을 제안해. 추측 말고 코드/로그 근거로.`).catch(() => {}).finally(() => { activeWork[tch] = null; });
+        runReport(botClient, tch, undefined, sre, s.repo, `이 서비스가 방금 다운됐어(HTTP ${s.downCode || '?'}). 배포·환경변수·의존성·런타임 에러·최근 변경 관점에서 가능한 원인을 코드 근거로 진단하고, 즉시 조치할 수 있는 구체 액션(설정 수정·핫픽스 등)을 제안해. 추측 말고 코드/로그 근거로.`).then(out => gateReportFollowup(botClient, tch, undefined, s.repo, out)).catch(() => {}).finally(() => { activeWork[tch] = null; }); // 진단 후 고칠 수 있는 건 실행 게이트로
       }
     }
     return;
@@ -2593,7 +2593,7 @@ async function handle(event, client) {
       const jb = jobs[parseInt(jm[1], 10)];
       if (jb && jb.channel === channel && ['work', 'build', 'report', 'debate'].includes(jb.type)) {
         await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}#${jb.id} "${jb.title}" 다시 돌릴게${jb.repo ? ' (' + jb.repo.split('/').pop() + ')' : ''}.`);
-        if (jb.type === 'report') runReport(client, channel, thread_ts, LEAD, jb.repo, jb.title).catch(() => {}).finally(() => { endJob(channel); activeWork[channel] = null; });
+        if (jb.type === 'report') runReport(client, channel, thread_ts, LEAD, jb.repo, jb.title).then(out => gateReportFollowup(client, channel, thread_ts, jb.repo, out)).catch(() => {}).finally(() => { endJob(channel); activeWork[channel] = null; });
         else if (jb.type === 'debate') { activeWork[channel] = { task: jb.title, started: Date.now() }; runDebate(client, channel, thread_ts, jb.title, jb.repo).catch(() => {}).finally(() => { endJob(channel); activeWork[channel] = null; }); }
         else launchWork(client, channel, thread_ts, jb.repo || WORK_DEFAULT_REPO, jb.title, jb.type === 'build', !!settings.approval[channel]);
         return;
