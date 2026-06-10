@@ -3,7 +3,7 @@ import { execSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import path from 'path';
 const dir = path.dirname(fileURLToPath(import.meta.url));
-const tests = ['golden', 'i_batch1', 'i_batch3', 'jobs', 'r2', 'r4', 'r5', 'r6', 'r7', 'redteam', 'trajectories', 'sentinel', 'skills', 'mcp', 'autopilot', 'biz', 'board', 'home', 'sentinel_biz', 'board_progress', 'feedback', 'routing_legal', 'heph', 'grounding', 'lessons']; // 단언 기반(PASS/FAIL or ❌) 테스트들
+const tests = ['golden', 'i_batch1', 'i_batch3', 'jobs', 'r2', 'r4', 'r5', 'r6', 'r7', 'redteam', 'trajectories', 'sentinel', 'skills', 'mcp', 'autopilot', 'biz', 'board', 'home', 'sentinel_biz', 'board_progress', 'feedback', 'routing_legal', 'heph', 'grounding', 'lessons', 'wave1']; // 단언 기반(PASS/FAIL or ❌) 테스트들
 let fail = 0;
 for (const t of tests) {
   try {
