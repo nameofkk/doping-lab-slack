@@ -280,6 +280,7 @@ async function runClaude(prompt, model, cwd = WORKDIR, perm = CLAUDE_PERMISSION_
   if (Date.now() < claudeBreaker.openUntil) return { ok: false, limited: true, text: '⏳ 클로드가 연속으로 막혀서 잠깐 쉬는 중이야(자동 회복 대기). 조금 있다 다시 시도해줘.' };
   for (let attempt = 0; attempt < 3; attempt++) {
     const r = await runClaudeOnce(prompt, model, cwd, perm, timeoutMs, useMcp);
+    if (r.timedout && attempt < 1) continue; // 타임아웃은 1회 재시도(응답이 길어 끊긴 경우 다시 받으면 되는 일 많음 — "다시 시도해줘" 노출 줄임)
     if (!r.limited) {
       // 새 모델(fable 등) 접근 불가/미지원 에러면 opus로 1회 폴백(핵심 역할 안 끊기게). 표준 별칭엔 적용 안 함.
       if (r.ok === false && model && /fable|mythos/i.test(model) && /model|not[_ ]?found|404|invalid|does not exist|unknown|not available|access/i.test(r.text || '')) {
@@ -363,7 +364,7 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
       const full = (res.text || '(무응답)').trim();
       const tagM = full.match(/⟦([\s\S]*?)⟧/);
       if (tagM) structured.push({ who: p.name, tag: tagM[1].replace(/\s+/g, ' ').trim().slice(0, 200) }); // 구조화 태그 누적
-      const msg = full.replace(/⟦[\s\S]*?⟧/, '').trim().slice(0, 1200); // 프로즈는 태그 빼고 깔끔하게
+      const msg = full.replace(/⟦[\s\S]*?⟧/, '').trim().slice(0, 4000); // 프로즈는 태그 빼고(1200→4000, postAs 분할게시라 안 잘림)
       await postAs(client, channel, thread_ts, p, msg);
       transcript += `\n[${p.name}] ${msg}\n`;
     }
@@ -986,7 +987,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   let summaryMsg = '';
   try {
     const changed = (await sh(`git diff --stat origin/${WORK_BASE}..HEAD 2>/dev/null | tail -25`, dir)).out.trim();
-    const sr = await runClaude(`아래는 방금 끝낸 작업이야. 비개발자 사용자한테 쉽게 알려줘. 딱 세 덩어리로(각 1~3줄, 마크다운·별표 금지, 반말, 코드용어 최소화):\n바뀐 것: 기능 관점에서 뭐가 어떻게 달라졌는지 쉬운 말로\n기대 효과: 사용자나 지표에 뭐가 좋아지는지\n다음 할 것: 사용자가 지금 뭘 하면 되는지(확인/머지/배포/피드백 중 실제 필요한 것)${incomplete ? ' — 아직 미완성이라 "이어서로 마저 완성"을 꼭 포함' : ''}\n\n[작업 요청]\n${wrapUntrusted(task)}\n[바뀐 파일]\n${changed || '(파악 안됨)'}\n[팀 보고]\n${(res.text || '').slice(0, 1500)}`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 100000);
+    const sr = await runClaude(`아래는 방금 끝낸 작업이야. 비개발자 사용자한테 쉽게 알려줘. 딱 세 덩어리로(각 1~3줄, 마크다운·별표 금지, 반말, 코드용어 최소화):\n바뀐 것: 기능 관점에서 뭐가 어떻게 달라졌는지 쉬운 말로\n기대 효과: 사용자나 지표에 뭐가 좋아지는지\n다음 할 것: 사용자가 지금 뭘 하면 되는지(확인/머지/배포/피드백 중 실제 필요한 것)${incomplete ? ' — 아직 미완성이라 "이어서로 마저 완성"을 꼭 포함' : ''}\n\n[작업 요청]\n${wrapUntrusted(task)}\n[바뀐 파일]\n${changed || '(파악 안됨)'}\n[팀 보고]\n${(res.text || '').slice(0, 1500)}`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 150000);
     summaryMsg = deMd((sr.text || '').trim());
   } catch (_) {}
   let mainErr = '';
@@ -1124,7 +1125,9 @@ function extractRepo(raw) {
 // 조사 보고 결과 → 후속 실행안을 승인 게이트로(읽기전용 조사에 실행 선택지). 채널 한가할 때만.
 async function gateReportFollowup(client, channel, thread_ts, repo, reportOut) {
   try {
-    if (!reportOut || pendingDispatch[channel]) return;
+    if (!reportOut) return;
+    if (pendingDispatch[channel] && pendingDispatch[channel].at && Date.now() - pendingDispatch[channel].at > 30 * 60 * 1000) delete pendingDispatch[channel]; // 만료 제안은 비워 새 게이트 안 막히게
+    if (pendingDispatch[channel] || pendingVerify[channel]) return; // 진짜 활성 제안 있을 때만 양보
     const items = await extractActionItems(reportOut).catch(() => []);
     const humans = (items || []).filter(i => i && i.task && i.kind === 'human').slice(0, 5); // 사람만 할 수 있는 "확인 먼저"(쿼리·로그·대시보드) — 원인 확정 단계라 코드수정보다 앞
     const acts = (items || []).filter(i => i && i.task && i.kind !== 'human').slice(0, 4).map(i => { const r = repo || resolveRepo(i.task); const nm = r === SELF_REPO ? '봇' : (r || '').split('/').pop(); return { who: '조사후속', repo: r, task: `[${nm}] ${i.task}`, kind: ['investigate', 'build'].includes(i.kind) ? i.kind : 'investigate', source: 'report' }; });
@@ -1157,14 +1160,14 @@ async function runReport(client, channel, thread_ts, reporter, repo, task) {
     // 반론자 안다연 — 위 의견들 검토해서 약점/리스크/근거 약한 부분 반박 (특히 코드로 확인 안 된 걸 사실처럼 말한 거)
     const devil = byName('안다연'); let devilText = '';
     if (devil && !workCancel[channel]) {
-      const dr = await runClaude(`${devil.prompt}${STYLE}${rulesCtx(channel)}\n\n[사용자 질문]\n${task}\n\n[팀이 낸 의견들]\n${(res.text || '').slice(0, 2500)}\n\n반론자로서 이 의견들의 약점·리스크·빠뜨린 점·근거 약한 부분을 콕 집어 반박하고, 각 지적마다 보완책 한 줄씩. 특히 코드로 확인 안 된 걸 사실처럼 단정한 게 있으면 반드시 짚어줘. 너는 지금 이 레포 디렉토리 안에 있으니 실제 파일을 열어보고 검증해라. 편하게, 마크다운 금지.`, devil.model, dir, CLAUDE_PERMISSION_MODE, 150000);
-      if (dr.text && dr.ok !== false && !dr.limited) { devilText = dr.text.trim(); await postAs(client, channel, thread_ts, devil, devilText.slice(0, 1200)); }
+      const dr = await runClaude(`${devil.prompt}${STYLE}${rulesCtx(channel)}\n\n[사용자 질문]\n${task}\n\n[팀이 낸 의견들]\n${(res.text || '').slice(0, 2500)}\n\n반론자로서 이 의견들의 약점·리스크·빠뜨린 점·근거 약한 부분을 콕 집어 반박하고, 각 지적마다 보완책 한 줄씩. 특히 코드로 확인 안 된 걸 사실처럼 단정한 게 있으면 반드시 짚어줘. 너는 지금 이 레포 디렉토리 안에 있으니 실제 파일을 열어보고 검증해라. 편하게, 마크다운 금지.`, devil.model, dir, CLAUDE_PERMISSION_MODE, 240000);
+      if (dr.text && dr.ok !== false && !dr.limited) { devilText = dr.text.trim(); await postAs(client, channel, thread_ts, devil, devilText.slice(0, 6000)); } // postAs가 분할게시 — 1200→6000으로 안 잘리게
     }
     // 팀장 한로로 — 의견들 + 반론 다 검토해서 최종 실행안으로 종합·보완 (그냥 의견 나열로 끝내지 않게)
     if (workCancel[channel]) { delete workCancel[channel]; return; } // 중단 요청 시 종합 안 함
     const rpfb = drainFeedback(channel); const rpfbCtx = rpfb ? `\n\n[사용자가 조사 중 준 추가 지시 — 최종안에 반드시 반영]\n${rpfb}` : ''; // 종합 직전 피드백
     if (rpfb) await postAs(client, channel, thread_ts, LEAD, '방금 준 피드백 최종 정리에 반영할게.');
-    const synth = await runClaude(`${LEAD.prompt}${PLAIN}${rulesCtx(channel)}\n\n[사용자 질문]\n${task}${rpfbCtx}\n\n[팀 의견]\n${(res.text || '').slice(0, 2500)}\n\n[안다연 반론]\n${devilText.slice(0, 1200)}\n\n위를 다 검토해서 "최종안"으로 종합·보완해라. 의견 충돌은 네가 정리하고, 우선순위(1·2·3)를 매기고, 코드로 확인 안 된 가정은 빼거나 "확인 필요"로 표시해라. 바로 실행 가능한 구체적 액션으로 끝내. 마크다운 금지.`, LEAD.model, dir, CLAUDE_PERMISSION_MODE, 180000);
+    const synth = await runClaude(`${LEAD.prompt}${PLAIN}${rulesCtx(channel)}\n\n[사용자 질문]\n${task}${rpfbCtx}\n\n[팀 의견]\n${(res.text || '').slice(0, 2500)}\n\n[안다연 반론]\n${devilText.slice(0, 3000)}\n\n위를 다 검토해서 "최종안"으로 종합·보완해라. 의견 충돌은 네가 정리하고, 우선순위(1·2·3)를 매기고, 코드로 확인 안 된 가정은 빼거나 "확인 필요"로 표시해라. 바로 실행 가능한 구체적 액션으로 끝내. 마크다운 금지.`, LEAD.model, dir, CLAUDE_PERMISSION_MODE, 300000);
     if (synth.text && synth.ok !== false) { reportOut = synth.text.trim(); await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}📌 최종안 (팀 의견+반론 종합)\n${reportOut.slice(0, 9000)}`); } // 분할게시되니 안 잘림
     else await postAs(client, channel, thread_ts, reporter, `${mention(channel)}다 정리했어, 위에 봐줘!`);
     extractFacts(repo, `[조사] ${task}\n${(synth.text || res.text || '').slice(0, 1800)}`, '조사').catch(() => {}); // R7: 조사에서 확인된 사실 저장
