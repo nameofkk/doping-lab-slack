@@ -2793,7 +2793,8 @@ async function handle(event, client) {
     if (jm && !activeWork[channel] && canCommand(event.user)) {
       const jb = jobs[parseInt(jm[1], 10)];
       if (jb && jb.channel === channel && ['work', 'build', 'report', 'debate'].includes(jb.type)) {
-        await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}#${jb.id} "${jb.title}" 다시 돌릴게${jb.repo ? ' (' + jb.repo.split('/').pop() + ')' : ''}.`);
+        const rTitle = jb.title, rRepo = jb.repo, rType = jb.type; jb.status = 'cancelled'; jb.note = '재개로 대체됨'; jb.updatedAt = Date.now(); persistJobs(); // 옛 항목은 정리(중복 방지) — 새 실행이 새 항목으로
+        await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}#${jb.id} "${rTitle}" 다시 돌릴게${rRepo ? ' (' + rRepo.split('/').pop() + ')' : ''}. (옛 항목은 정리)`);
         if (jb.type === 'report') runReport(client, channel, thread_ts, LEAD, jb.repo, jb.title).then(out => gateReportFollowup(client, channel, thread_ts, jb.repo, out)).catch(() => {}).finally(() => { endJob(channel); activeWork[channel] = null; });
         else if (jb.type === 'debate') { activeWork[channel] = { task: jb.title, started: Date.now() }; runDebate(client, channel, thread_ts, jb.title, jb.repo).catch(() => {}).finally(() => { endJob(channel); activeWork[channel] = null; }); }
         else launchWork(client, channel, thread_ts, jb.repo || WORK_DEFAULT_REPO, jb.title, jb.type === 'build', !!settings.approval[channel]);
@@ -3594,7 +3595,7 @@ function buildHomeBlocksNew() {
   // 진행 중 작업
   const jline = j => `${icon[j.status] || '•'} #${j.id} ${j.type} · ${String(j.title || '').slice(0, 60)}${j.repo ? ' (' + j.repo.split('/').pop() + ')' : ''}${j.status === 'awaiting-approval' ? ' — 승인/머지 대기' : j.status === 'interrupted' ? ' — 끊김' : ''}`;
   B.push({ type: 'section', text: { type: 'mrkdwn', text: `*진행 중 작업* (${active.length})` } });
-  if (active.length) { for (const j of active.slice(0, 5)) { B.push({ type: 'section', text: { type: 'mrkdwn', text: jline(j) } }); B.push({ type: 'actions', elements: [hbtn('▶ 재개', 'home_job_resume_' + j.id, { value: String(j.id) }), hbtn('🗑 삭제', 'home_job_del_' + j.id, { value: String(j.id), style: 'danger' })] }); } }
+  if (active.length) { for (const j of active.slice(0, 5)) { B.push({ type: 'section', text: { type: 'mrkdwn', text: jline(j) } }); const running = j.status === 'running' || j.status === 'planning'; const els = []; if (!running) els.push(hbtn('▶ 재개', 'home_job_resume_' + j.id, { value: String(j.id) })); els.push(hbtn(running ? '⏹ 중단' : '🗑 삭제', 'home_job_del_' + j.id, { value: String(j.id), style: 'danger' })); B.push({ type: 'actions', elements: els }); } }
   else B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '_지금 도는 작업 없음_' }] });
   const recent = js.filter(j => !isActive(j)).slice(0, 4);
   if (recent.length) B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '최근: ' + recent.map(j => `${icon[j.status] || '•'} ${String(j.title || j.type).slice(0, 26)}`).join('   ') }] });
