@@ -1306,7 +1306,7 @@ function rulesCtx(channel) { const r = rules[channel] || []; return r.length ? `
 // ── 설정(권한/승인) + 태스크보드 (영구) ──
 const SET_FILE = process.env.SETTINGS_FILE || '/data/settings.json';
 let settings = { commanders: [], approval: {}, autopilot: {} };
-function loadSettings() { try { if (fs.existsSync(SET_FILE)) settings = JSON.parse(fs.readFileSync(SET_FILE, 'utf8')) || settings; } catch {} settings.commanders = settings.commanders || []; settings.approval = settings.approval || {}; settings.autopilot = settings.autopilot || {}; settings.repoChannel = settings.repoChannel || {}; settings.hqChannel = settings.hqChannel || null; settings.workRoute = settings.workRoute || {}; settings.sentinel = settings.sentinel || { enabled: true }; if (settings.paused === undefined) settings.paused = false; if (settings.autoRecover === undefined) settings.autoRecover = true; if (settings.designGate === undefined) settings.designGate = true; }
+function loadSettings() { try { if (fs.existsSync(SET_FILE)) settings = JSON.parse(fs.readFileSync(SET_FILE, 'utf8')) || settings; } catch {} settings.commanders = settings.commanders || []; settings.approval = settings.approval || {}; settings.autopilot = settings.autopilot || {}; settings.repoChannel = settings.repoChannel || {}; settings.hqChannel = settings.hqChannel || null; settings.workRoute = settings.workRoute || {}; settings.sentinel = settings.sentinel || { enabled: true }; if (settings.monitorChannel === undefined) settings.monitorChannel = settings.sentinel && settings.sentinel.channel || null; if (settings.paused === undefined) settings.paused = false; if (settings.autoRecover === undefined) settings.autoRecover = true; if (settings.designGate === undefined) settings.designGate = true; }
 // 텍스트에서 등록된 사업 서비스(repo) 찾기 — 영문 레포명 + 한글 별칭
 function repoFromText(raw) { const t = String(raw || ''); for (const rp of Object.keys(bizData)) { const nm = rp.split('/').pop(); if (nm && new RegExp(nm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(t)) return rp; } if (/위원트피스|위피|wewantpeace/i.test(t)) return Object.keys(bizData).find(r => /wewantpeace/i.test(r)) || null; if (/스포노노|스포논|sponono/i.test(t)) return Object.keys(bizData).find(r => /sponono/i.test(r)) || null; return null; }
 function persistSettings() { try { fs.writeFileSync(SET_FILE, JSON.stringify(settings)); } catch {} }
@@ -2048,10 +2048,10 @@ async function runBizSentinel(client, channel, manual = false) {
       if (!fresh.length) continue;
       fresh.forEach(b => { bizAlertSeen[rp + '|' + b.key] = day; });
       anyAlert = true;
-      const name = rp.split('/').pop(); const ch = channelForWork(rp, 'sentinel', (services[rp] && services[rp].channel) || (settings.sentinel && settings.sentinel.channel) || defCh); // workRoute > repoChannel > 서비스 자기채널(다운경보와 동일) > 선제override > 전사기본
+      const name = rp.split('/').pop(); const ch = settings.monitorChannel || channelForWork(rp, 'sentinel', (services[rp] && services[rp].channel) || (settings.sentinel && settings.sentinel.channel) || defCh); // 모니터링 채널 지정 시 거기로(통합)
       const lines = fresh.map(b => `- ${b.crit ? '[긴급] ' : ''}${b.label}: ${b.why}${b.pct != null ? ` (${(b.from != null ? b.from.toLocaleString() : '?')}→${b.to.toLocaleString()}, ${b.pct > 0 ? '+' : ''}${b.pct}%)` : ''}`).join('\n');
       if (ch) await postAs(client, ch, undefined, byName('김채원') || LEAD, `선제 경보 — ${name}\n지표 이상이 잡혀서 정기 회의 안 기다리고 바로 올려.\n${lines}`);
-      if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`[선제 경보] ${name}\n${lines}`) }).catch(() => {});
+      if (OWNER_USER_ID && botClient && !settings.monitorChannel) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`[선제 경보] ${name}\n${lines}`) }).catch(() => {}); // 모니터링 채널 지정 시 DM 안 보냄
       logDecision(ch || defCh || 'sentinel', 'biz-sentinel', `${name}: ${fresh.map(b => b.label).join(', ')}`);
       if (ch) await runSentinelMini(client, ch, rp, fresh); // 긴급 미니 진단·제안(게이트)
     }
@@ -2269,7 +2269,7 @@ async function checkServices(client, channel, announce = true, onlyAlert = false
   const sre = byName('윈터') || LEAD; // 운영·헬스체크 = 인프라
   const list = (channel ? svcList(channel) : Object.values(services)).filter(s => s.url); // channel=null이면 전체 라이브(자동 점검)
   if (!list.length) { if (announce && !onlyAlert) await postAs(client, channel, undefined, sre, '아직 등록된 라이브 서비스가 없어. 뭐 하나 만들어서 배포되면 여기 대장에 올라가.'); return; }
-  const routed = s => channelForWork(s.repo, 'health', s.channel || channel); // 서비스별 헬스 알림 채널(홈/명령으로 변경 가능) — 한 채널에 남 서비스 안 섞이게
+  const routed = s => settings.monitorChannel || channelForWork(s.repo, 'health', s.channel || channel); // 모니터링 채널 지정 시 전부 거기로(통합), 없으면 서비스별
   const lines = []; const lineByRepo = {};
   for (const s of list) {
     const r = await sh(`curl -s -o /dev/null -w "%{http_code} %{time_total}s %{size_download}" --max-time 15 '${String(s.url).replace(/'/g, '')}' 2>/dev/null || echo "000 0 0"`);
@@ -2308,7 +2308,7 @@ async function checkServices(client, channel, announce = true, onlyAlert = false
       const tch = routed(s); if (!tch) continue;
       const h = recallFacts('svc:' + s.repo, '인시던트 다운 복구'); const past = h ? `\n   ↳ 과거 이력:${h.replace(/\n+/g, ' ').slice(0, 300)}` : '';
       await postAs(client, tch, undefined, sre, `🔴 방금 다운 감지: ${s.repo}(HTTP ${s.downCode || '?'}). 라이브가 죽었어, 바로 확인할게.${past}`);
-      if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`🔴 [다운] ${s.repo}`) }).catch(() => {});
+      if (OWNER_USER_ID && botClient && !settings.monitorChannel) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`🔴 [다운] ${s.repo}`) }).catch(() => {}); // 모니터링 채널 지정 시 DM 안 보냄(채널로만)
     }
     // 새로 degraded(up이지만 이상) — 담당 채널로 1회
     for (const s of list) { const has = (s.issues || []).length; const tch = routed(s); if (s.lastStatus !== 'down' && has && !s.degAlerted && tch) { s.degAlerted = true; await postAs(client, tch, undefined, sre, `🟡 ${s.repo} 이상 감지(다운은 아닌데): ${s.issues.join(' / ')}. 확인 필요.`); } if (!has) s.degAlerted = false; }
@@ -3053,16 +3053,19 @@ async function handle(event, client) {
       return;
     }
     // D5: 서비스 담당 채널 지정/해제/현황 — 이 채널을 특정 서비스 전담으로(자동 브리핑·알림 라우팅)
+    if (/모니터링\s*채널\s*(해제|취소|풀어|off)/i.test(raw) && canCommand(event.user)) { settings.monitorChannel = null; if (settings.sentinel) settings.sentinel.channel = null; persistSettings(); await postAs(client, channel, thread_ts, LEAD, '모니터링 채널 해제했어 — 다시 서비스별 채널 + 너 DM으로 가.'); return; }
     if (/(담당|전담)\s*(해제|취소|풀어|해지)/.test(raw) && canCommand(event.user)) {
       const removed = []; for (const k of Object.keys(settings.repoChannel || {})) if (settings.repoChannel[k] === channel) { delete settings.repoChannel[k]; removed.push(k.split('/').pop()); }
       if (settings.hqChannel === channel) { settings.hqChannel = null; removed.push('전사(경영)'); }
+      if (settings.monitorChannel === channel) { settings.monitorChannel = null; if (settings.sentinel) settings.sentinel.channel = null; removed.push('모니터링'); }
       persistSettings(); await postAs(client, channel, thread_ts, LEAD, removed.length ? `이 채널 담당 해제했어: ${removed.join(', ')}` : '이 채널엔 지정된 담당이 없었어.'); return;
     }
     if (/(담당\s*채널|채널\s*담당|채널\s*배정|담당\s*현황)/.test(raw) && !/(지정|맡|전담|해|줘)/.test(raw)) {
       const lines = Object.keys(bizData).map(rp => `· ${rp.split('/').pop()} → ${settings.repoChannel[rp] ? '<#' + settings.repoChannel[rp] + '>' : '미지정(기본 채널로)'}`);
       await postAs(client, channel, thread_ts, LEAD, `서비스 담당 채널\n${lines.join('\n') || '(등록된 서비스 없음)'}\n전사(경영회의): ${settings.hqChannel ? '<#' + settings.hqChannel + '>' : '미지정'}\n\n지정하려면 그 채널에서 "이 채널 wewantpeace 담당" 또는 "이 채널 경영 담당".`); return;
     }
-    if (/(이\s*채널|여기|이곳).*(담당|전담|맡)|(담당|전담)\s*(으로|로)?\s*(지정|해|설정)/.test(raw) && canCommand(event.user)) {
+    if (/(이\s*채널|여기|이곳).*(담당|전담|맡)|(담당|전담)\s*(으로|로)?\s*(지정|해|설정)|모니터링\s*채널/.test(raw) && canCommand(event.user)) {
+      if (/(모니터링|경보|알림|다운|헬스|감시)/i.test(raw)) { settings.monitorChannel = channel; settings.sentinel = settings.sentinel || { enabled: true }; settings.sentinel.channel = channel; persistSettings(); logDecision(channel, 'monitor-channel', '이 채널로 통합'); await postAs(client, channel, thread_ts, LEAD, '이 채널을 모니터링·경보 채널로 지정했어 — 다운 감지·선제 경보·진단이 이제 여기로만 와(한로로 DM 안 가). 해제하려면 "모니터링 채널 해제".'); return; }
       if (/(본사|경영|전사|hq|메인|이사회)/i.test(raw)) { settings.hqChannel = channel; persistSettings(); await postAs(client, channel, thread_ts, LEAD, '이 채널을 전사(경영회의 등 회사 전체 업무) 채널로 지정했어. 주간 경영회의가 여기로 와.'); return; }
       const rp = repoFromText(raw);
       if (rp) { settings.repoChannel[rp] = channel; persistSettings(); logDecision(channel, 'channel-assign', `${rp} → 이 채널`); await postAs(client, channel, thread_ts, LEAD, `이 채널을 ${rp.split('/').pop()} 담당으로 지정했어 — 그 서비스 자동 사업 브리핑·알림이 이제 여기로 와. (해제: "담당 해제")`); return; }
@@ -3157,14 +3160,14 @@ async function handle(event, client) {
       return;
     }
     // Wave2: 퍼널 계측 점검 — 측정 갭 있으면 계측 PR 제안(측정→그로스·가격 결정의 토대)
-    if (/(퍼널\s*계측|계측\s*점검|계측\s*심|measurement|퍼널\s*측정|코호트\s*계측|측정\s*갭\s*메)/i.test(raw)) {
+    if (/(퍼널\s*계측|계측\s*점검|계측\s*심|measurement|퍼널\s*측정|코호트\s*계측|측정\s*갭\s*메)/i.test(raw) && !/(만들|제작|짜줘|짜봐|구현|개발|페이지|새로)/.test(raw)) {
       const repo = extractRepo(raw) || lastRepo[channel] || Object.keys(bizData)[0];
       if (!repo) { await postAs(client, channel, thread_ts, LEAD, '어느 서비스 계측? 예) "wewantpeace 퍼널 계측"'); return; }
       await runInstrumentProposal(client, channel, repo, true).catch(() => {});
       return;
     }
     // Wave3: 가격 전략·실험
-    if (/(가격\s*전략|가격\s*실험|프라이싱|가격\s*책정|pricing)/i.test(raw)) {
+    if (/(가격\s*전략|가격\s*실험|프라이싱|가격\s*책정|pricing)/i.test(raw) && !/(만들|제작|짜줘|짜봐|구현|개발|페이지|새로)/.test(raw)) {
       const repo = extractRepo(raw) || lastRepo[channel] || Object.keys(bizData)[0];
       if (!repo) { await postAs(client, channel, thread_ts, LEAD, '어느 서비스 가격? 예) "sponono 가격 전략"'); return; }
       if (await guardBusy(client, channel, thread_ts)) return;
@@ -3172,7 +3175,7 @@ async function handle(event, client) {
       return;
     }
     // Wave3: 리텐션 개입(win-back)
-    if (/(리텐션\s*개입|리텐션\s*전략|win.?back|이탈\s*방지|재방문\s*개선|복귀\s*유도)/i.test(raw)) {
+    if (/(리텐션\s*개입|리텐션\s*전략|win.?back|이탈\s*방지|재방문\s*개선|복귀\s*유도)/i.test(raw) && !/(만들|제작|짜줘|짜봐|구현|개발|페이지|새로)/.test(raw)) {
       const repo = extractRepo(raw) || lastRepo[channel] || Object.keys(bizData)[0];
       if (!repo) { await postAs(client, channel, thread_ts, LEAD, '어느 서비스 리텐션? 예) "wewantpeace 리텐션 개입"'); return; }
       if (await guardBusy(client, channel, thread_ts)) return;
@@ -3180,7 +3183,7 @@ async function handle(event, client) {
       return;
     }
     // Wave4: P&L · 성과 리뷰 · 리스크 레지스터 · 릴리즈노트
-    if (/(p&l|손익|재무제표|pnl|매출\s*대비\s*비용)/i.test(raw)) { await runPnL(client, channel).catch(() => {}); return; }
+    if (/(p&l|손익|재무제표|pnl|매출\s*대비\s*비용)/i.test(raw) && !/(만들|제작|짜줘|구현|개발|대시보드\s*만)/.test(raw)) { await runPnL(client, channel).catch(() => {}); return; }
     if (/(성과\s*리뷰|성과\s*평가|제안\s*성과|효과\s*리뷰)/i.test(raw)) { await runPerformanceReview(client, channel).catch(() => {}); return; }
     if ((tm = raw.match(/리스크\s*(추가|등록)\s+([\s\S]+)/))) { const repo = extractRepo(raw) || lastRepo[channel]; const sev = /높|심각|치명/.test(tm[2]) ? '높음' : /낮/.test(tm[2]) ? '낮음' : '중'; const r = addRisk(repo, tm[2].trim(), sev); await postAs(client, channel, thread_ts, LEAD, r ? `리스크 등록 #${r.id} [${sev}] ${r.text}` : '이미 같은 리스크가 있어.'); return; }
     if ((tm = raw.match(/리스크\s*(완료|해결|제거)\s*#?(\d+)/))) { const r = risks.find(x => x.id === parseInt(tm[2], 10)); if (r) { r.status = 'done'; persistWave4(); } await postAs(client, channel, thread_ts, LEAD, r ? `리스크 #${tm[2]} 해결 처리했어.` : '그 번호 리스크 못 찾겠어.'); return; }
@@ -3580,8 +3583,8 @@ function buildHomeBlocksNew() {
   B.push({ type: 'section', text: { type: 'mrkdwn', text: settings.paused ? '*전체 자율: 멈춤* — 모든 자동(정기업무·선제감시·브리핑·경영회의) 정지됨' : '*전체 자율: 가동 중* — 자동 운영 작동 중' }, accessory: hbtn(settings.paused ? '자율 재개' : '전체 정지', 'home_pause_toggle', { style: settings.paused ? 'primary' : 'danger' }) });
   const senOn = !settings.sentinel || settings.sentinel.enabled !== false;
   const senCh = settings.sentinel && settings.sentinel.channel;
-  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*선제 감시* — ${senOn ? '켜짐 · 4시간마다 사업 지표 이상(매출·구독·회원·DAU 급변, 매출0 등) 자동 경보' : '꺼짐'}\n경보 채널: ${senCh ? `<#${senCh}>` : '서비스별 기본 채널'}` } });
-  B.push({ type: 'actions', elements: [hbtn('지금 점검', 'home_sentinel_run'), hbtn(senOn ? '감시 끄기' : '감시 켜기', 'home_sentinel_toggle', { style: senOn ? 'danger' : 'primary' }), chanSel('home_sentinel_ch', senCh, '경보 채널')] });
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*모니터링·경보 채널* — ${settings.monitorChannel ? `<#${settings.monitorChannel}> (다운·선제 경보 다 여기로, DM 안 감)` : '미지정 (서비스별 채널 + 너한테 DM)'}\n선제 감시: ${senOn ? '켜짐 · 4시간마다 지표 이상 자동 경보' : '꺼짐'}` } });
+  B.push({ type: 'actions', elements: [hbtn('지금 점검', 'home_sentinel_run'), hbtn(senOn ? '감시 끄기' : '감시 켜기', 'home_sentinel_toggle', { style: senOn ? 'danger' : 'primary' }), chanSel('home_sentinel_ch', settings.monitorChannel, '모니터링 채널')] });
   B.push({ type: 'divider' });
   // 승인 대기 — 홈에서 바로 승인/넘어가
   B.push({ type: 'section', text: { type: 'mrkdwn', text: `*승인 대기* (${pendCount})` } });
@@ -3694,7 +3697,7 @@ app.action(/^(home_|opscfg_|svcroute_)/, async ({ ack, body, action, client }) =
     if (aid === 'home_refresh') { await publishHome(client, userId); return; }
     if (aid === 'home_board_archive') { archiveDoneInitiatives(); await publishHome(client, userId); return; }
     if (aid === 'home_pause_toggle') { settings.paused = !settings.paused; persistSettings(); logDecision('home', 'global-pause', settings.paused ? 'ON' : 'OFF'); await publishHome(client, userId); return; }
-    if (aid === 'home_sentinel_ch') { settings.sentinel = settings.sentinel || { enabled: true }; settings.sentinel.channel = action.selected_conversation || null; persistSettings(); await publishHome(client, userId); return; }
+    if (aid === 'home_sentinel_ch') { settings.sentinel = settings.sentinel || { enabled: true }; settings.sentinel.channel = action.selected_conversation || null; settings.monitorChannel = action.selected_conversation || null; persistSettings(); await publishHome(client, userId); return; } // 다운+선제 통합 모니터링 채널
     if (aid === 'home_deptrun_ch') { settings.deptRunChannel = action.selected_conversation || null; persistSettings(); await publishHome(client, userId); return; }
     if (aid === 'home_sentinel_toggle') { const on = !settings.sentinel || settings.sentinel.enabled !== false; settings.sentinel = { enabled: !on }; persistSettings(); await publishHome(client, userId); return; }
     if (aid === 'home_sentinel_run') { const ch = homeTargetChannel(userId); try { await client.chat.postMessage({ channel: userId, text: `선제 점검 돌렸어 — 이상 있으면 ${ch === userId ? '여기' : '<#' + ch + '>'}나 해당 서비스 채널로 경보가 가.` }); } catch (_) {} runBizSentinel(app.client, ch, true).catch(() => {}); setTimeout(() => publishHome(client, userId).catch(() => {}), 1500); return; }
