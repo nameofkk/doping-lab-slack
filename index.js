@@ -97,6 +97,14 @@ const MONITORING_RULE = `
 2) 봇 전용 통계 엔드포인트: GET /admin/bot-stats 를 만들어 그 서비스의 핵심 지표를 JSON으로 줘라 — 최소 total_users(총회원), new_today(오늘 신규), 그리고 노스스타(핵심 가치행동) 카운트. 유료면 subscribers·monthly_revenue도. 반드시 X-Bot-Key 헤더를 env BOT_STATS_KEY와 상수시간 비교(hmac.compare_digest 류)로 인증(키 없거나 틀리면 403). 키는 절대 코드 하드코딩 금지(env). 이게 있어야 에이전트가 사업지표·선제감시·경영회의에서 이 서비스를 추적한다.
 3) 핵심 이벤트 카운트: 노스스타가 되는 핵심 행동(가입 완료·첫 핵심경험 등)을 셀 수 있게 최소한의 카운터/이벤트 로깅을 둬서 2번 통계에 노출해라.
 4) 에러 가시성: 서버 에러는 stderr/로그로 명확히 남겨서(스택 포함) 다운 시 진단이 되게.`;
+// Wave2: 퍼널/코호트 계측 — "측정 갭"을 말만 하지 말고 코드로 닫는다. 신규 빌드 + 계측 작업에 주입.
+const INSTRUMENTATION_RULE = `
+
+[퍼널 계측 — 측정 안 되면 성장 결정이 반쪽이다. 이 서비스의 핵심 퍼널을 반드시 계측해라(백엔드 있을 때)]
+1) 핵심 이벤트 로깅(events 테이블/로그): signup(가입), activation(첫 핵심행동 = 이 서비스 '가치 첫 경험' 1개를 명확히 정의), return(재방문), paid(유료전환). 각 이벤트에 user_id·timestamp 필수.
+2) /admin/bot-stats(X-Bot-Key 인증)에 아래를 추가 노출(기존 지표는 유지하고 추가만): activation_rate(가입→첫핵심행동 %), retention_d1/d7/d30(가입일 코호트 재방문 %), conversion_rate(무료→유료 %), funnel(단계별 카운트).
+3) 일별 active user 기록이 있으면 가입일 기준 코호트로 묶어 리텐션 계산. 없으면 위 이벤트부터 적재 시작(과거 소급은 불가하니 지금부터라도).
+4) 프로드 서비스면 PR로(머지는 사람). 이 계측이 있어야 그로스·재무·가격 결정이 실측 기반이 된다.`;
 const LAUNCH_RULE = `
 
 [출시·마케팅 준비 — 웹/사이트/앱 신규 제작이면 코드에 같이 넣어라]
@@ -201,6 +209,7 @@ function commandMenuText() {
     '• `오토파일럿 켜` / `끄` / `상태` — 위험도별 자동실행',
     '• `개선 제안` · `자기개선` · `기회 스카우트` — 트렌드→신사업',
     '• `로드맵`/`<서비스> 로드맵 생성` — 마일스톤 · `당신차례` — 너한테 막힌 것 · `막힌거 완료 <번호>`',
+    '• `<서비스> 퍼널 계측` — 활성화율·리텐션·전환 측정 심기(측정 갭 닫기)',
     '',
     '🧠 *기억·학습·도구*',
     '• `기억 목록` · `교훈 목록`(실수→안반복) · `교훈 추가 <내용>` · `스킬 목록` · `스킬 후보` · `스킬 승인/격리 <이름>`',
@@ -935,7 +944,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   if (fbBuild && repo && !newProject) addLesson(repo, `사용자가 고쳐준 것: ${fbBuild.replace(/\s+/g, ' ').slice(0, 120)}`); // Q6: 사용자 교정도 교훈으로(다음에 또 반영)
   const rmap = !newProject ? await repoMap(dir) : ''; // I8: 기존 레포는 구조 맵으로 그라운딩(신규는 빈 레포라 생략)
   const prules = await readProjectRules(dir); // L1: AGENTS.md/CLAUDE.md 컨벤션 주입
-  const res = await runClaude(`${intro}${rulesCtx(channel)}${prules}${repo ? recallFacts(repo, task) : ''}${repo ? recallSkills(repo, task) : ''}${repo ? recallLessons(repo) : ''}${repo ? recallRoadmap(repo) : ''}${repo ? ontologyQuery(task, repo) : ''}${repo ? soulContext(repo) : ''}${rmap}${PLAIN}${uiish ? DESIGN_RULE : ''}${newProject ? LAUNCH_RULE : ''}${newProject ? MONITORING_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}${fbBuild ? '\n\n[사용자가 추가로 준 지시 — 반드시 반영]\n' + wrapUntrusted(fbBuild) : ''}${UNTRUSTED_PREAMBLE}\n\n요청:\n${wrapUntrusted(task)}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 540000, true);
+  const res = await runClaude(`${intro}${rulesCtx(channel)}${prules}${repo ? recallFacts(repo, task) : ''}${repo ? recallSkills(repo, task) : ''}${repo ? recallLessons(repo) : ''}${repo ? recallRoadmap(repo) : ''}${repo ? ontologyQuery(task, repo) : ''}${repo ? soulContext(repo) : ''}${rmap}${PLAIN}${uiish ? DESIGN_RULE : ''}${newProject ? LAUNCH_RULE : ''}${newProject ? MONITORING_RULE : ''}${(newProject || /계측|퍼널|funnel|활성화율|리텐션\s*측정|전환율\s*측정|코호트|instrument/i.test(task)) ? INSTRUMENTATION_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}${fbBuild ? '\n\n[사용자가 추가로 준 지시 — 반드시 반영]\n' + wrapUntrusted(fbBuild) : ''}${UNTRUSTED_PREAMBLE}\n\n요청:\n${wrapUntrusted(task)}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 540000, true);
   if (res.limited) { jobUpdate(channel, { status: 'limited' }); await postAs(client, channel, thread_ts, LEAD, '⏳ 제작 중에 클로드 사용량 한도에 걸렸어. 지금까지 만든 건 안 올렸어, 한도 리셋되면 이어서 만들게.'); return; }
   jobUpdate(channel, { stage: '코드생성' }); // R9: 진행 단계 체크포인트(재시작 알림용)
   addJobTokens(channel, (res.outTokens || estTokens(res.text)) + estTokens(task) + (prd ? estTokens(prd) : 0)); // I8+Q4: 실 API 출력토큰 우선(한글 len/4 ~2배오차 제거), 없으면 추정
@@ -1653,6 +1662,12 @@ const BIZ_LABELS = {
   'admin.events_today': { ko: '오늘 수집 이벤트', unit: '건', e: '📊' },
   'admin.crisis_countries': { ko: '위기 국가', unit: '개국', e: '🚨' },
   'admin.push_tokens': { ko: '푸시 알림 대상', unit: '명', e: '🔔' },
+  // Wave2: 퍼널/코호트 — 계측 심으면 흐름(활성화·리텐션·전환). 그로스·가격 결정의 핵심.
+  'admin.activation_rate': { ko: '활성화율(가입→첫핵심행동)', unit: '%', e: '⚡' },
+  'admin.retention_d1': { ko: 'D1 리텐션', unit: '%', e: '🔁' },
+  'admin.retention_d7': { ko: 'D7 리텐션', unit: '%', e: '🔁' },
+  'admin.retention_d30': { ko: 'D30 리텐션', unit: '%', e: '🔁' },
+  'admin.conversion_rate': { ko: '무료→유료 전환율', unit: '%', e: '💱' },
   'admin.pending_reports': { ko: '미처리 신고', unit: '건', e: '⚠️' },
   'admin.premium_users': { ko: '프리미엄 회원(유료)', unit: '명', e: '💳' },
   'admin.total_blocks': { ko: '누적 차단(스포일러)', unit: '건', e: '🛡️' },
@@ -1779,6 +1794,18 @@ async function storeReviews(repo) {
   }
   return out.trim() || null;
 }
+// Wave2: 퍼널 계측 — "측정 갭"을 말만 하지 말고 닫는다. 빠진 퍼널 지표 감지 → 로드맵 마일스톤 + 계측 PR 제안(게이트).
+function missingFunnel(repo) { const m = bizLatest(repo) || {}; return ['admin.activation_rate', 'admin.retention_d7', 'admin.conversion_rate'].filter(k => typeof m[k] !== 'number'); }
+async function runInstrumentProposal(client, channel, repo, manual) {
+  if (!repo || !channel) return;
+  const miss = missingFunnel(repo); const name = repo.split('/').pop();
+  if (!miss.length) { if (manual) await postAs(client, channel, undefined, byName('윈터') || LEAD, `${name}는 퍼널 지표(활성화·리텐션·전환) 이미 들어와. 계측 OK.`); return; }
+  const missKo = miss.map(k => (BIZ_LABELS[k] ? BIZ_LABELS[k].ko : k)).join(', ');
+  addMilestone(repo, `핵심 퍼널 계측(${missKo})`, '활성화율·리텐션·전환율', '측정 갭이 그로스·가격 결정을 막음', 5, 3); // Wave1 연결: 측정갭=로드맵 마일스톤
+  if (pendingDispatch[channel] || activeWork[channel]) { if (manual) await postAs(client, channel, undefined, byName('윈터') || LEAD, `${name} 퍼널 계측을 로드맵 마일스톤으로 박아놨어(지금 채널이 바빠 제안은 나중). 안 보이는 것: ${missKo}`); return; }
+  const item = { who: '계측', repo, task: `[${name}] 퍼널 계측 추가 — 가입/활성화(첫 핵심행동)/재방문/유료전환 이벤트 로깅 + /admin/bot-stats에 activation_rate·retention_d1/d7/d30·conversion_rate 노출(기존 지표 유지, 추가만). 없는 것: ${missKo}`, kind: 'build', source: 'instrument' };
+  await proposeOrAuto(client, channel, repo, [item], `📐 퍼널 계측 제안 — ${name} (측정 갭 닫기. 승인하면 PR로, 머지는 너. ${missKo} 안 보임)`, { forceGate: true });
+}
 // A2: 사업 브리핑 — 서비스별로 따로 분석(제품이 달라 한 덩어리 금지). 실수치+추세+루브릭 → 운영자 해석. 친한국어, 추정 0.
 let bizBriefAt = 0;
 async function runBizBriefing(client, channel, manual = false, startLine = null) {
@@ -1787,6 +1814,7 @@ async function runBizBriefing(client, channel, manual = false, startLine = null)
   try {
     const repos = Object.keys(bizData); if (!repos.length) { if (manual) await postAs(client, channel, undefined, LEAD, '아직 등록된 사업 메트릭이 없어. "사업 메트릭 등록"으로 서비스 stats를 연결해줘.'); return; }
     let any = false; const greeted = new Set(); // 채널별 시작 멘트 1회
+    for (const rp of repos) { const mf = missingFunnel(rp); if (mf.length) addMilestone(rp, `핵심 퍼널 계측(${mf.map(k => BIZ_LABELS[k] ? BIZ_LABELS[k].ko : k).join(', ')})`, '활성화율·리텐션·전환율', '측정 갭이 그로스·가격 결정을 막음', 5, 3); } // Wave2: 측정 갭 = 로드맵 마일스톤(디둡, 자동)
     for (const rp of repos) { // 서비스별 개별 브리핑
       const cur = await bizFetch(rp); const m = cur || bizLatest(rp); if (!m) continue;
       any = true;
@@ -3042,6 +3070,13 @@ async function handle(event, client) {
         for (const rp of repos) { await bizFetch(rp); lines.push(`■ ${rp.split('/').pop()}\n` + bizScorecard(rp)); }
         return { ok: true, text: '사업 스코어카드 (값=실데이터, 변동률은 직전 대비, [특이]=큰 변동. 설명은 "사업 브리핑")\n\n' + lines.join('\n\n') };
       });
+      return;
+    }
+    // Wave2: 퍼널 계측 점검 — 측정 갭 있으면 계측 PR 제안(측정→그로스·가격 결정의 토대)
+    if (/(퍼널\s*계측|계측\s*점검|계측\s*심|measurement|퍼널\s*측정|코호트\s*계측|측정\s*갭\s*메)/i.test(raw)) {
+      const repo = extractRepo(raw) || lastRepo[channel] || Object.keys(bizData)[0];
+      if (!repo) { await postAs(client, channel, thread_ts, LEAD, '어느 서비스 계측? 예) "wewantpeace 퍼널 계측"'); return; }
+      await runInstrumentProposal(client, channel, repo, true).catch(() => {});
       return;
     }
     // A2: 사업 브리핑 (실수치 → AARRR 루브릭 해석 + 측정갭 + 개선안)
