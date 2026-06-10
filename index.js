@@ -209,7 +209,7 @@ function commandMenuText() {
     '• `오토파일럿 켜` / `끄` / `상태` — 위험도별 자동실행',
     '• `개선 제안` · `자기개선` · `기회 스카우트` — 트렌드→신사업',
     '• `로드맵`/`<서비스> 로드맵 생성` — 마일스톤 · `당신차례` — 너한테 막힌 것 · `막힌거 완료 <번호>`',
-    '• `<서비스> 퍼널 계측` — 활성화율·리텐션·전환 측정 심기(측정 갭 닫기)',
+    '• `<서비스> 퍼널 계측` — 측정 심기 · `<서비스> 가격 전략` — 가격 실험 · `<서비스> 리텐션 개입` — win-back',
     '',
     '🧠 *기억·학습·도구*',
     '• `기억 목록` · `교훈 목록`(실수→안반복) · `교훈 추가 <내용>` · `스킬 목록` · `스킬 후보` · `스킬 승인/격리 <이름>`',
@@ -1904,6 +1904,43 @@ function archiveDoneInitiatives() { // H3: pct는 stored exp에 없음 → progr
   const ids = new Set(progressBoard().filter(b => b.state === 'hit' || b.state === 'bad' || (b.state === 'stale' && b.age >= 30)).map(b => b.id));
   let n = 0; for (const e of experiments) { if (!e.archived && ids.has(e.id)) { e.archived = true; n++; } } if (n) persistExperiments(); return n;
 }
+// ── Wave3: 수익 행동 — 측정(Wave2) 위에서 "듣기→행동". 가격 전략·실험 + 리텐션 개입(win-back) + 고객 응답. 전부 게이트. ──
+async function runPricingReview(client, channel, repo, manual) { // 가격 = 최대 매출 레버. 경쟁가 리서치+현재 전환→가격 실험 제안
+  if (!repo || !channel) return; if (pendingDispatch[channel] || activeWork[channel]) { if (manual) await postAs(client, channel, undefined, byName('영듀') || LEAD, '지금 채널이 바빠 — 한가할 때 "가격 전략" 다시 불러줘.'); return; }
+  const name = repo.split('/').pop(); const sc = bizScorecard(repo); const prod = productOf(repo);
+  activeWork[channel] = { task: '가격 전략', started: Date.now() };
+  try {
+    await postAs(client, channel, undefined, byName('영듀') || LEAD, `${name} 가격 전략 — 경쟁사 가격이랑 우리 전환을 웹서치로 보고 가격 실험 제안할게. 좀 걸려.`);
+    startTyping(channel);
+    const r = await runClaude(`너는 도핑연구소 그로스/가격 책임자다. "${name}" 서비스의 가격 전략을 짜라. WebSearch로 같은 카테고리 경쟁 서비스들의 실제 가격(플랜·티어·무료범위)을 찾아 근거로 삼아라.${GROUNDING_RULE}\n[제품]\n${prod || '(설명 없음)'}\n[현재 지표]\n${wrapUntrusted(String(sc).slice(0, 1000))}\n\n분석: (1)경쟁 가격대(출처 URL) (2)우리 현재 가격의 문제(너무 싸서 가치 깎임/너무 비싸서 전환 막힘/플랜 구조) (3)가격 실험 1~2개(구체적: 어느 플랜을 얼마로, 무료범위 조정, 연간할인 등 + 어떤 지표 올리려는지). 가격은 전환율·ARPU·매출에 직접 영향이니 실험은 작게·되돌릴 수 있게.\n\nJSON만: {"insight":"한 줄 핵심","experiments":[{"task":"가격 실험 구체 한 문장(어느 플랜을 얼마로)","target":"올릴 지표","kind":"build|investigate"}]}`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 300000, false);
+    stopTyping(channel);
+    let o = {}; try { o = JSON.parse(((r.text || '').match(/\{[\s\S]*\}/) || ['{}'])[0]); } catch {}
+    const exps = (o.experiments || []).filter(x => x && x.task).slice(0, 2);
+    if (o.insight) await postAs(client, channel, undefined, byName('영듀') || LEAD, `💱 ${name} 가격 전략\n${o.insight}`);
+    if (!exps.length) { if (manual) await postAs(client, channel, undefined, byName('영듀') || LEAD, '지금 데이터로 뚜렷한 가격 실험은 안 보여. 전환 데이터 더 쌓이면 다시.'); return; }
+    const items = exps.map(e => ({ who: '가격', repo, task: `[${name}·가격] ${e.task} (타겟: ${e.target || '전환율'})`, kind: ['investigate', 'build'].includes(e.kind) ? e.kind : 'investigate', targetKey: validMetricKey('admin.conversion_rate'), source: 'pricing' }));
+    await proposeOrAuto(client, channel, repo, items, `💱 가격 실험 제안 — ${name} (승인하면 착수, 효과는 전환율로 측정). 안 할 거면 "넘어가"`, { forceGate: true });
+  } catch (e) { try { stopTyping(channel); log('error', 'pricing-err', { e: String(e).slice(0, 120) }); } catch (_) {} }
+  finally { activeWork[channel] = null; }
+}
+async function runRetentionPlay(client, channel, repo, manual) { // 리텐션 낮으면 win-back/lifecycle 개입 제안 (측정·청취만 하던 것 → 행동)
+  if (!repo || !channel) return; if (pendingDispatch[channel] || activeWork[channel]) return;
+  const name = repo.split('/').pop(); const m = bizLatest(repo) || {}; const sc = bizScorecard(repo);
+  activeWork[channel] = { task: '리텐션 개입', started: Date.now() };
+  try {
+    await postAs(client, channel, undefined, byName('김채원') || LEAD, `${name} 리텐션 개입안 짜볼게.`);
+    startTyping(channel);
+    const r = await runClaude(`너는 도핑연구소 리텐션 책임자다. "${name}"의 재방문·이탈을 개선할 "개입(win-back/lifecycle)" 1~2개를 제안해라. 측정·분석 말고 실제 행동으로.${GROUNDING_RULE}\n[지표]\n${wrapUntrusted(String(sc).slice(0, 900))}\n\n개입 예: 이탈 직전 사용자 재참여 알림/이메일(트리거·문구), 가입 후 N일 온보딩 넛지, 핵심행동 미도달자 리마인드, 복귀 유인. 각 개입은 어떤 지표(D1/D7/D30 리텐션, 활성화율)를 올리는지 명확히. 발송채널(이메일·푸시)이 없으면 "그 채널부터 필요(너)"로 표시.\n\nJSON만: {"plays":[{"task":"개입 구체 한 문장","target":"올릴 지표","kind":"build|investigate","needs":"필요한 채널/계정(없으면 빈문자열)"}]}`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 200000);
+    stopTyping(channel);
+    let o = {}; try { o = JSON.parse(((r.text || '').match(/\{[\s\S]*\}/) || ['{}'])[0]); } catch {}
+    const plays = (o.plays || []).filter(x => x && x.task).slice(0, 2);
+    if (!plays.length) { if (manual) await postAs(client, channel, undefined, byName('김채원') || LEAD, '지금은 뚜렷한 리텐션 개입거리가 안 보여. 리텐션 측정부터 깔자("퍼널 계측").'); return; }
+    for (const p of plays) if (p.needs) addBlocker(repo, `리텐션 개입에 필요: ${p.needs}`, 'account');
+    const items = plays.map(p => ({ who: '리텐션', repo, task: `[${name}·리텐션] ${p.task} (타겟: ${p.target || 'D7 리텐션'})${p.needs ? ` [필요: ${p.needs}]` : ''}`, kind: ['investigate', 'build'].includes(p.kind) ? p.kind : 'build', targetKey: validMetricKey('admin.retention_d7'), source: 'retention' }));
+    await proposeOrAuto(client, channel, repo, items, `🔁 리텐션 개입 제안 — ${name} (승인하면 착수, 효과는 리텐션으로). 안 할 거면 "넘어가"`, { forceGate: true });
+  } catch (e) { try { stopTyping(channel); log('error', 'retention-err', { e: String(e).slice(0, 120) }); } catch (_) {} }
+  finally { activeWork[channel] = null; }
+}
 let bizGrowthAt = 0;
 async function runBizGrowth(client, channel, manual = false, startLine = null) {
   if (!manual && Date.now() - bizGrowthAt < 6 * 86400000) return; bizGrowthAt = Date.now();
@@ -2026,7 +2063,7 @@ async function runRhythmProposal(client, channel, manual = false) {
 }
 // ── Phase B: 부서별 운영 루프 — 각 부서가 실데이터를 자기 관점으로 검토→진단+개선 제안(게이트). 4개가 같은 골격이라 제네릭. 페르소나=부서장. ──
 const DEPTS = {
-  cx: { name: '고객(CX)', persona: '우정잉', role: '고객 경험(CX) 책임자', prompt: '아래에 "인앱 피드백"(우리 서비스가 직접 받은 진짜 사용자 의견)과 "스토어 실데이터"(평점·설치수·실제 리뷰 본문 — 이미 정확한 앱에서 가져온 진짜 데이터)가 주어진다. 그 실제 내용만 근거로(절대 기억·검색으로 추정 금지) 반복되는 불만·요청·칭찬을 테마별로 묶고, 평점/리뷰가 말해주는 제품 개선을 제안해라. "수집 실패/제한"이라고 적힌 건 데이터 없는 것이니 지어내지 말고 그 사실만 짚어라.' },
+  cx: { name: '고객(CX)', persona: '우정잉', role: '고객 경험(CX) 책임자', prompt: '아래에 "인앱 피드백"(우리 서비스가 직접 받은 진짜 사용자 의견)과 "스토어 실데이터"(평점·설치수·실제 리뷰 본문 — 이미 정확한 앱에서 가져온 진짜 데이터)가 주어진다. 그 실제 내용만 근거로(절대 기억·검색으로 추정 금지) 반복되는 불만·요청·칭찬을 테마별로 묶고, 평점/리뷰가 말해주는 제품 개선을 제안해라. 그리고 가장 반복되는 불만/문의 1~2개에 대해 "사용자에게 보낼 답변 초안"도 써라(공감+해결책 or 계획, 바로 보낼 수 있게 — 발송은 사람이 함). 듣기만 말고 답하는 게 핵심. "수집 실패/제한"이라고 적힌 건 데이터 없는 것이니 지어내지 말고 그 사실만 짚어라.' },
   marketing: { name: '마케팅', persona: '영듀', role: '마케팅/그로스(획득) 책임자', prompt: '획득(신규유입) 관점에서 콘텐츠·SEO·GEO(ChatGPT·Claude 같은 AI검색이 우리를 인용하게 구조화)·SNS 전략을 제안. 핵심 키워드·경쟁 포지셔닝은 웹서치로. 실제 발행 계정이 필요한 건 사람만 가능하다고 표시.' },
   finance: { name: '재무(CFO)', persona: '윈터', role: '재무(CFO)', prompt: '수익(매출·유료 구독자)과 비용(우리 봇 운영 토큰비용 등) 신호로 번레이트·런웨이·유닛이코노믹스(LTV:CAC·전환율·이탈) 관점에서 진단하고, 비용 이상치·수익 개선을 제안. 데이터 없으면 추정 말고 "이 재무지표부터 잡자"로.' },
   market: { name: '시장·경쟁', persona: '아이유', role: '시장·경쟁 인텔리전스 책임자', prompt: '경쟁사 동향·시장 트렌드·신규 위협을 웹서치로 조사해(예: 스포일러 차단 앱 경쟁사, 분쟁 추적 서비스 경쟁사), 우리한테 주는 시사점과 대응을 제안.' },
@@ -3077,6 +3114,22 @@ async function handle(event, client) {
       const repo = extractRepo(raw) || lastRepo[channel] || Object.keys(bizData)[0];
       if (!repo) { await postAs(client, channel, thread_ts, LEAD, '어느 서비스 계측? 예) "wewantpeace 퍼널 계측"'); return; }
       await runInstrumentProposal(client, channel, repo, true).catch(() => {});
+      return;
+    }
+    // Wave3: 가격 전략·실험
+    if (/(가격\s*전략|가격\s*실험|프라이싱|가격\s*책정|pricing)/i.test(raw)) {
+      const repo = extractRepo(raw) || lastRepo[channel] || Object.keys(bizData)[0];
+      if (!repo) { await postAs(client, channel, thread_ts, LEAD, '어느 서비스 가격? 예) "sponono 가격 전략"'); return; }
+      if (await guardBusy(client, channel, thread_ts)) return;
+      runPricingReview(client, channel, repo, true).catch(() => {});
+      return;
+    }
+    // Wave3: 리텐션 개입(win-back)
+    if (/(리텐션\s*개입|리텐션\s*전략|win.?back|이탈\s*방지|재방문\s*개선|복귀\s*유도)/i.test(raw)) {
+      const repo = extractRepo(raw) || lastRepo[channel] || Object.keys(bizData)[0];
+      if (!repo) { await postAs(client, channel, thread_ts, LEAD, '어느 서비스 리텐션? 예) "wewantpeace 리텐션 개입"'); return; }
+      if (await guardBusy(client, channel, thread_ts)) return;
+      runRetentionPlay(client, channel, repo, true).catch(() => {});
       return;
     }
     // A2: 사업 브리핑 (실수치 → AARRR 루브릭 해석 + 측정갭 + 개선안)
