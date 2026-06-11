@@ -197,12 +197,13 @@ function commandMenuText() {
     '• `홀덤게임 만들어줘` — 새 프로젝트 (기획→제작→QA→배포)',
     '• `스포노노 다크모드 추가해줘` — 기존 레포 수정',
     '• `이어서` / `중단` — 작업 이어가기/멈추기 (실패 시 자동 진단·복구·재개)',
-    '• `전체 정지` / `자율 재개` — 모든 자동 멈춤/재개 · `봇 비용` — 이번 주 사용량',
+    '• `머지` / `머지 <PR번호>` — 봇이 CI 확인하고 PR 머지(네 승인 클릭) · `빌드 게이트 꺼/켜` — 모든 빌드 PR 게이트 여부',
+    '• `전체 정지` / `자율 재개` — 모든 자동 멈춤/재개 · `봇 비용` · `트레이스`/`비용 점검` — 모델 호출 분해',
     '• `X 토론하자` — 팀 토론(기획 핑퐁)',
     '',
     '🔭 *운영·모니터링*',
-    '• `헬스체크` · `서비스 목록` · `서비스 등록 <레포> <url>`',
-    '• `운영 브리핑` — 종합 진단 · `운영 리포트` — 사용량/성공률',
+    '• `헬스체크` · `서비스 목록` · `서비스 등록 <레포> <url>` · `CI 점검` — GitHub Actions 상태',
+    '• `운영 브리핑` — 종합 진단 · `운영 리포트` — 사용량/성공률 · `정기 업무` — 자동 스케줄 현황',
     '',
     '사업(비즈니스)',
     '• `사업 지표` — 실수치 스코어카드 · `사업 브리핑` — AARRR 해석·측정갭',
@@ -213,7 +214,7 @@ function commandMenuText() {
     '',
     '🤖 *자율(오토파일럿)*',
     '• `오토파일럿 켜` / `끄` / `상태` — 위험도별 자동실행',
-    '• `개선 제안` · `자기개선` · `기회 스카우트` — 트렌드→신사업',
+    '• `개선 제안` · `자기개선` · `사각지대 점검`(안 보는 신호 발견) · `행동 점검`(에이전트 행동 회귀) · `기회 스카우트` — 트렌드→신사업',
     '• `로드맵`/`<서비스> 로드맵 생성` — 마일스톤 · `당신차례` — 너한테 막힌 것 · `막힌거 완료 <번호>`',
     '• `<서비스> 퍼널 계측` · `<서비스> 가격 전략` · `<서비스> 리텐션 개입`',
     '• `P&L` — 손익 · `성과 리뷰` — 제안→실측 · `리스크` — 레지스터 · `릴리즈노트` — 변경이력',
@@ -3542,6 +3543,12 @@ async function handle(event, client) {
     }
     if (/선제\s*감시\s*(켜|on|활성)/i.test(raw) && canCommand(event.user)) { settings.sentinel = { enabled: true }; persistSettings(); await postAs(client, channel, thread_ts, LEAD, '선제 감시 켰어 — 4시간마다 사업 지표 이상을 자동으로 보고 임계치 넘으면 바로 경보할게.'); return; }
     if (/선제\s*감시\s*(꺼|off|중지|끄)/i.test(raw) && canCommand(event.user)) { settings.sentinel = { enabled: false }; persistSettings(); await postAs(client, channel, thread_ts, LEAD, '선제 감시 껐어. "선제 점검"으로 수동으론 여전히 돌릴 수 있어.'); return; }
+    // 정기 업무 현황 — 실제 opsConfig(주기·시각·채널·켜기)를 보여줌(홈 탭과 같은 데이터, 명령으로도)
+    if (/(정기\s*업무|자동\s*업무(\s*현황)?|정기\s*스케줄|자동\s*스케줄|ops\s*(설정|현황|목록)|업무\s*스케줄)\s*[?？]?\s*$/i.test(raw)) {
+      const lines = OPS_ORDER.map(id => { const o = opsConfig[id], d = OPS_DEFS[id]; if (!o || !d) return null; return `${o.enabled ? '🟢' : '⚪'} ${d.label} — ${o.enabled ? opsWhen(o) : '꺼짐'}${o.channel ? ' · <#' + o.channel + '>' : ''}${d.perService ? ' · 서비스별' : ''}`; }).filter(Boolean);
+      const route = settings.monitorChannel ? `\n채널 미지정 업무는 모니터링 채널(<#${settings.monitorChannel}>)로` : settings.hqChannel ? `\n채널 미지정 업무는 경영 채널(<#${settings.hqChannel}>)로` : '\n⚠️ 지정 채널 없음 — 일부 자동 업무가 안 돌 수 있어 ("이 채널 모니터링 담당"으로 지정)';
+      await postAs(client, channel, thread_ts, LEAD, `⏰ 정기 업무 (자동) — 지금 설정\n${lines.join('\n')}${route}\n\n주기·시각·채널·켜기는 홈 탭 "정기 업무"에서 편집. 전체 멈춤은 "전체 정지".`); return;
+    }
     // 전역 자율 정지/재개 — 모든 자동(정기업무·선제감시·브리핑·경영회의)을 한 번에 멈춤/재개. 수동 명령·헬스감시는 유지.
     if (/(전체|전역|모든\s*자율|자율|다)\s*(정지|멈춰|멈춤|중지|꺼|스톱|stop|일시정지)/i.test(raw) && canCommand(event.user)) { settings.paused = true; persistSettings(); logDecision(channel, 'global-pause', 'ON'); await postAs(client, channel, thread_ts, LEAD, '전체 자율 활동 멈췄어 — 정기 업무·선제 감시·브리핑·경영회의 다 안 돌아. (수동 명령이랑 서비스 다운 감시는 그대로.) "자율 재개"로 다시 켜.'); return; }
     if (/(전체|전역|모든\s*자율|자율|다)\s*(재개|다시|시작|켜|resume|풀어)/i.test(raw) && canCommand(event.user)) { settings.paused = false; persistSettings(); logDecision(channel, 'global-pause', 'OFF'); await postAs(client, channel, thread_ts, LEAD, '전체 자율 활동 다시 켰어 — 정기 업무·선제 감시 정상 가동.'); return; }
