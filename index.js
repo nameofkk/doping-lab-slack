@@ -3546,11 +3546,22 @@ async function handle(event, client) {
       else if (/^(넘어가|취소|안\s?해|됐어|패스)/.test(raw)) { delete pendingVerify[channel]; await postAs(client, channel, thread_ts, LEAD, '오케이, 원인부터 확인하자. 결과 붙여주면 그때 맞는 수정 추려줄게.'); return; }
     }
     // 기회 스카우트 게이트 — "기회 N 만들자/검증" (pendingOpp 활성 시)
-    if (pendingOpp[channel] && (tm = raw.match(/기회\s*(\d+)?\s*(만들|제작|빌드|가자|ㄱㄱ|검증|파|조사)/))) {
-      if (pendingOpp[channel].at && Date.now() - pendingOpp[channel].at > 60 * 60 * 1000) { delete pendingOpp[channel]; }
-      else { const idx = Math.max(0, (parseInt(tm[1], 10) || 1) - 1); const c = pendingOpp[channel].cands[idx]; if (!c) { await postAs(client, channel, thread_ts, LEAD, '그 번호 기회가 없어. 1번부터야.'); return; }
-        if (/검증|파|조사/.test(tm[2])) { delete pendingOpp[channel]; if (await guardBusy(client, channel, thread_ts)) return; activeWork[channel] = { task: '기회 검증', started: Date.now() }; runOppValidate(client, channel, c).catch(() => {}).finally(() => { activeWork[channel] = null; }); return; }
-        if (await guardBusy(client, channel, thread_ts)) return; await postAs(client, channel, thread_ts, LEAD, `좋아, "${c.title}" 만들기 들어갈게 — 정상 기획 플로우(PRD→시안→빌드→법무) 다 거쳐.`); startOppBuild(client, channel, thread_ts, c); return; }
+    // 기회 게이트 — "기회 N 검증/만들자" + 기회번호 없는 "더 검증"(버튼 라벨 그대로)·"검증"·"더 파봐"·"딥다이브"도 잡는다. (버그: "기회" 단어 없으면 일반 조사로 새서 엉뚱한 lastRepo[예전에 다루던 게임 레포]를 까던 것 — 사용자가 신사업 기회 검증을 요청했는데 무관한 레포 클론)
+    if (pendingOpp[channel]) {
+      const m1 = raw.match(/기회\s*(\d+)?\s*(만들|제작|빌드|가자|ㄱㄱ|검증|파봐?|조사|딥)/);
+      const bareVal = /^(더\s*)?(검증(\s*해(줘)?)?|파봐|딥\s?다이브|deep|더\s*(알아봐?|조사|파봐?))\s*\d*\s*$/i.test(raw);
+      if (m1 || bareVal) {
+        if (pendingOpp[channel].at && Date.now() - pendingOpp[channel].at > 60 * 60 * 1000) { delete pendingOpp[channel]; }
+        else {
+          const numStr = (m1 && m1[1]) || (raw.match(/\d+/) || [])[0];
+          const idx = Math.max(0, (parseInt(numStr, 10) || 1) - 1);
+          const c = pendingOpp[channel].cands[idx]; if (!c) { await postAs(client, channel, thread_ts, LEAD, '그 번호 기회가 없어. 1번부터야.'); return; }
+          const isBuild = !!(m1 && /만들|제작|빌드|가자|ㄱㄱ/.test(m1[2]));
+          delete pendingOpp[channel];
+          if (!isBuild) { if (await guardBusy(client, channel, thread_ts)) return; activeWork[channel] = { task: '기회 검증', started: Date.now() }; await postAs(client, channel, thread_ts, LEAD, `"${c.title}" — 이 신사업 기회를 WebSearch로 더 깊이 검증할게(레포 까는 거 아니야, 시장·수요·경쟁 딥다이브야).`); runOppValidate(client, channel, c).catch(() => {}).finally(() => { activeWork[channel] = null; }); return; }
+          if (await guardBusy(client, channel, thread_ts)) return; await postAs(client, channel, thread_ts, LEAD, `좋아, "${c.title}" 만들기 들어갈게 — 정상 기획 플로우(PRD→시안→빌드→법무) 다 거쳐.`); startOppBuild(client, channel, thread_ts, c); return;
+        }
+      }
     }
     // 기회 목록/추적 — 과거 제안된 기회 + 빌드 여부(닫힌루프)
     if (/(기회\s*(목록|현황|추적|히스토리|리스트))/i.test(raw)) {
