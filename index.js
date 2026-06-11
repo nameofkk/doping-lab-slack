@@ -1041,7 +1041,8 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   let mainErr = '';
   // 감사 P0: 프로드 레포(라이브/사업지표) 변경은 항상 PR(사람 머지 게이트), 미완성(심사 실패·빈구멍)도 main 직행 금지 → 검증 안 된/실패한 코드가 자동배포로 라이브 나가는 것 차단.
   const prodForced = isProd(repo) && !forcePR, incompleteForced = incomplete && !forcePR;
-  const mustPR = forcePR || prodForced || incompleteForced;
+  const gateBuildsForced = settings.gateBuilds !== false && !forcePR && !prodForced && !incompleteForced; // 모든 빌드 기본 게이트(PR→머지). "빌드 게이트 꺼"로 비프로드 직행 허용
+  const mustPR = forcePR || prodForced || incompleteForced || gateBuildsForced;
   if (!mustPR) {
     const pushMain = await sh(`git push origin HEAD:${WORK_BASE}`, dir);
     if (pushMain.code === 0) {
@@ -1074,7 +1075,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   // 감사 B-9: PR 경로(승인작업·스케줄·프로드·selfHeal 등 주력 실행)에서도 학습. PR은 머지 전이라 사실은 source='PR작업'으로 구분, 스킬은 심사통과+완성된 것만.
   if (repo) { extractFacts(repo, `[PR작업] ${task}\n[한 일] ${(res.text || '').slice(0, 1500)}`, 'PR작업').catch(() => {}); if (criticPass && !incomplete) { extractSkill(repo, `[성공한 작업·PR] ${task}\n[한 일] ${(res.text || '').slice(0, 1500)}`).catch(() => {}); try { bumpSkills(repo, task, true); } catch (_) {} } }
   if (pr && pr.html_url) { addBlocker(repo, `PR 머지: ${task.slice(0, 50)} — ${url}`, 'merge'); lastPR[channel] = { repo, num: pr.number, url, at: Date.now() }; } // Wave1: PR 머지 대기를 당신차례 큐로 + 채널 최근 PR 기억(머지 버튼·명령용)
-  const prWhy = forcePR ? '승인모드라' : prodForced ? '프로드(라이브) 서비스라 안전하게' : incompleteForced ? '아직 미완성이라 main 직행 막고' : '';
+  const prWhy = forcePR ? '승인모드라' : prodForced ? '프로드(라이브) 서비스라 안전하게' : incompleteForced ? '아직 미완성이라 main 직행 막고' : gateBuildsForced ? '빌드 게이트 켜져 있어 (네 승인=머지로 반영, 빠른 직행은 "빌드 게이트 꺼")' : '';
   await postAs(client, channel, undefined, LEAD, `${mention(channel)}${doneHead} ${prWhy} PR로 올렸어.\nPR: ${url}\n코드 브라우저로 보려면: https://github.dev/${repo}\n\n머지는 내가 할 수 있어 — 확인하고 "머지"(또는 아래 버튼) 하면 CI 초록인지 보고 머지할게. (프로드라 머지 결정은 네 승인으로)`); // 최종 결과 top-level
   if (pr && pr.html_url && !incomplete) await postButtons(channel, undefined, [{ text: '✅ 머지하기', id: 'pr_merge', style: 'primary', value: `${repo}#${pr.number}` }, { text: '나중에', id: 'pr_later', value: `${repo}#${pr.number}` }]).catch(() => {}); // 미완성이면 머지 버튼 안 띄움
   if (summaryMsg) await postAs(client, channel, undefined, LEAD, `결과 요약\n${summaryMsg}`);
@@ -1352,7 +1353,7 @@ function rulesCtx(channel) { const r = rules[channel] || []; return r.length ? `
 // ── 설정(권한/승인) + 태스크보드 (영구) ──
 const SET_FILE = process.env.SETTINGS_FILE || '/data/settings.json';
 let settings = { commanders: [], approval: {}, autopilot: {} };
-function loadSettings() { try { if (fs.existsSync(SET_FILE)) settings = JSON.parse(fs.readFileSync(SET_FILE, 'utf8')) || settings; } catch {} settings.commanders = settings.commanders || []; settings.approval = settings.approval || {}; settings.autopilot = settings.autopilot || {}; settings.repoChannel = settings.repoChannel || {}; settings.hqChannel = settings.hqChannel || null; settings.workRoute = settings.workRoute || {}; settings.sentinel = settings.sentinel || { enabled: true }; if (settings.monitorChannel === undefined) settings.monitorChannel = settings.sentinel && settings.sentinel.channel || null; if (settings.paused === undefined) settings.paused = false; if (settings.autoRecover === undefined) settings.autoRecover = true; if (settings.designGate === undefined) settings.designGate = true; }
+function loadSettings() { try { if (fs.existsSync(SET_FILE)) settings = JSON.parse(fs.readFileSync(SET_FILE, 'utf8')) || settings; } catch {} settings.commanders = settings.commanders || []; settings.approval = settings.approval || {}; settings.autopilot = settings.autopilot || {}; settings.repoChannel = settings.repoChannel || {}; settings.hqChannel = settings.hqChannel || null; settings.workRoute = settings.workRoute || {}; settings.sentinel = settings.sentinel || { enabled: true }; if (settings.monitorChannel === undefined) settings.monitorChannel = settings.sentinel && settings.sentinel.channel || null; if (settings.paused === undefined) settings.paused = false; if (settings.autoRecover === undefined) settings.autoRecover = true; if (settings.designGate === undefined) settings.designGate = true; if (settings.gateBuilds === undefined) settings.gateBuilds = true; } // 기본: 모든 빌드 PR 게이트(승인=머지). "빌드 게이트 꺼"로 비프로드 직행
 // 텍스트에서 등록된 사업 서비스(repo) 찾기 — 영문 레포명 + 한글 별칭
 function repoFromText(raw) { const t = String(raw || ''); for (const rp of Object.keys(bizData)) { const nm = rp.split('/').pop(); if (nm && new RegExp(nm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(t)) return rp; } if (/위원트피스|위피|wewantpeace/i.test(t)) return Object.keys(bizData).find(r => /wewantpeace/i.test(r)) || null; if (/스포노노|스포논|sponono/i.test(t)) return Object.keys(bizData).find(r => /sponono/i.test(r)) || null; return null; }
 function persistSettings() { try { fs.writeFileSync(SET_FILE, JSON.stringify(settings)); } catch {} }
@@ -3201,6 +3202,10 @@ async function handle(event, client) {
     if (/^(오토\s?파일럿|autopilot|자동\s?운전|자율\s?모드)\s*(켜|on|온|시작|활성)/i.test(raw) && canCommand(event.user)) { settings.autopilot[channel] = true; persistSettings(); logDecision(channel, 'autopilot-on', '오토파일럿 ON'); await postAs(client, channel, thread_ts, LEAD, '🛸 오토파일럿 켰어.\n• 🟢 모니터·조사(읽기)·비프로드 코드 제안 → 자동 착수(승인 불필요)\n• 🔴 내 코드 수정·프로드(sponono/wewantpeace) 변경·배포 → 여전히 승인 받음(안전선)\n• ⛔ 파괴적·계정/키 = 차단/사람\n급할 땐 "오토파일럿 꺼"로 즉시 정지.'); return; }
     if (/^(오토\s?파일럿|autopilot|자동\s?운전|자율\s?모드)\s*(꺼|off|오프|정지|중지|stop|비활성)/i.test(raw)) { delete settings.autopilot[channel]; persistSettings(); logDecision(channel, 'autopilot-off', '오토파일럿 OFF'); await postAs(client, channel, thread_ts, LEAD, '🛸 오토파일럿 껐어. 이제 모든 실행은 다시 네 승인(버튼/"실행")을 받을게.'); return; }
     if (/^(오토\s?파일럿|autopilot|자율\s?모드)\s*(상태|어때|뭐|status|\?)?\s*$/i.test(raw)) { const on = !!(settings.autopilot && settings.autopilot[channel]); const recent = decisions.filter(d => d.channel === channel && /^autopilot-run$/.test(d.kind)).slice(-5); await postAs(client, channel, thread_ts, LEAD, `🛸 오토파일럿: ${on ? 'ON' : 'OFF'}\n${on ? '무위험·비프로드는 자동, 자기수정·프로드는 게이트 유지.' : '"오토파일럿 켜"로 자율 실행 활성화.'}${recent.length ? '\n\n[최근 자동실행]\n' + recent.map(d => `· ${d.detail}`).join('\n') : ''}`); return; }
+    // 빌드 게이트 — 모든 빌드를 PR(승인=머지)로 둘지, 비프로드는 main 직행 허용할지
+    if (/빌드\s*게이트\s*(꺼|끄|off|해제)/i.test(raw) && canCommand(event.user)) { settings.gateBuilds = false; persistSettings(); logDecision(channel, 'gate-builds', 'OFF'); await postAs(client, channel, thread_ts, LEAD, '빌드 게이트 껐어 — 이제 비프로드 빌드는 main 직행(빠른 반복). 프로드·자기수정·미완성은 여전히 PR 게이트 유지(안전선).'); return; }
+    if (/빌드\s*게이트\s*(켜|on|활성)/i.test(raw) && canCommand(event.user)) { settings.gateBuilds = true; persistSettings(); logDecision(channel, 'gate-builds', 'ON'); await postAs(client, channel, thread_ts, LEAD, '빌드 게이트 켰어 — 이제 모든 빌드가 PR로 올라가고, 네가 "머지"해야 main 반영돼(아무것도 승인 없이 main 안 감).'); return; }
+    if (/빌드\s*게이트\s*(상태|어때|\?)?\s*$/i.test(raw)) { await postAs(client, channel, thread_ts, LEAD, `빌드 게이트: ${settings.gateBuilds !== false ? 'ON — 모든 빌드 PR(승인=머지)' : 'OFF — 비프로드는 main 직행, 프로드·자기수정만 게이트'}`); return; }
     // 태스크보드
     let tm;
     if ((tm = raw.match(/^태스크\s*추가\s*[:：]?\s*([\s\S]+)/))) { const t = addTask(channel, tm[1].trim(), event.user); await postAs(client, channel, thread_ts, LEAD, `📌 태스크 추가 (#${t.id}): ${t.text}`); return; }
