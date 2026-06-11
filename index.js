@@ -3523,7 +3523,9 @@ async function handle(event, client) {
     if (/^(pr\s*)?머지(\s*해(줘)?)?(\s*강행)?(\s*#?\d+)?\s*$/i.test(raw) && canCommand(event.user)) {
       const force = /강행/.test(raw); const mm = raw.match(/\d+/);
       let mRepo = (lastPR[channel] && lastPR[channel].repo) || extractRepo(raw), mNum = mm ? parseInt(mm[0], 10) : (lastPR[channel] && lastPR[channel].num);
-      if (!mRepo && extractRepo(raw)) mRepo = extractRepo(raw);
+      // 번호만 주고 레포 모르면 "당신차례" 머지 블로커에서 그 PR의 레포를 찾음(재배포로 lastPR 날아가도 동작)
+      if (mNum && !mRepo) { const b = openBlockers().find(x => x.kind === 'merge' && (String(x.what).includes('/pull/' + mNum) || String(x.what).includes('#' + mNum))); if (b) mRepo = b.repo; }
+      if (mNum && !mRepo) { const ob = openBlockers().filter(x => x.kind === 'merge'); if (ob.length === 1) mRepo = ob[0].repo; } // 머지 대기 PR이 하나뿐이면 그걸로
       if (!mRepo || !mNum) { await postAs(client, channel, thread_ts, LEAD, '어느 PR을 머지할까? "머지 <번호>"로 알려줘 (최근 올린 PR이 기억 안 나거나 만료됐어). "당신차례"에서 PR 번호 확인돼.'); return; }
       if (await guardBusy(client, channel, thread_ts)) return;
       mergePR(client, channel, thread_ts, mRepo, mNum, force).catch(() => {});
