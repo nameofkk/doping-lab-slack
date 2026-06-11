@@ -2538,8 +2538,10 @@ async function runCoverageCritic(client, channel, manual = false) {
   if (!manual && Date.now() - coverageAt < 6 * 86400000) return; // 주1회
   coverageAt = Date.now();
   if (!channel || activeWork[channel] || pendingDispatch[channel]) return;
+  activeWork[channel] = { task: '사각지대 점검', started: Date.now(), beat: Date.now() }; // 채널 점유(스피너 캡 10분 + 동시작업 차단 + 워치독)
   try {
-    if (manual) await postAs(client, channel, undefined, LEAD, '운영자로서 "내가 아직 안 보는 축"이 뭔지 표준 관측축에 대조해 스스로 점검할게 (팀장 모델 fable-5로).');
+    if (manual) await postAs(client, channel, undefined, LEAD, '운영자로서 "내가 아직 안 보는 축"이 뭔지 표준 관측축에 대조해 스스로 점검할게 (팀장 모델 fable-5로). 1~2분 걸려.');
+    startTyping(channel); // fable-5 호출 동안 "입력 중" 스피너(긴 메타 추론이라 살아있다는 신호)
     const r = await runClaude(`너는 이 슬랙 봇(도핑연구소)의 운영 총괄 아키텍트다 — sponono·wewantpeace를 운영하고 새 서비스를 만드는 자율 에이전트 회사의 두뇌.${GROUNDING_RULE}\n\n임무: 아래 [표준 관측축]과 [내가 지금 보는 신호]를 대조해, 성숙한 운영/엔지니어링 조직이라면 보는데 나는 아직 안 보는 "사각지대"를 찾아라. 이미 커버된 축은 절대 다시 제안하지 마(인벤토리에 있으면 끝). 부분 커버면 빠진 구체 조각만 짚어라.\n\n${COVERAGE_AXES}\n\n${WATCHED_SIGNALS}\n\n각 사각지대마다: 왜 중요한지(안 보이면 뭘 놓치나), 그 신호를 기술적으로 어떻게 잡을지(데이터 출처 — 예: GitHub API, 서비스 /status 엔드포인트, npm audit/pip-audit, 인증서 핸드셰이크, Railway 메트릭), 봇이 직접 index.js에 watcher를 심을 수 있는지(build/investigate) 아니면 키·계정·외부서비스가 필요한지(human). 막연한 건 빼고 실제 구현 가능한 구체 액션만. 억지로 만들지 마 — 이미 꽤 보고 있으면 솔직히 적게.\n\nJSON만: {"blindspots":[{"axis":"표준축 번호·이름","gap":"내가 놓치는 구체적인 것","why":"안 보이면 놓치는 것","signal":"그 신호를 어디서 어떻게 잡나","task":"index.js에 뭘 추가할지 구체적으로","kind":"build|investigate|human"}]}. 사각지대 없으면 빈 배열.`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 240000);
     const m = (r.text || '').match(/\{[\s\S]*\}/); if (!m) { if (manual) await postAs(client, channel, undefined, LEAD, '점검 돌렸는데 결과 파싱이 안 됐어. 다시 시도해줄래?'); return; }
     let obj; try { obj = JSON.parse(m[0]); } catch { return; }
@@ -2550,7 +2552,8 @@ async function runCoverageCritic(client, channel, manual = false) {
     log('info', 'coverage-critic', { manual, n: items.length, model: MODEL.LEAD });
     // 자기 신호체계(index.js) 확장이라 SELF_REPO = 항상 게이트(자가브릭 방지). 승인하면 그 신호를 보는 watcher를 심음.
     await proposeOrAuto(client, channel, SELF_REPO, items, `🔭 사각지대 점검 (${manual ? '수동' : '주간 자동'}, 팀장 모델 fable-5) — 내가 아직 안 보는 운영 신호 ${items.length}개. 승인하면 그 신호를 보게 만들게.`);
-  } catch (e) { try { log('error', 'coverage-critic-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
+  } catch (e) { try { log('error', 'coverage-critic-err', { e: String(e).slice(0, 150) }); } catch (_) {} if (manual) await postAs(client, channel, undefined, LEAD, '사각지대 점검 중에 막혔어(팀장 모델 호출 실패일 수 있어). 다시 시도해줘.').catch(() => {}); }
+  finally { stopTyping(channel); activeWork[channel] = null; }
 }
 
 // ── CI 워치독 — push 후 GitHub Actions가 비동기로 도는 결과(실패)는 런타임 에러도 헬스다운도 아니라(구버전이 계속 서빙) 봇이 모르던 사각지대. 이걸 직접 감시 → 실패 시 진단 → 게이트 자가교정.
