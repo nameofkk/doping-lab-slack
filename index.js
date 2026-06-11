@@ -252,6 +252,9 @@ function bumpUsage(j, limited) {
     if (Date.now() - usagePersistAt > 20000) persistUsage(); // 20s 스로틀(디스크 thrash 방지)
   } catch (e) {}
 }
+// P2: 모델 호출 트레이스(링버퍼) — 비결정 행동 디버그용. 요청마다 어떤 모델·얼마나·결과(ok/한도/타임아웃)였는지. "트레이스"로 조회.
+const claudeTrace = [];
+function recordClaudeTrace(model, ms, r) { try { claudeTrace.push({ at: Date.now(), model: String(model || '?').replace('claude-', ''), ms, ok: !!(r && r.ok !== false), limited: !!(r && r.limited), timedout: !!(r && r.timedout) }); if (claudeTrace.length > 50) claudeTrace.shift(); } catch (_) {} }
 // 감사 D-18: FAST(의도분류·짧은 판정) 호출은 버스트 슬롯 +2 + 큐 앞으로 — 9분짜리 빌드 여러 개가 슬롯을 다 잡아도 사용자 인터랙션이 수 분간 멈춘 듯 보이던 것 방지.
 function claudeAcquire(fast) { return new Promise(res => { const cap = fast ? MAX_CLAUDE + 2 : MAX_CLAUDE; if (claudeRunning < cap) { claudeRunning++; res(); } else if (fast) claudeQueue.unshift(res); else claudeQueue.push(res); }); }
 function claudeRelease() { claudeRunning = Math.max(0, claudeRunning - 1); if (claudeQueue.length) { claudeRunning++; claudeQueue.shift()(); } }
@@ -318,6 +321,7 @@ async function runClaude(prompt, model, cwd = WORKDIR, perm = CLAUDE_PERMISSION_
 }
 async function runClaudeOnce(prompt, model, cwd = WORKDIR, perm = CLAUDE_PERMISSION_MODE, timeoutMs = 240000, useMcp = false) {
   await claudeAcquire(model === MODEL.FAST); // D-18: FAST는 버스트 슬롯(짧은 인터랙션 우선)
+  const t0 = Date.now();
   return new Promise(resolve => {
     const args = ['-p', prompt, '--output-format', 'json', '--permission-mode', perm];
     if (model) args.push('--model', model);
@@ -326,7 +330,7 @@ async function runClaudeOnce(prompt, model, cwd = WORKDIR, perm = CLAUDE_PERMISS
     try { if (process.getuid && process.getuid() === 0) { opts.uid = 1000; opts.gid = 1000; } } catch (e) {}
     const child = spawn('claude', args, opts);
     let out = '', err = '', done = false;
-    const finish = (r) => { if (done) return; done = true; clearTimeout(killer); claudeRelease(); resolve(r); };
+    const finish = (r) => { if (done) return; done = true; clearTimeout(killer); claudeRelease(); recordClaudeTrace(model, Date.now() - t0, r); resolve(r); }; // P2: 트레이스 기록
     const killer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) {} finish({ ok: false, timedout: true, text: '(방금 건 처리가 제한시간을 넘겨서 한 번 끊겼어 — 게으름이 아니라 응답이 너무 길어진 거야. 다시 시도해줘.)' }); }, timeoutMs);
     child.stdout.on('data', d => (out += d));
     child.stderr.on('data', d => (err += d));
@@ -933,7 +937,7 @@ async function verifyBuild(client, channel, thread_ts, dir, repo, pushRef = WORK
   else await postAs(client, channel, thread_ts, qa, '한 번 고쳐봤는데 아직 빌드가 안 돼. 이건 사람이 한 번 봐야 할 거 같아.\n' + (bd.out || '').slice(-400) + '\n' + (fix.text || '').slice(0, 300));
 }
 
-async function runWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName) {
+async function runWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName, resumeBranch) {
   ensureJob(channel, newProject ? 'build' : 'work', task, repo); // R1: launchWork 외 경로(스케줄·자가수정·디스패치)가 부른 작업도 보드에 기록
   if (!GITHUB_TOKEN) { await postAs(client, channel, thread_ts, LEAD, 'GITHUB_TOKEN이 아직 없어서 작업 모드는 못 돌려. 토큰만 넣으면 바로 돼.'); return; }
   const id = ++workSeq;
@@ -964,6 +968,8 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const cl = await sh(`rm -rf ${dir} && git clone https://x-access-token:${GITHUB_TOKEN}@github.com/${repo}.git ${dir} && chmod -R 777 ${dir} && git -C ${dir} config core.fileMode false`);
   if (cl.code !== 0) { await postAs(client, channel, thread_ts, LEAD, `클론 실패ㅠ — '${repo}' 레포 이름이 맞는지 확인해줘 (없는 이름이면 못 받아와). "서비스 목록"으로 확인되고, sponono/wewantpeace/myungjak 중 하나거나 정확한 owner/repo면 돼.\n` + (cl.err || '').slice(0, 300)); return; }
   await sh(`git config user.name "doping-lab[bot]" && git config user.email "bot@doping.lab"`, dir);
+  // P3: 한도로 저장됐던 WIP 브랜치에서 이어가기 — 그 지점부터 계속 만들어 손실 0
+  if (resumeBranch) { const co = await sh(`git checkout ${resumeBranch} 2>&1`, dir); if (co.code === 0) await postAs(client, channel, thread_ts, LEAD, `(${resumeBranch}에 저장돼 있던 데까지 불러와서 거기서 이어 만들게)`).catch(() => {}); }
   const intro = newProject
     ? '이 빈 저장소에 다음 요청대로 프로젝트를 처음부터 만들어라. 적절한 기술스택을 직접 고르고, README도 작성해라. 중요: 데모가 아니라 바로 상용으로 오픈해도 되는 수준으로 완성해라 — 실제 콘텐츠(로렘입숨·더미텍스트 금지), 에러·로딩·빈 상태 처리, 반응형 완비, 깨진 링크·콘솔 에러 없음, 환경변수 정리, npm run build 통과. 핵심 로직엔 테스트 코드도 짜서 npm test로 돌려 통과시키고, CHANGELOG.md에 이번에 만든 걸 적어라. 대충 만들고 끝내지 마.'
     : '이 저장소에서 다음 작업을 실제로 수행해라. 파일을 직접 수정하고, 필요하면 의존성 설치하고 테스트까지 돌려서 동작을 확인해라. 상용 수준으로, 어설프게 끝내지 마라.';
@@ -983,7 +989,14 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const rmap = !newProject ? await repoMap(dir) : ''; // I8: 기존 레포는 구조 맵으로 그라운딩(신규는 빈 레포라 생략)
   const prules = await readProjectRules(dir); // L1: AGENTS.md/CLAUDE.md 컨벤션 주입
   const res = await runClaude(`${intro}${rulesCtx(channel)}${prules}${repo ? recallFacts(repo, task) : ''}${repo ? recallSkills(repo, task) : ''}${repo ? recallLessons(repo) : ''}${repo ? recallRoadmap(repo) : ''}${repo ? ontologyQuery(task, repo) : ''}${repo ? soulContext(repo) : ''}${rmap}${PLAIN}${uiish ? DESIGN_RULE : ''}${newProject ? LAUNCH_RULE : ''}${newProject ? MONITORING_RULE : ''}${(newProject || /계측|퍼널|funnel|활성화율|리텐션\s*측정|전환율\s*측정|코호트|instrument/i.test(task)) ? INSTRUMENTATION_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}${fbBuild ? '\n\n[사용자가 추가로 준 지시 — 반드시 반영]\n' + wrapUntrusted(fbBuild) : ''}${UNTRUSTED_PREAMBLE}\n\n요청:\n${wrapUntrusted(task)}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 540000, true);
-  if (res.limited) { jobUpdate(channel, { status: 'limited' }); await postAs(client, channel, thread_ts, LEAD, '⏳ 제작 중에 클로드 사용량 한도에 걸렸어. 지금까지 만든 건 안 올렸어, 한도 리셋되면 이어서 만들게.'); return; }
+  if (res.limited) {
+    // P3: 한도로 죽을 때 지금까지 만든 부분을 WIP 브랜치에 저장 — 전엔 /tmp 청소로 통째 손실됐음(작업 손실 = 최대 약점). 손실 0으로.
+    let saved = '';
+    try { const dirty = (await sh('git add -A && git diff --cached --quiet; echo $?', dir)).out.trim().endsWith('1'); if (dirty) { const wb = `wip/${id}-${Date.now().toString(36).slice(-4)}`; const p = await sh(`git checkout -b ${wb} && git commit -m "WIP(한도 중단) ${String(task).slice(0, 40).replace(/[\r\n"]/g, ' ')}" && git push origin ${wb} 2>&1`, dir); if (p.code === 0) { saved = ` 지금까지 만든 건 \`${wb}\` 브랜치에 저장해놨어(손실 방지 — 한도 풀리면 "이어서"가 거기서 이어가).`; pausedWork[channel] = { repo, task, newProject, forcePR: true, projName, wipBranch: wb, at: Date.now() }; } } } catch (_) {}
+    jobUpdate(channel, { status: 'limited' });
+    await postAs(client, channel, thread_ts, LEAD, `⏳ 제작 중에 클로드 사용량 한도에 걸렸어.${saved || ' (아직 저장할 변경은 없었어.)'} 한도 리셋되면 이어서 만들게.`);
+    return;
+  }
   jobUpdate(channel, { stage: '코드생성' }); // R9: 진행 단계 체크포인트(재시작 알림용)
   addJobTokens(channel, (res.outTokens || estTokens(res.text)) + estTokens(task) + (prd ? estTokens(prd) : 0)); // I8+Q4: 실 API 출력토큰 우선(한글 len/4 ~2배오차 제거), 없으면 추정
   // 연속완성 패스(R2 원장+재계획, I1 하드캡+반복하드스톱) — 갭이 줄어드는지 추적, 진척 없으면(스톨) 접근 바꿔 재계획. 단 재계획해도 또 막히거나(반복) 토큰/시간 캡 넘으면 하드스톱 — 무한루프·비용폭주 방지.
@@ -2872,13 +2885,13 @@ async function onWorkFailed(client, channel, thread_ts, jobId, err, ctx) {
 // #3: 모든 작업 실패를 OWNER에게도 표시(조사·토론 등 비빌드 작업용 — 빌드 작업은 onWorkFailed가 처리)
 function failNotifyOwner(label, repo, err) { try { if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`[작업 실패] ${label}${repo ? ' (' + repo.split('/').pop() + ')' : ''}\n${String(err).slice(0, 300)}`) }).catch(() => {}); } catch (_) {} }
 // 작업 실행(activeWork 세팅 + runWork + 정리) 공통
-function launchWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName, recoverAttempt = 0) {
+function launchWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName, recoverAttempt = 0, resumeBranch) {
   if (!recoverAttempt) { delete pausedWork[channel]; if (newProject) feedback[channel] = []; } // 새 신규프로젝트만 옛 피드백 정리. 이어서·기존수정·복구는 큐된 피드백 유지(drainFeedback이 단계에서 소비)
   const job = createJob(channel, newProject ? 'build' : 'work', task, repo, lastRequester[channel]); // R1: 작업 보드에 기록
-  const ctx = { task, started: Date.now(), beat: Date.now(), by: lastRequester[channel], repo, newProject, forcePR, projName, jobId: job.id, recoverAttempt }; // 재개·복구용 컨텍스트
+  const ctx = { task, started: Date.now(), beat: Date.now(), by: lastRequester[channel], repo, newProject, forcePR, projName, jobId: job.id, recoverAttempt, resumeBranch }; // 재개·복구용 컨텍스트
   activeWork[channel] = ctx;
   if (!recoverAttempt) postFeedbackButtons(channel, thread_ts, '작업 들어갔어 — 진행 중에 바꿀 점 생기면 "피드백 주기"로 언제든 줘. 단계 끝날 때마다 반영할게.').catch(() => {}); // 피드백 루프 어포던스
-  runWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName)
+  runWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName, resumeBranch)
     .then(() => { // 한도로 멈춤 감지 → 자동 재개 대기 등록(리셋되면 틱이 이어감)
       const st = jobs[job.id] && jobs[job.id].status; const fctx = { ...ctx, repo: (activeWork[channel] && activeWork[channel].repo) || repo };
       if (st === 'limited') { pausedWork[channel] = { ...fctx, at: Date.now() }; const prev = limitedResume[channel]; limitedResume[channel] = { ctx: fctx, at: Date.now(), lastTry: Date.now(), attempts: prev ? prev.attempts : 0 }; if (!prev && botClient) botClient.chat.postMessage({ channel, text: '한도 걸려서 멈췄어 — 리셋되면 멈춘 지점부터 자동으로 이어갈게. (급하면 "이어서")' }).catch(() => {}); }
@@ -3089,7 +3102,7 @@ async function handle(event, client) {
       if (Date.now() - (pw.at || pw.started || 0) > 6 * 3600000) { delete pausedWork[channel]; await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}"이어서" 할 게 좀 오래된 거(${(pw.task || '').slice(0, 30)})뿐이야. 그거 맞으면 "그거 이어서", 아니면 방금 거(기회 스카우트 등)는 "기회 스카우트"처럼 콕 집어줘.`); return; }
       delete pausedWork[channel];
       await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, 아까 "${(pw.task || '').slice(0, 40)}" 그거 다시 이어갈게.`);
-      launchWork(client, channel, thread_ts, pw.repo, pw.task, pw.newProject, pw.forcePR, pw.projName);
+      launchWork(client, channel, thread_ts, pw.repo, pw.task, pw.newProject, pw.forcePR, pw.projName, 0, pw.wipBranch); // P3: 한도 저장 WIP 브랜치에서 이어가기
       return;
     }
     // 바레 "이어서"인데 보관된 중단작업 없음 + 직전 레포가 2시간 넘게 오래됐으면 → stale라 안 잡고 되물음(버그: 기회 스카우트 "이어서" 했는데 몇 시간 전 게임 빌드를 잡던 것)
@@ -3600,6 +3613,17 @@ async function handle(event, client) {
     // 사용량/번레이트 (오늘 Claude 호출·토큰·한도걸림)
     if (/(사용량|번레이트|토큰.*얼마|클로드.*사용|usage)/.test(raw) && !/운영|리포트|report/.test(raw)) {
       await postAs(client, channel, thread_ts, LEAD, `오늘 우리 사용량이야.\n호출 ${usageStat.calls}회 · 출력토큰 약 ${usageStat.outTokens.toLocaleString()} · 한도걸림 ${usageStat.limitedHits}번.${usageStat.limitedHits ? ' 한도 자주 걸리면 팀원 모델 sonnet 유지하거나 작업 텀을 두자.' : ''}`);
+      return;
+    }
+    // P2/P4: 모델 호출 트레이스 + 비용 핫스팟 (최근 호출들이 어떤 모델로 얼마나, 한도/타임아웃·느린 호출). 비결정 행동·비용 디버그용.
+    if (/(트레이스|trace|작업\s*추적|비용\s*점검|호출\s*추적|핫스팟|어디서\s*(토큰|비용))/i.test(raw)) {
+      const tr = claudeTrace.slice(-20);
+      if (!tr.length) { await postAs(client, channel, thread_ts, LEAD, '아직 기록된 모델 호출이 없어(재배포 후 초기화). 작업 좀 돌면 쌓여.'); return; }
+      const byModel = {}; tr.forEach(t => { const k = t.model; byModel[k] = byModel[k] || { n: 0, ms: 0, lim: 0, to: 0 }; byModel[k].n++; byModel[k].ms += t.ms || 0; if (t.limited) byModel[k].lim++; if (t.timedout) byModel[k].to++; });
+      const modelLines = Object.entries(byModel).map(([m, s]) => `· ${m}: ${s.n}콜 · 평균 ${Math.round(s.ms / s.n / 1000)}s${s.lim ? ` · 한도 ${s.lim}` : ''}${s.to ? ` · 타임아웃 ${s.to}` : ''}`).join('\n');
+      const slow = tr.filter(t => (t.ms || 0) > 60000).slice(-4).map(t => `· ${t.model} ${Math.round(t.ms / 1000)}s${t.timedout ? '(타임아웃)' : ''}`);
+      const aw = Object.entries(activeWork).filter(([, w]) => w).map(([c, w]) => `· ${(w.task || '').slice(0, 30)}${w.repo ? ' [' + String(w.repo).split('/').pop() + ']' : ''}`);
+      await postAs(client, channel, thread_ts, LEAD, `🔬 모델 호출 트레이스 (최근 ${tr.length}콜)\n${modelLines}\n${slow.length ? '\n느린 호출:\n' + slow.join('\n') : ''}${aw.length ? '\n\n지금 도는 작업:\n' + aw.join('\n') : '\n\n지금 도는 작업: 없음'}\n\n오늘 누적: 호출 ${usageStat.calls} · 한도걸림 ${usageStat.limitedHits}${(usageStat.limitedHits || 0) >= 8 ? ' ⚠️ 한도 압박 — 비핵심 정기업무 자동 미룸(헬스만)' : ''}`);
       return;
     }
     // Q3: 운영 리포트 — 최근 7일 호출·실토큰·한도걸림 + 잡 성공/실패율 (재시작에도 보존되는 영속 메트릭)
@@ -4263,8 +4287,11 @@ async function postButtons(channel, thread_ts, buttons) {
     if (!settings.paused) {
       // 지정 채널: 경영(hq) > 모니터링 > 서비스 채널. 절대 lastRequester(유저 DM)로 폴백하지 않는다 — 그게 운영 브리핑이 한로로 DM으로 가던 버그. 지정 채널 없으면 자동 ops는 스킵(DM 스팸 금지).
       const defCh = settings.hqChannel || settings.monitorChannel || [...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))][0] || null;
+      // P4: 한도 압박 시 우선순위 — 한도걸림 잦거나 브레이커 열린 상태면 비핵심 정기업무(브리핑·스카우트·제안 등 토큰 많이 먹는 것)는 미룬다. 치명적인 헬스체크만 유지(다운진단은 checkServices가 별도로 돎). lastRunDay 안 박아서 한도 풀리면 따라잡음.
+      const limitPressure = (usageStat.limitedHits || 0) >= 8 || Date.now() < claudeBreaker.openUntil;
       for (const id of OPS_ORDER) {
         const o = opsConfig[id]; if (!o || !o.enabled || o.lastRunDay === n.day) continue;
+        if (limitPressure && id !== 'health') continue; // 한도 압박 → 헬스만, 나머지 정기업무는 양보(다음 틱 재시도)
         const due = o.cadence === 'weekly' ? (n.dow === (o.dow != null ? o.dow : 1)) : o.cadence === 'monthly' ? (n.dom === (o.dom || 1)) : true;
         if (!due) continue;
         const schMin = (o.hour != null ? o.hour : 10) * 60 + (o.minute || 0), nowMin = n.h * 60 + n.m;
