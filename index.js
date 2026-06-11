@@ -1136,7 +1136,7 @@ function extractRepo(raw) {
   return null;
 }
 // 조사 보고 결과 → 후속 실행안을 승인 게이트로(읽기전용 조사에 실행 선택지). 채널 한가할 때만.
-async function gateReportFollowup(client, channel, thread_ts, repo, reportOut) {
+async function gateReportFollowup(client, channel, thread_ts, repo, reportOut, directFix) {
   try {
     if (!reportOut) return;
     if (pendingDispatch[channel] && pendingDispatch[channel].at && Date.now() - pendingDispatch[channel].at > 30 * 60 * 1000) delete pendingDispatch[channel]; // 만료 제안은 비워 새 게이트 안 막히게
@@ -1144,14 +1144,15 @@ async function gateReportFollowup(client, channel, thread_ts, repo, reportOut) {
     const items = await extractActionItems(reportOut).catch(() => []);
     const humans = (items || []).filter(i => i && i.task && i.kind === 'human').slice(0, 5); // 사람만 할 수 있는 "확인 먼저"(쿼리·로그·대시보드) — 원인 확정 단계라 코드수정보다 앞
     const acts = (items || []).filter(i => i && i.task && i.kind !== 'human').slice(0, 4).map(i => { const r = repo || resolveRepo(i.task); const nm = r === SELF_REPO ? '봇' : (r || '').split('/').pop(); return { who: '조사후속', repo: r, task: `[${nm}] ${i.task}`, kind: ['investigate', 'build'].includes(i.kind) ? i.kind : 'investigate', source: 'report' }; });
-    // 사람이 먼저 확인해야 원인이 갈리는 게 있으면 → 그걸 게이트(선택지)로 먼저 띄우고, 코드수정은 사용자가 고른 뒤에만. 확정 전에 고치면 엉뚱한 데 손댐(grounding).
-    if (humans.length) {
-      for (const h of humans) addBlocker(repo, h.task, /쿼리|query|로그|log|dns|도메인/i.test(h.task) ? 'query' : 'todo'); // Wave1: 사람이 확인할 것도 당신차례 큐로 추적
+    for (const h of humans) addBlocker(repo, h.task, /쿼리|query|로그|log|dns|도메인/i.test(h.task) ? 'query' : 'todo'); // 사람이 확인할 것도 당신차례 큐로 추적
+    // directFix(다운진단처럼 봇이 이미 실측한 경우): 코드 픽스를 바로 게이트로, 사람 단계는 "추가 확인(선택)"으로만. 아니면 원인확정 먼저(verify-hold).
+    if (humans.length && !directFix) {
       pendingVerify[channel] = { acts, at: Date.now() }; // 수정안은 보류했다가 사용자가 정하면
       await postAs(client, channel, thread_ts, LEAD, `🔎 고치기 전에 원인부터 확정하자. 이것들은 코드 밖이라 내가 못 봐 — 네가 확인해줘:\n${humans.map((h, i) => `${i + 1}. ${h.task}`).join('\n')}\n\n결과(쿼리·로그 출력) 여기 붙여주면 어느 가설인지 확정하고 그 원인에 맞는 수정만 추려줄게. 확인 없이 바로 고쳐도 되면 아래 버튼.`);
       await postButtons(channel, thread_ts, [{ text: '▶ 확인 없이 바로 수정', id: 'verify_go', style: 'primary' }, { text: '넘어가', id: 'verify_skip' }]);
       return;
     }
+    if (humans.length && directFix) await postAs(client, channel, thread_ts, LEAD, `🔎 추가로 확인하면 더 정확(선택, 코드 밖이라 내가 못 봐): ${humans.map(h => h.task).join(' / ')}`); // 픽스는 아래 게이트로 바로
     if (acts.length) { await proposeOrAuto(client, channel, acts[0].repo, acts, '조사 결과 — 다음 실행 제안 ("실행"/"실행 1,3", 버튼). 안 할 거면 "넘어가"', { forceGate: true }); await postAs(client, channel, thread_ts, LEAD, '조사 결과 바탕으로 다음 실행안 위에 제안해놨어 — "실행"으로 승인하면 착수할게.'); }
   } catch (_) {}
 }
@@ -2265,6 +2266,18 @@ async function runBoardMeeting(client, channel, manual = false) {
   } catch (e) { try { stopTyping(channel); log('error', 'board-meeting-err', { e: String(e).slice(0, 150) }); await postAs(client, channel, undefined, LEAD, '경영회의 중 오류가 났어: ' + String(e).slice(0, 200)); } catch (_) {} }
 }
 // 운영 헬스체크 — 각 라이브 서비스 curl로 상태 확인 → 우정잉(QA/SRE)이 보고, 다운이면 윈터가 알림
+// 다운 시 봇이 직접 실측(curl/dig/openssl) — "너가 curl 쳐줘" 대신 봇이 앱-엣지 분기를 스스로 가른다. railway logs만 봇이 못 봐.
+async function runDownProbe(repo) {
+  const s = services[repo] || {}; const url = s.url; const lines = [];
+  let origin = ''; try { const src = ((bizData[repo] && bizData[repo].sources) || []).find(x => x.name === 'admin'); if (src && src.url) origin = src.url.replace(/^(https?:\/\/[^\/]+).*/, '$1'); } catch (_) {}
+  const host = u => (u || '').replace(/^https?:\/\//, '').split('/')[0];
+  const probe = async (u, label) => { if (!u) return; try { const r = await sh(`curl -sS -o /dev/null -w "%{http_code} %{time_total}s %{ssl_verify_result}" --max-time 12 '${u.replace(/'/g, '')}' 2>&1 | tail -1`); lines.push(`[${label}] ${u} → ${(r.out || r.err || '무응답(000)').trim().slice(0, 120)}`); } catch (_) { lines.push(`[${label}] ${u} → 실패`); } };
+  await probe(url, '웹');
+  await probe(s.healthUrl || (url ? url.replace(/\/$/, '') + '/health' : ''), '헬스EP');
+  if (origin && origin !== url) await probe(origin + '/health', 'Railway원본');
+  const h = host(url); if (h) { try { const d = await sh(`dig +short ${h} 2>/dev/null | head -3`); lines.push(`[DNS ${h}] ${(d.out || '').trim() || 'NXDOMAIN(레코드 없음)'}`); } catch (_) {} try { const c = await sh(`echo | timeout 10 openssl s_client -servername ${h} -connect ${h}:443 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null`); if (c.out && c.out.trim()) lines.push(`[인증서 ${h}] ${c.out.trim()}`); else lines.push(`[인증서 ${h}] 핸드셰이크 실패/만료`); } catch (_) {} }
+  return lines.join('\n');
+}
 async function checkServices(client, channel, announce = true, onlyAlert = false, startLine = null) {
   const sre = byName('윈터') || LEAD; // 운영·헬스체크 = 인프라
   const list = (channel ? svcList(channel) : Object.values(services)).filter(s => s.url); // channel=null이면 전체 라이브(자동 점검)
@@ -2318,7 +2331,7 @@ async function checkServices(client, channel, announce = true, onlyAlert = false
       if (s.lastStatus === 'down' && s.failStreak === 2 && s.repo && s.repo !== SELF_REPO && tch && !activeWork[tch] && !settings.paused && GITHUB_TOKEN) {
         await postAs(botClient, tch, undefined, sre, `${s.repo} 2연속 다운 — 원인 진단하고 고칠 수 있는 건 제안할게.`);
         activeWork[tch] = { task: '다운 진단', started: Date.now() };
-        runReport(botClient, tch, undefined, sre, s.repo, `이 서비스가 방금 다운됐어(HTTP ${s.downCode || '?'}). 배포·환경변수·의존성·런타임 에러·최근 변경 관점에서 가능한 원인을 코드 근거로 진단하고, 즉시 조치할 수 있는 구체 액션(설정 수정·핫픽스 등)을 제안해. 추측 말고 코드/로그 근거로.`).then(out => gateReportFollowup(botClient, tch, undefined, s.repo, out)).catch(() => {}).finally(() => { activeWork[tch] = null; }); // 진단 후 고칠 수 있는 건 실행 게이트로
+        runDownProbe(s.repo).catch(() => '').then(probe => { if (probe) postAs(botClient, tch, undefined, sre, `직접 때려본 실측이야:\n${probe}`).catch(() => {}); return runReport(botClient, tch, undefined, sre, s.repo, `이 서비스가 방금 다운됐어(HTTP ${s.downCode || '?'}). 아래는 내가 직접 curl·dig·openssl로 때려본 실측 결과야 — 이걸 1차 근거로 원인을 코드+실측으로 확정해라. 먼저 앱 다운이냐 도메인/인증서(엣지)냐부터 가르고(실측에 답이 있다), 코드로 고칠 수 있는 건 구체 핫픽스로. 사용자한테 curl·dig 다시 시키지 마(내가 이미 했다). 정말 railway logs가 필요할 때만 그것만 사용자에게 요청. 추측 금지.\n\n[내가 직접 한 실측]\n${probe || '(실측 실패 — 네트워크 도구 막힘)'}`); }).then(out => gateReportFollowup(botClient, tch, undefined, s.repo, out, true)).catch(() => {}).finally(() => { activeWork[tch] = null; }); // 봇이 실측 직접 → 진단 → 픽스 바로 게이트(directFix)
       }
     }
     return;
