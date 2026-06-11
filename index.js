@@ -428,7 +428,7 @@ async function runLegalReview(client, channel, thread_ts, dir, repo, task) {
   } catch (_) {}
 }
 // ── 실제 작업 모드: 레포 클론 → claude 코드 작업 → 브랜치 push → PR → 보고 ──
-let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {}; const pendingPlan = {}; const pendingSchedule = {}; const pendingMcp = {}; const pendingRhythm = {}; const pendingDesign = {}; const pendingPayment = {}; const limitedResume = {}; const pendingOpp = {}; const pendingVerify = {}; const lastPR = {}; // 한도 재개 대기 + 기회 스카우트 게이트 + 조사 "원인 확정 먼저" 게이트 + 채널별 최근 PR(머지 버튼·명령용)
+let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {}; const pendingPlan = {}; const pendingSchedule = {}; const pendingMcp = {}; const pendingRhythm = {}; const pendingDesign = {}; const pendingPayment = {}; const limitedResume = {}; const pendingOpp = {}; const pendingVerify = {}; const lastPR = {}; const lastRepoAt = {}; // 한도 재개 대기 + 기회 스카우트 게이트 + 조사 "원인 확정 먼저" 게이트 + 채널별 최근 PR + lastRepo 갱신시점(stale 컨텍스트 재개 방지)
 const legalReviewedAt = {}; // repo → ts (법무·규제 검토 레포별 쿨다운 — 이어서/피드백 반복마다 재실행 방지)
 // 감사 C-16: 쿨다운 영속 — 봇이 자주 재배포되는데 메모리 전용이면 매 재시작마다 리셋돼 법무 재검토·중복 경보가 반복됨. (boot에서만 호출 — bizAlertSeen const 초기화 이후)
 const COOLDOWN_FILE = process.env.COOLDOWN_FILE || '/data/cooldowns.json';
@@ -958,7 +958,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   } else {
     await postAs(client, channel, thread_ts, LEAD, `🛠️ 작업 받았어\n레포: ${repo}\n할 일: ${task}\n클론하고 코드 손본 다음 ${forcePR ? 'PR로 올릴게(승인모드)' : WORK_BASE + '에 바로 반영할게'}. 좀 걸려.`);
   }
-  lastRepo[channel] = repo; persistLastRepo(); // 채널이 방금 다룬 레포 기억 (후속 "이거 고쳐줘" 문맥용, 재배포에도 유지)
+  lastRepo[channel] = repo; lastRepoAt[channel] = Date.now(); persistLastRepo(); // 채널이 방금 다룬 레포 + 시점 기억 (후속 "이거 고쳐줘" 문맥용 + stale 재개 방지)
   const prog = startProgress(channel, thread_ts, '일단 레포 받아오는 중');
   try {
   const cl = await sh(`rm -rf ${dir} && git clone https://x-access-token:${GITHUB_TOKEN}@github.com/${repo}.git ${dir} && chmod -R 777 ${dir} && git -C ${dir} config core.fileMode false`);
@@ -2816,7 +2816,7 @@ async function onWorkFailed(client, channel, thread_ts, jobId, err, ctx) {
   try {
     const repo = ctx.repo, attempt = ctx.recoverAttempt || 0;
     try { if (repo && ctx.task) bumpSkills(repo, ctx.task, false); } catch (_) {} // B-10: 잡 실패에 기여한 주입 스킬 강등
-    pausedWork[channel] = { ...ctx, recoverAttempt: attempt }; // "이어서"로 수동 재개 가능하게 보존
+    pausedWork[channel] = { ...ctx, recoverAttempt: attempt, at: Date.now() }; // "이어서"로 수동 재개 가능하게 보존(+시점)
     await postAs(client, channel, thread_ts, LEAD, `작업 실패 — #${jobId}${repo ? ' (' + repo.split('/').pop() + ')' : ''}\n${err.slice(0, 220)}`);
     if (OWNER_USER_ID && botClient && channel !== OWNER_USER_ID) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`[작업 실패] #${jobId} ${repo || ''}\n${err.slice(0, 300)}`) }).catch(() => {});
     if (settings.autoRecover === false || settings.paused || attempt >= RECOVER_CAP || isDestructive(ctx.task) || isDestructive(err)) {
@@ -2845,7 +2845,7 @@ function launchWork(client, channel, thread_ts, repo, task, newProject, forcePR,
   runWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName)
     .then(() => { // 한도로 멈춤 감지 → 자동 재개 대기 등록(리셋되면 틱이 이어감)
       const st = jobs[job.id] && jobs[job.id].status; const fctx = { ...ctx, repo: (activeWork[channel] && activeWork[channel].repo) || repo };
-      if (st === 'limited') { pausedWork[channel] = { ...fctx }; const prev = limitedResume[channel]; limitedResume[channel] = { ctx: fctx, at: Date.now(), lastTry: Date.now(), attempts: prev ? prev.attempts : 0 }; if (!prev && botClient) botClient.chat.postMessage({ channel, text: '한도 걸려서 멈췄어 — 리셋되면 멈춘 지점부터 자동으로 이어갈게. (급하면 "이어서")' }).catch(() => {}); }
+      if (st === 'limited') { pausedWork[channel] = { ...fctx, at: Date.now() }; const prev = limitedResume[channel]; limitedResume[channel] = { ctx: fctx, at: Date.now(), lastTry: Date.now(), attempts: prev ? prev.attempts : 0 }; if (!prev && botClient) botClient.chat.postMessage({ channel, text: '한도 걸려서 멈췄어 — 리셋되면 멈춘 지점부터 자동으로 이어갈게. (급하면 "이어서")' }).catch(() => {}); }
       else delete limitedResume[channel]; // 정상 완료 → 자동재개 해제
     })
     .catch(e => { const err = String(e).slice(0, 300); jobUpdateById(job.id, { status: 'failed', error: err.slice(0, 200) }); const fctx = { ...ctx, repo: (activeWork[channel] && activeWork[channel].repo) || repo }; onWorkFailed(client, channel, thread_ts, job.id, err, fctx).catch(() => {}); }) // #3/#4: 실패 표시+자동복구
@@ -3046,13 +3046,21 @@ async function handle(event, client) {
       await postAs(client, channel, thread_ts, LEAD, `#${jm[1]} 작업을 못 찾겠어. "작업현황"으로 번호 확인해줘.`); return;
     }
     // 재개 — 중단했던 작업을 새로 만들지 말고 그대로 이어감
-    if (!activeWork[channel] && pausedWork[channel] && (/^(이어서|이어가|이어|계속(해|하자|진행)?|마저|아까\s*거|이전\s*거)/.test(raw) || /^다시(\s*(해|해줘|진행|시작|시켜|돌려|돌려줘))?\s*$/.test(raw) || /(이전에|전에|아까)\s*하던\s*거|하던\s*거\s*(그대로|다시|이어)/.test(raw))) {
-      const pw = pausedWork[channel]; delete pausedWork[channel];
+    const resumeRe = raw => /^(이어서|이어가|이어|계속(해|하자|진행)?|마저|아까\s*거|이전\s*거)/.test(raw) || /^다시(\s*(해|해줘|진행|시작|시켜|돌려|돌려줘))?\s*$/.test(raw) || /(이전에|전에|아까)\s*하던\s*거|하던\s*거\s*(그대로|다시|이어)/.test(raw);
+    // 중단작업 재개 — 단 6시간 지난 오래된 것은 자동 재개 안 함(stale 컨텍스트가 무관한 옛 작업을 잡는 것 방지)
+    if (!activeWork[channel] && pausedWork[channel] && resumeRe(raw)) {
+      const pw = pausedWork[channel];
+      if (Date.now() - (pw.at || pw.started || 0) > 6 * 3600000) { delete pausedWork[channel]; await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}"이어서" 할 게 좀 오래된 거(${(pw.task || '').slice(0, 30)})뿐이야. 그거 맞으면 "그거 이어서", 아니면 방금 거(기회 스카우트 등)는 "기회 스카우트"처럼 콕 집어줘.`); return; }
+      delete pausedWork[channel];
       await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, 아까 "${(pw.task || '').slice(0, 40)}" 그거 다시 이어갈게.`);
       launchWork(client, channel, thread_ts, pw.repo, pw.task, pw.newProject, pw.forcePR, pw.projName);
       return;
     }
-    // "이어서"인데 보관된 중단작업은 없지만 직전 레포가 있으면 → 그 레포 미완성분(특히 사용자 화면) 마저 완성 ("다 끝냈어" 후에도 이어가게)
+    // 바레 "이어서"인데 보관된 중단작업 없음 + 직전 레포가 2시간 넘게 오래됐으면 → stale라 안 잡고 되물음(버그: 기회 스카우트 "이어서" 했는데 몇 시간 전 게임 빌드를 잡던 것)
+    if (!activeWork[channel] && !pausedWork[channel] && lastRepo[channel] && lastRepo[channel] !== SELF_HEAL_REPO && canCommand(event.user) && resumeRe(raw) && Date.now() - (lastRepoAt[channel] || 0) > 2 * 3600000) {
+      await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}뭘 이어서? 방금 돌던 게 있으면 콕 집어줘 — 기회 발굴이면 "기회 스카우트", 특정 만들던 거면 "${(lastRepo[channel] || '').split('/').pop()} 이어서"처럼. ("이어서"만으론 한참 전 ${(lastRepo[channel] || '').split('/').pop()} 작업을 잘못 잡을 뻔했어.)`); return;
+    }
+    // "이어서"인데 보관된 중단작업은 없지만 최근(2h내) 직전 레포가 있으면 → 그 레포 미완성분(특히 사용자 화면) 마저 완성
     if (!activeWork[channel] && !pausedWork[channel] && lastRepo[channel] && lastRepo[channel] !== SELF_HEAL_REPO && canCommand(event.user) && (/^(이어서|이어가|계속(해|하자|진행)?|마저|마저\s*해|이어서\s*(해|만들|완성|채워)|미완성.*완성|마무리(해|지어)?)\s*/.test(raw) || /^다시(\s*(해|해줘|진행|시작))?\s*$/.test(raw))) {
       const tgt = lastRepo[channel];
       await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, 직전에 만들던 ${tgt.split('/').pop()}에서 아직 미완성인 부분(특히 사용자 화면) 마저 완성할게.`);
