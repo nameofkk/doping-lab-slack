@@ -428,7 +428,7 @@ async function runLegalReview(client, channel, thread_ts, dir, repo, task) {
   } catch (_) {}
 }
 // ── 실제 작업 모드: 레포 클론 → claude 코드 작업 → 브랜치 push → PR → 보고 ──
-let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {}; const pendingPlan = {}; const pendingSchedule = {}; const pendingMcp = {}; const pendingRhythm = {}; const pendingDesign = {}; const pendingPayment = {}; const limitedResume = {}; const pendingOpp = {}; const pendingVerify = {}; // 한도 재개 대기 + 기회 스카우트 게이트 + 조사 "원인 확정 먼저" 게이트
+let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {}; const pendingPlan = {}; const pendingSchedule = {}; const pendingMcp = {}; const pendingRhythm = {}; const pendingDesign = {}; const pendingPayment = {}; const limitedResume = {}; const pendingOpp = {}; const pendingVerify = {}; const lastPR = {}; // 한도 재개 대기 + 기회 스카우트 게이트 + 조사 "원인 확정 먼저" 게이트 + 채널별 최근 PR(머지 버튼·명령용)
 const legalReviewedAt = {}; // repo → ts (법무·규제 검토 레포별 쿨다운 — 이어서/피드백 반복마다 재실행 방지)
 // 감사 C-16: 쿨다운 영속 — 봇이 자주 재배포되는데 메모리 전용이면 매 재시작마다 리셋돼 법무 재검토·중복 경보가 반복됨. (boot에서만 호출 — bizAlertSeen const 초기화 이후)
 const COOLDOWN_FILE = process.env.COOLDOWN_FILE || '/data/cooldowns.json';
@@ -653,6 +653,16 @@ function ghGet(path) {
       headers: { Authorization: `token ${GITHUB_TOKEN}`, Accept: 'application/vnd.github+json', 'User-Agent': 'doping-lab' } },
       r => { let b = ''; r.on('data', d => b += d); r.on('end', () => { try { resolve(JSON.parse(b)); } catch { resolve(null); } }); });
     req.on('error', () => resolve(null)); req.end();
+  });
+}
+// PR 머지용 PUT — 상태코드까지 받아 머지 가능/거부(405 체크실패·409 충돌)를 구분
+function ghPut(path, payload) {
+  return new Promise(resolve => {
+    const data = JSON.stringify(payload || {});
+    const req = https.request({ hostname: 'api.github.com', path, method: 'PUT',
+      headers: { Authorization: `token ${GITHUB_TOKEN}`, Accept: 'application/vnd.github+json', 'User-Agent': 'doping-lab', 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } },
+      r => { let b = ''; r.on('data', d => b += d); r.on('end', () => { let j = null; try { j = JSON.parse(b); } catch {} resolve({ status: r.statusCode, body: j }); }); });
+    req.on('error', () => resolve({ status: 0, body: null })); req.write(data); req.end();
   });
 }
 const GH_OWNER = 'nameofkk';
@@ -1063,9 +1073,10 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   jobUpdate(channel, { status: 'awaiting-approval', artifacts: [url], note: 'PR 머지 대기' });
   // 감사 B-9: PR 경로(승인작업·스케줄·프로드·selfHeal 등 주력 실행)에서도 학습. PR은 머지 전이라 사실은 source='PR작업'으로 구분, 스킬은 심사통과+완성된 것만.
   if (repo) { extractFacts(repo, `[PR작업] ${task}\n[한 일] ${(res.text || '').slice(0, 1500)}`, 'PR작업').catch(() => {}); if (criticPass && !incomplete) { extractSkill(repo, `[성공한 작업·PR] ${task}\n[한 일] ${(res.text || '').slice(0, 1500)}`).catch(() => {}); try { bumpSkills(repo, task, true); } catch (_) {} } }
-  if (pr && pr.html_url) addBlocker(repo, `PR 머지: ${task.slice(0, 50)} — ${url}`, 'merge'); // Wave1: PR 머지 대기를 당신차례 큐로(잊고 안 머지하는 것 방지)
+  if (pr && pr.html_url) { addBlocker(repo, `PR 머지: ${task.slice(0, 50)} — ${url}`, 'merge'); lastPR[channel] = { repo, num: pr.number, url, at: Date.now() }; } // Wave1: PR 머지 대기를 당신차례 큐로 + 채널 최근 PR 기억(머지 버튼·명령용)
   const prWhy = forcePR ? '승인모드라' : prodForced ? '프로드(라이브) 서비스라 안전하게' : incompleteForced ? '아직 미완성이라 main 직행 막고' : '';
-  await postAs(client, channel, undefined, LEAD, `${mention(channel)}${doneHead} ${prWhy} PR로 올렸어 (머지하면 반영).\nPR: ${url}\n코드 브라우저로 보려면: https://github.dev/${repo}`); // 최종 결과 top-level
+  await postAs(client, channel, undefined, LEAD, `${mention(channel)}${doneHead} ${prWhy} PR로 올렸어.\nPR: ${url}\n코드 브라우저로 보려면: https://github.dev/${repo}\n\n머지는 내가 할 수 있어 — 확인하고 "머지"(또는 아래 버튼) 하면 CI 초록인지 보고 머지할게. (프로드라 머지 결정은 네 승인으로)`); // 최종 결과 top-level
+  if (pr && pr.html_url && !incomplete) await postButtons(channel, undefined, [{ text: '✅ 머지하기', id: 'pr_merge', style: 'primary', value: `${repo}#${pr.number}` }, { text: '나중에', id: 'pr_later', value: `${repo}#${pr.number}` }]).catch(() => {}); // 미완성이면 머지 버튼 안 띄움
   if (summaryMsg) await postAs(client, channel, undefined, LEAD, `결과 요약\n${summaryMsg}`);
   postFeedbackButtons(channel, undefined, '결과 보고 바꿀 점 있으면 "피드백 주기"로 줘 — "이어서"로 그 부분만 다시 손볼게.').catch(() => {});
   if (newProject && !incomplete) await handoffChecklist(client, channel, undefined, repo, task);
@@ -1551,6 +1562,26 @@ let blkSeq = 0;
 function addBlocker(repo, what, kind) { if (!what) return null; const sig = String(what).toLowerCase().replace(/[^a-z0-9가-힣]/g, '').slice(0, 40); if (blockers.some(b => b.status === 'open' && b.sig === sig)) return null; const b = { id: ++blkSeq, repo: repo || null, what: String(what).slice(0, 200), kind: kind || 'todo', sig, at: Date.now(), status: 'open', lastNudge: Date.now() }; blockers.push(b); if (blockers.length > 200) blockers = blockers.slice(-200); persistBlockers(); return b; }
 function resolveBlocker(id) { const b = blockers.find(x => x.id === id || x.sig === id); if (b) { b.status = 'done'; b.doneAt = Date.now(); persistBlockers(); } return b; }
 function openBlockers() { return blockers.filter(b => b.status === 'open'); }
+// 요청: PR을 봇이 머지(사람이 슬랙에서 승인 클릭한 뒤). 프로드는 "항상 사람 게이트" 안전선 그대로 — 봇이 무인 자율 머지하진 않는다. CI 초록(머지 가능)일 때만 — 깨진 코드가 프로드 자동배포로 나가는 것 방지.
+function resolvePRBlocker(repo, num) { try { const b = blockers.find(x => x.status === 'open' && x.kind === 'merge' && x.repo === repo && (String(x.what).includes('/pull/' + num) || String(x.what).includes('#' + num))); if (b) resolveBlocker(b.id); } catch (_) {} }
+async function mergePR(client, channel, thread_ts, repo, num, force) {
+  if (!GITHUB_TOKEN) { await postAs(client, channel, thread_ts, LEAD, 'GITHUB_TOKEN이 없어서 머지를 못 해.'); return; }
+  const pr = await ghGet(`/repos/${repo}/pulls/${num}`);
+  if (!pr || !pr.number) { await postAs(client, channel, thread_ts, LEAD, `PR #${num}을 못 찾았어 (${repo.split('/').pop()}).`); return; }
+  if (pr.merged) { resolvePRBlocker(repo, num); await postAs(client, channel, thread_ts, LEAD, `PR #${num}은 이미 머지됐어.`); return; }
+  if (pr.draft) { await postAs(client, channel, thread_ts, LEAD, `PR #${num}이 draft라 머지 못 해.`); return; }
+  const st = pr.mergeable_state; // clean / blocked(체크실패·필수리뷰) / unstable(체크진행) / dirty(충돌) / behind / draft
+  if (st === 'dirty') { await postAs(client, channel, thread_ts, LEAD, `PR #${num}에 충돌(conflict)이 있어 — 자동 머지 못 해. GitHub에서 충돌 풀어줘.`); return; }
+  if (!force && (st === 'blocked' || st === 'unstable')) { await postAs(client, channel, thread_ts, LEAD, `⚠️ PR #${num} 머지 보류(${st}) — CI 체크가 실패/진행중이거나 필수 리뷰가 걸려 있어. 깨진 코드 프로드 배포 막으려고 안 머지했어. CI 초록 되면 다시 "머지", 그래도 강행이면 "머지 강행 ${num}".`); return; }
+  const r = await ghPut(`/repos/${repo}/pulls/${num}/merge`, { merge_method: 'squash' });
+  if (r.status === 200 && r.body && r.body.merged) {
+    resolvePRBlocker(repo, num); try { addChangelog(repo, `PR #${num} 머지: ${(pr.title || '').slice(0, 80)}`); } catch (_) {}
+    try { logDecision(channel, 'pr-merge', `${repo}#${num}`); } catch (_) {}
+    await postAs(client, channel, thread_ts, LEAD, `✅ PR #${num} 머지했어 — main 반영 → 라이브 자동배포 돌아가 (${repo.split('/').pop()}). 배포·CI 결과는 워치독이 지켜봐.`);
+  } else {
+    await postAs(client, channel, thread_ts, LEAD, `머지 실패 (HTTP ${r.status}${r.body && r.body.message ? ' · ' + r.body.message : ''}). 브랜치 보호·필수체크·권한 때문일 수 있어 — GitHub에서 직접 머지하거나 토큰 권한 확인해줘.`);
+  }
+}
 function blockersView() { const ob = openBlockers(); if (!ob.length) return '지금 너한테 막힌 건 없어. 깔끔해.'; const kic = { key: '🔑', merge: '🔀', account: '👤', query: '🔍', dns: '🌐', decision: '🤔', todo: '☐' }; return ob.slice(0, 20).map(b => `${kic[b.kind] || '☐'} #${b.id} ${b.what}${b.repo ? ` (${b.repo.split('/').pop()})` : ''} _(${Math.round((Date.now() - (b.at || 0)) / 86400000)}일째)_`).join('\n'); }
 // ── Wave4: 회사 완성도 — 리스크 레지스터 + 릴리즈노트 + 자리비움 추적. ──
 const WAVE4_FILE = process.env.WAVE4_FILE || '/data/wave4.json';
@@ -3488,6 +3519,16 @@ async function handle(event, client) {
     // Wave1: 당신차례 큐 — 막힌 것(사람만 가능) 조회/완료
     if ((tm = raw.match(/(당신\s*차례|내\s*차례|막힌\s*거|막힌것|블로커)\s*(완료|해결|done)\s*#?(\w+)/i))) { const b = resolveBlocker(/^\d+$/.test(tm[3]) ? parseInt(tm[3], 10) : tm[3]); await postAs(client, channel, thread_ts, LEAD, b ? `해결 처리했어: ${b.what}` : '그 번호 막힌 건 못 찾겠어. "당신차례"로 목록 봐.'); return; }
     if (/(당신\s*차례|내\s*차례|막힌\s*거|막힌것|블로커|내가\s*할\s*거|todo)\s*[?？]?\s*$/i.test(raw)) { await postAs(client, channel, thread_ts, LEAD, `📋 당신 차례 (사람만 가능한 막힌 것 — 완료하면 "막힌거 완료 <번호>")\n${blockersView()}`); return; }
+    // PR 머지 — 사람 승인 후 봇이 CI 확인하고 머지. "머지"/"머지 5"/"머지 강행 5"/"PR 머지". 최근 PR 기억(lastPR)이나 번호 지정.
+    if (/^(pr\s*)?머지(\s*해(줘)?)?(\s*강행)?(\s*#?\d+)?\s*$/i.test(raw) && canCommand(event.user)) {
+      const force = /강행/.test(raw); const mm = raw.match(/\d+/);
+      let mRepo = (lastPR[channel] && lastPR[channel].repo) || extractRepo(raw), mNum = mm ? parseInt(mm[0], 10) : (lastPR[channel] && lastPR[channel].num);
+      if (!mRepo && extractRepo(raw)) mRepo = extractRepo(raw);
+      if (!mRepo || !mNum) { await postAs(client, channel, thread_ts, LEAD, '어느 PR을 머지할까? "머지 <번호>"로 알려줘 (최근 올린 PR이 기억 안 나거나 만료됐어). "당신차례"에서 PR 번호 확인돼.'); return; }
+      if (await guardBusy(client, channel, thread_ts)) return;
+      mergePR(client, channel, thread_ts, mRepo, mNum, force).catch(() => {});
+      return;
+    }
     // D4: 책임·진척 보드 — 약속 vs 실행 + 상태별
     if (/(진척\s*보드|진척\s*현황|책임\s*보드|진행\s*보드|약속.*실행|진척$)/i.test(raw)) {
       const board = progressBoard();
@@ -4054,6 +4095,20 @@ app.action(/^verify_/, async ({ ack, body, action }) => {
   } catch (e) { try { console.log('[verify-action] err', String(e).slice(0, 120)); } catch (_) {} }
 });
 // ── 피드백 루프 UI: 버튼 → 텍스트박스(모달) → 큐 적재 → 단계 경계에서 반영 ──
+// PR 머지 버튼 — 사람이 클릭(승인) → 봇이 CI 확인 후 머지. 프로드 무인 머지 금지(클릭 필수).
+app.action(/^pr_(merge|later)$/, async ({ ack, body, action }) => {
+  await ack();
+  try {
+    const channel = (body.channel && body.channel.id) || (body.container && body.container.channel_id); if (!channel) return;
+    const userId = body.user && body.user.id;
+    if ((ALLOWED.length && userId && !ALLOWED.includes(userId)) || !canCommand(userId)) { try { await botClient.chat.postMessage({ channel: userId, text: '머지는 운영 권한 있는 사람만 할 수 있어.' }); } catch (_) {} return; }
+    const msgTs = body.message && body.message.ts;
+    const v = (action.value || '').split('#'); const repo = v[0]; const num = parseInt(v[1], 10);
+    if (action.action_id === 'pr_later') { if (msgTs) { try { await botClient.chat.update({ channel, ts: msgTs, text: '나중에', blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `오케이, 나중에 — "머지 ${num || ''}"라고 하면 그때 할게.` } }] }); } catch (_) {} } return; }
+    if (msgTs) { try { await botClient.chat.update({ channel, ts: msgTs, text: '머지 확인 중…', blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `✅ 머지 요청 받음 — PR #${num} CI·머지가능 확인 중…` } }] }); } catch (_) {} }
+    if (repo && num) mergePR(botClient, channel, undefined, repo, num).catch(() => {});
+  } catch (e) { try { console.log('[pr] err', String(e).slice(0, 100)); } catch (_) {} }
+});
 app.action('fb_open', async ({ ack, body, action, client }) => { // [피드백 주기] 버튼 → 모달 열기
   await ack();
   try {
