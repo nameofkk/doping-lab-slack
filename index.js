@@ -2516,6 +2516,87 @@ async function runSelfImproveScan(client, channel, manual = false) {
   finally { try { await sh(`rm -rf ${dir}`); } catch (_) {} }
 }
 
+// ── CI 워치독 — push 후 GitHub Actions가 비동기로 도는 결과(실패)는 런타임 에러도 헬스다운도 아니라(구버전이 계속 서빙) 봇이 모르던 사각지대. 이걸 직접 감시 → 실패 시 진단 → 게이트 자가교정.
+const CI_FILE = process.env.CI_FILE || '/data/ci.json';
+let ciState = {}; // { 'owner/repo': { lastRunId, alertedRunId, failingSince } }
+function loadCI() { try { if (fs.existsSync(CI_FILE)) ciState = JSON.parse(fs.readFileSync(CI_FILE, 'utf8')) || {}; } catch { ciState = {}; } }
+function persistCI() { try { fs.writeFileSync(CI_FILE, JSON.stringify(ciState)); } catch {} }
+// 추적 대상: 등록된 서비스 레포 + 봇 자신. CI 워크플로 없는 레포는 runs가 비어 자연 스킵.
+function ciRepos() { const set = new Set(); for (const s of Object.values(services)) if (s.repo) set.add(s.repo); set.add(SELF_REPO); return [...set]; }
+function ciChannel(repo) { const s = Object.values(services).find(x => x.repo === repo); return settings.monitorChannel || channelForWork(repo, 'ci', (s && s.channel)) || settings.hqChannel || null; }
+// 실패 잡 로그 원문 — api.github.com이 302로 서명URL을 던지므로 ghGet(JSON파싱)으론 못 받음. 리다이렉트 따라가 텍스트로(서명URL엔 토큰 미전송=유출방지).
+function ghGetRaw(path) {
+  return new Promise(resolve => {
+    const get = (host, p, depth, auth) => {
+      if (depth > 4) return resolve('');
+      const headers = { 'User-Agent': 'doping-lab', Accept: 'application/vnd.github+json' };
+      if (auth) headers.Authorization = `token ${GITHUB_TOKEN}`;
+      const req = https.request({ hostname: host, path: p, method: 'GET', headers }, r => {
+        if (r.statusCode >= 300 && r.statusCode < 400 && r.headers.location) { try { const u = new URL(r.headers.location); r.resume(); return get(u.hostname, u.pathname + u.search, depth + 1, u.hostname === 'api.github.com'); } catch { return resolve(''); } }
+        let b = ''; r.on('data', d => b += d); r.on('end', () => resolve(b));
+      });
+      req.on('error', () => resolve('')); req.end();
+    };
+    get('api.github.com', path, 0, true);
+  });
+}
+// CI 로그(타임스탬프 프리픽스 붙은 원문)에서 에러성 줄만 추려 꼬리쪽(가장 최근 실패 구간) 반환
+function ciErrorLines(raw) {
+  if (!raw) return '';
+  const hit = raw.split('\n').filter(l => /error|fail|assert|exception|traceback|cannot|not found|exit code|no such|undefined|module|✕|✗|FAILED|\bE\d{3}\b/i.test(l)).map(l => l.replace(/^[0-9T:.\-Z]+\s/, '').trim()).filter(Boolean);
+  return hit.slice(-25).join('\n');
+}
+let ciScanning = false;
+async function checkCI(client, manual = false, onlyRepo = null) {
+  if (!GITHUB_TOKEN) { if (manual && client) await postAs(client, onlyRepo || settings.monitorChannel, undefined, LEAD, 'GITHUB_TOKEN이 없어서 CI를 못 봐.').catch(() => {}); return; }
+  if (ciScanning) return; ciScanning = true;
+  const found = [];
+  try {
+    const repos = (onlyRepo && onlyRepo.includes('/')) ? [onlyRepo] : ciRepos();
+    for (const repo of repos) {
+      try {
+        const runs = await ghGet(`/repos/${repo}/actions/runs?per_page=30&status=completed`);
+        const all = (runs && runs.workflow_runs) || [];
+        if (!all.length) continue; // CI 워크플로 없는 레포
+        // 레포에 워크플로가 여럿(Tests·Deploy 등)이라 "main 최신 1개"만 보면 나중에 돈 성공 워크플로가 실패한 테스트를 가린다 → 워크플로별 최신 run을 각각 확인
+        const byWf = new Map(); for (const r of all) { if (!['main', 'master'].includes(r.head_branch)) continue; if (!byWf.has(r.workflow_id)) byWf.set(r.workflow_id, r); } // runs는 desc 정렬 → 워크플로별 첫째=최신
+        for (const latest of byWf.values()) {
+          const key = `${repo}::${latest.workflow_id}`;
+          const st = ciState[key] || (ciState[key] = {}); st.lastRunId = latest.id;
+          if (latest.conclusion !== 'failure') {
+            if (st.alertedRunId && latest.conclusion === 'success') { const ch = ciChannel(repo); if (ch) postAs(client, ch, undefined, LEAD, `✅ CI 회복 — ${repo.split('/').pop()} "${latest.name}" 다시 초록. (${(latest.head_commit && latest.head_commit.message || latest.head_sha).split('\n')[0].slice(0, 60)})`).catch(() => {}); }
+            st.alertedRunId = null; st.failingSince = null; persistCI(); continue;
+          }
+          if (manual) found.push(`🔴 ${repo.split('/').pop()} "${latest.name}" — ${(latest.head_commit && latest.head_commit.message || latest.head_sha).split('\n')[0].slice(0, 50)}`);
+          if (st.alertedRunId === latest.id) { persistCI(); continue; } // 이미 이 run으로 처리함(중복 방지)
+          st.alertedRunId = latest.id; st.failingSince = st.failingSince || Date.now(); persistCI();
+          await handleCIFailure(client, repo, latest);
+        }
+      } catch (e) { try { log('error', 'ci-check', { repo, e: String(e).slice(0, 120) }); } catch (_) {} }
+    }
+    if (manual && client) { const ch = onlyRepo && !onlyRepo.includes('/') ? onlyRepo : (settings.monitorChannel || settings.hqChannel); if (ch) await postAs(client, ch, undefined, LEAD, found.length ? `CI 상태 점검:\n${found.join('\n')}\n\n빨간 건 자가교정 제안을 띄웠어(있으면).` : 'CI 점검 완료 — 추적 중인 레포 전부 초록이야.').catch(() => {}); }
+  } finally { ciScanning = false; }
+}
+async function handleCIFailure(client, repo, run) {
+  const ch = ciChannel(repo);
+  const jobsR = await ghGet(`/repos/${repo}/actions/runs/${run.id}/jobs`);
+  const failJobs = ((jobsR && jobsR.jobs) || []).filter(j => j.conclusion === 'failure');
+  const failSteps = failJobs.flatMap(j => (j.steps || []).filter(s => s.conclusion === 'failure').map(s => `${j.name} ▸ ${s.name}`));
+  let logTail = '';
+  try { if (failJobs[0]) logTail = ciErrorLines(await ghGetRaw(`/repos/${repo}/actions/jobs/${failJobs[0].id}/logs`)); } catch (_) {}
+  const commit = (run.head_commit && run.head_commit.message || '').split('\n')[0].slice(0, 80);
+  const summary = `🔴 CI 실패 — ${repo.split('/').pop()} "${run.name}"\n커밋: ${commit || run.head_sha.slice(0, 7)} (${run.head_sha.slice(0, 7)})\n실패 스텝: ${failSteps.slice(0, 5).join(', ') || '(미상)'}\n${run.html_url}`;
+  log('warn', 'ci-fail', { repo, run: run.id, steps: failSteps.slice(0, 3) });
+  logDecision(ch || repo, 'ci-fail', `${repo.split('/').pop()} ${failSteps[0] || run.name}`);
+  if (ch) await postAs(client, ch, undefined, LEAD, summary + (logTail ? `\n\n[에러 로그 발췌]\n${logTail.slice(0, 800)}` : '')).catch(() => {});
+  if (OWNER_USER_ID && botClient && ch !== OWNER_USER_ID && !settings.monitorChannel) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(summary) }).catch(() => {});
+  // 자가교정 게이트 — 진단+픽스를 한 작업으로 발의. 프로드·자기레포 모두 항상 승인 게이트(안전선). 한가할 때만.
+  if (ch && !activeWork[ch] && !pendingDispatch[ch] && !settings.paused) {
+    const task = `${repo} 의 GitHub Actions CI가 실패하고 있다(워크플로 "${run.name}", 커밋 "${commit}"). 실패 스텝: ${failSteps.join(', ') || '미상'}.${GROUNDING_RULE} 아래 CI 에러 로그는 단서(증상)일 뿐 — 레포를 클론해 해당 테스트/코드를 직접 열어 진짜 원인을 짚고 최소·안전하게 고쳐라. 가능하면 그 실패 테스트를 로컬에서 재현해 고친 뒤 통과를 확인(테스트DB 등 환경가정도 점검). 문법·임포트·의존성·환경변수 가정을 우선 확인. 무엇을 왜 고쳤는지 보고.\n\n[CI 에러 로그 발췌]\n${logTail.slice(0, 1500) || '(로그 못 받음 — 레포에서 직접 재현해라)'}`;
+    await proposeOrAuto(client, ch, repo, [{ who: 'CI', repo, task, kind: 'build', source: 'ci-heal' }], `🔧 CI 실패 자가교정 제안 — ${repo.split('/').pop()} (${repo === SELF_REPO ? '내 코드' : '프로드'}라 승인 필요)`);
+  }
+}
+
 // 제작 끝나고 핸드오프 — 에이전트가 끝낸 것(✅)과 사람만 할 수 있는 것(☐ 체크리스트)을 구분해서 보고
 async function handoffChecklist(client, channel, thread_ts, repo, task) {
   const t = task || '';
@@ -3065,6 +3146,11 @@ async function handle(event, client) {
       const fmt = list.map(s => `· ${s.repo}${s.url ? ' → ' + s.url : ' (라이브 미배포)'}${s.lastStatus ? ' [' + (s.lastStatus === 'up' ? '🟢' : '🔴') + ']' : ''}`).join('\n');
       await postAs(client, channel, thread_ts, LEAD, `우리가 운영 중인 서비스 (${list.length}개)\n${fmt}`);
       return;
+    }
+    // CI 상태 점검 — GitHub Actions(빌드·테스트) 빨간 거 있나 직접 확인 + 빨간 건 자가교정 제안
+    if (/(\bci\b|씨아이|빌드\s*상태|액션\s*상태|테스트\s*상태|github\s*actions).*(점검|확인|상태|봐|어때|체크)?|ci\s*(점검|체크|상태|확인)/i.test(raw)) {
+      await postAs(client, channel, thread_ts, LEAD, 'GitHub Actions(CI) 상태 직접 확인할게…');
+      checkCI(client, true, channel).catch(() => {}); return;
     }
     // D5: 서비스 담당 채널 지정/해제/현황 — 이 채널을 특정 서비스 전담으로(자동 브리핑·알림 라우팅)
     if (/모니터링\s*채널\s*(해제|취소|풀어|off)/i.test(raw) && canCommand(event.user)) { settings.monitorChannel = null; if (settings.sentinel) settings.sentinel.channel = null; persistSettings(); await postAs(client, channel, thread_ts, LEAD, '모니터링 채널 해제했어 — 다시 서비스별 채널 + 너 DM으로 가.'); return; }
@@ -3870,7 +3956,7 @@ async function postButtons(channel, thread_ts, buttons) {
   loadMemory();
   loadRules();
   loadSettings();
-  loadTasks(); loadJobs(); loadFacts(); loadSkills(); loadOntology(); loadSouls(); loadOpps(); loadRoadmap(); loadBlockers(); loadWave4(); buildMcpConfig(); loadDecisions(); loadUsage(); loadBiz(); loadExperiments(); loadPendingDispatch(); loadOpsConfig();
+  loadTasks(); loadJobs(); loadFacts(); loadSkills(); loadOntology(); loadSouls(); loadOpps(); loadRoadmap(); loadBlockers(); loadWave4(); buildMcpConfig(); loadDecisions(); loadUsage(); loadBiz(); loadExperiments(); loadPendingDispatch(); loadOpsConfig(); loadCI();
   loadLastRepo();
   loadServices();
   loadPending();
@@ -3930,6 +4016,8 @@ async function postButtons(channel, thread_ts, buttons) {
     // 실시간 헬스 감시 — 전체는 2분마다 onlyAlert(다운·이상 즉시 공유), 이미 실패/이상난 서비스는 매분 즉시 재확인(빠른 확정·복구·자동진단)
     if (n.m % 2 === 0) checkServices(botClient, null, false, true).catch(() => {}); // 전체를 서비스별 담당 채널로 라우팅 점검
     else if (Object.values(services).some(s => s.url && ((s.failStreak || 0) >= 1 || (s.issues || []).length))) checkServices(botClient, null, false, true).catch(() => {}); // 이상난 게 있을 때만 매분 재확인
+    // CI 워치독 — push 후 GitHub Actions 비동기 결과(실패)를 직접 폴링→진단→게이트 자가교정. ~7분 주기(레포당 API 1~2콜, 가벼움). 헬스다운/런타임에러로 안 잡히던 사각지대.
+    if (GITHUB_TOKEN && n.m % 7 === 0 && !settings.paused) checkCI(botClient).catch(() => {});
     // M3: 일별 사업 지표 수집 전용(경보·LLM 없이 history만 쌓음) — 선제감시 "전일 대비" prev/cur 일관 확보. 매일 새벽 첫 틱 1회.
     if (bizFetchDay !== n.day && n.h >= 5 && Object.keys(bizData).length) {
       bizFetchDay = n.day;
