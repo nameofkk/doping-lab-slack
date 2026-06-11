@@ -1203,6 +1203,7 @@ async function runReport(client, channel, thread_ts, reporter, repo, task) {
     const GROUND = '\n\n[사실 근거 규칙 — 엄격] 레포 코드/파일로 직접 확인되는 것만 사실로 말해라. 배포 여부, 앱스토어·플레이스토어 제출/승인 여부, 실제 유저 수, 매출, 광고 활성화 여부 같은 외부·운영 상태는 코드만으론 절대 알 수 없다. 코드에 준비/설정이 있어도 "제출됨/출시됨/활성화됨"이라고 단정하지 마. 그런 건 "코드엔 준비돼 있는데 실제 제출/활성화 여부는 확인 안 됨"으로 표시해라. 지어내면 안 된다.';
     const res = await runClaude(`이 저장소를 실제로 열어보고, 아래 UNTRUSTED 마커 안의 사용자 요청에 직접 답해라.${UNTRUSTED_PREAMBLE}\n사용자 요청:\n${wrapUntrusted(task)}\n 단순 현황 나열이 아니라, 레포에서 확인한 사실을 근거로 실제 답·제안·전략을 내라. 코드는 읽기만 해. 레포에 없는 시장·경쟁사·트렌드·벤치마크는 웹서치(WebSearch)로 찾아서 근거로 써도 돼.${GROUND}${rulesCtx(channel)}${recallFacts(repo, task)}${ontologyQuery(task, repo)}\n\n역할별로 각자 그 요청에 대한 자기 분야의 답/제안을 줘. 각 줄 "역할: 답/제안" 형식(관련된 역할만, PM/리서처/UX/아키텍트/보안/마케터). 질문 분야의 담당이 메인으로 구체적인 안을 내고(예: 마케팅 질문이면 마케터가 채널·메시지·실행안까지), 나머지는 거들어. 한 역할당 2~4줄.${PLAIN}`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 540000);
     if (res.limited) { await postAs(client, channel, thread_ts, reporter, `${mention(channel)}⏳ 조사 중에 클로드 사용량 한도에 걸렸어. 리셋되면 다시 봐줄게.`); return; }
+    if (workCancel[channel]) { delete workCancel[channel]; return reportOut; } // 중단 요청 시 결과 게시 안 함(전엔 조사 결과를 그대로 써버려서 "중단했는데 왜 뭘 써주냐" 버그)
     const n = await distributeReport(client, channel, thread_ts, res.text);
     if (!n) await postAs(client, channel, thread_ts, reporter, (res.text || '(내용 없음)').trim().slice(0, 9000));
     // 반론자 안다연 — 위 의견들 검토해서 약점/리스크/근거 약한 부분 반박 (특히 코드로 확인 안 된 걸 사실처럼 말한 거)
@@ -2314,7 +2315,10 @@ async function runBoardMeeting(client, channel, manual = false) {
     const finalText = finalFocus.map((f, i) => `${i + 1}. [${f.repo}] ${f.task} (타겟: ${f.target || '?'})`).join('\n');
     const items = finalFocus.map(f => { const rr = resolveRepo(f.repo || 'bot'); const nm = rr === SELF_REPO ? '봇' : rr.split('/').pop(); return { who: '경영회의', repo: rr, task: `[${nm}] ${f.task}${f.target ? ` (타겟: ${f.target})` : ''}`, kind: f.kind, targetKey: validMetricKey(f.target_key), source: 'board' }; });
     await proposeOrAuto(client, channel, items[0].repo, items, '경영회의 최종 결정 — 이번 주 집중 과제 (반론 반영 후)', { forceGate: true });
-    if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`주간 경영회의 다이제스트\n${digest.slice(0, 900)}${finalNote ? `\n\n[반론 반영 최종]\n${finalNote.slice(0, 500)}` : ''}\n\n이번 주 집중:\n${finalText}`) }).catch(() => {});
+    const digestMsg = scrubOutput(`주간 경영회의 다이제스트\n${digest.slice(0, 900)}${finalNote ? `\n\n[반론 반영 최종]\n${finalNote.slice(0, 500)}` : ''}\n\n이번 주 집중:\n${finalText}`);
+    const deskCh = settings.monitorChannel || settings.hqChannel; // 지정채널 있으면 거기로, 없을 때만 OWNER DM(브리핑·다이제스트가 DM으로 새던 것 통일)
+    if (deskCh && deskCh !== channel) { await postAs(client, deskCh, undefined, LEAD, digestMsg).catch(() => {}); }
+    else if (!deskCh && OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: digestMsg }).catch(() => {});
   } catch (e) { try { stopTyping(channel); log('error', 'board-meeting-err', { e: String(e).slice(0, 150) }); await postAs(client, channel, undefined, LEAD, '경영회의 중 오류가 났어: ' + String(e).slice(0, 200)); } catch (_) {} }
 }
 // 운영 헬스체크 — 각 라이브 서비스 curl로 상태 확인 → 우정잉(QA/SRE)이 보고, 다운이면 윈터가 알림
@@ -2436,7 +2440,7 @@ async function runOpsBriefing(client, channel, manual = false) {
     const staleBlk = openBlockers().filter(b => Date.now() - (b.at || 0) > 3 * 86400000);
     const nudge = staleBlk.length ? `\n\n⏳ 너한테 막힌 지 오래된 것 ${staleBlk.length}건 — ${staleBlk.slice(0, 4).map(b => `${b.what.slice(0, 40)}(${Math.round((Date.now() - b.at) / 86400000)}일)`).join(', ')}. "당신차례"로 전체 확인.` : '';
     if (channel) await postAs(client, channel, undefined, LEAD, `🗞️ 운영 브리핑\n${text}${nudge}`);
-    if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: `🗞️ 운영 브리핑\n${scrubOutput(text)}${nudge}` }).catch(() => {});
+    if (!channel && OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: `🗞️ 운영 브리핑\n${scrubOutput(text)}${nudge}` }).catch(() => {}); // 채널에 올렸으면 OWNER DM 중복 금지 — 지정채널 없을 때만 DM 폴백(버그: 채널·DM 둘 다 가서 DM에 자꾸 떴음)
     // ④개선 후보 → 착수 가능한 액션으로 뽑아 승인 게이트(읽기전용 브리핑에 실행 유도). 채널 한가할 때만.
     if (channel && r.ok !== false && !pendingDispatch[channel] && !activeWork[channel]) {
       const items = await extractActionItems(text).catch(() => []);
@@ -4146,7 +4150,8 @@ async function postButtons(channel, thread_ts, buttons) {
     }
     // D5/D2: 정기 업무 — opsConfig(홈에서 편집) 기반 스케줄러. 한 틱에 due+한가한 작업 1건만 → 자연 스태거(와르르 방지). 전역정지 시 스킵.
     if (!settings.paused) {
-      const defCh = settings.hqChannel || [...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))][0] || Object.keys(lastRequester)[0] || null;
+      // 지정 채널: 경영(hq) > 모니터링 > 서비스 채널. 절대 lastRequester(유저 DM)로 폴백하지 않는다 — 그게 운영 브리핑이 한로로 DM으로 가던 버그. 지정 채널 없으면 자동 ops는 스킵(DM 스팸 금지).
+      const defCh = settings.hqChannel || settings.monitorChannel || [...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))][0] || null;
       for (const id of OPS_ORDER) {
         const o = opsConfig[id]; if (!o || !o.enabled || o.lastRunDay === n.day) continue;
         const due = o.cadence === 'weekly' ? (n.dow === (o.dow != null ? o.dow : 1)) : o.cadence === 'monthly' ? (n.dom === (o.dom || 1)) : true;
@@ -4175,7 +4180,8 @@ async function postButtons(channel, thread_ts, buttons) {
       runBizSentinel(botClient, null, false).catch(() => {});
     }
     // Q3: 드리프트 알림 — OWNER에게 DM. 잡 실패율 급증=1h 쿨다운, 한도걸림 스파이크=하루 1회(영속 dedup, 재시작에도 안 되풀이). OWNER_USER_ID 없으면 스킵.
-    if (OWNER_USER_ID) {
+    const driftCh = settings.monitorChannel || settings.hqChannel || OWNER_USER_ID; // 드리프트도 지정채널 우선(없으면 OWNER DM) — 자동 경보가 DM으로만 새던 것 통일
+    if (driftCh) {
       const recent = Object.values(jobs).filter(j => Date.now() - (j.updatedAt || 0) < 3600000);
       const fails = recent.filter(j => j.status === 'failed').length, total = recent.filter(j => /^(done|failed|cancelled|limited)$/.test(j.status)).length;
       const failRate = total >= 4 ? fails / total : 0;
@@ -4183,11 +4189,11 @@ async function postButtons(channel, thread_ts, buttons) {
       if (failRate > 0.3 && Date.now() - driftAt > 3600000) { // 실패율 급증 — 1h 쿨다운
         driftAt = Date.now();
         log('warn', 'drift-alert', { kind: 'failrate', failRate: Math.round(failRate * 100), fails, total });
-        botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`⚠️ 드리프트 감지 — 최근 1시간 잡 실패율 ${Math.round(failRate * 100)}% (${fails}/${total}). 로그 확인 필요.`) }).catch(() => {});
+        botClient.chat.postMessage({ channel: driftCh, text: scrubOutput(`⚠️ 드리프트 감지 — 최근 1시간 잡 실패율 ${Math.round(failRate * 100)}% (${fails}/${total}). 로그 확인 필요.`) }).catch(() => {});
       } else if ((usageStat.limitedHits || 0) >= 10 && settings.driftLimitDay !== today) { // 한도걸림 스파이크 — 하루 1회만
         settings.driftLimitDay = today; persistSettings();
         log('warn', 'drift-alert', { kind: 'limit', limitedHits: usageStat.limitedHits });
-        botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`⚠️ 오늘 클로드 한도걸림 ${usageStat.limitedHits}회 — 사용량 좀 많아. 자동 작업이 한도 리셋 후 알아서 재개돼(따로 안 해도 됨). 계속 많으면 팀장 모델을 가볍게(Railway env LEAD_MODEL=opus) 하거나 정기업무 주기를 늘려봐. (이 알림은 하루 한 번만)`) }).catch(() => {});
+        botClient.chat.postMessage({ channel: driftCh, text: scrubOutput(`⚠️ 오늘 클로드 한도걸림 ${usageStat.limitedHits}회 — 사용량 좀 많아. 자동 작업이 한도 리셋 후 알아서 재개돼(따로 안 해도 됨). 계속 많으면 팀장 모델을 가볍게(Railway env LEAD_MODEL=opus) 하거나 정기업무 주기를 늘려봐. (이 알림은 하루 한 번만)`) }).catch(() => {});
       }
     }
   }, 60000);
