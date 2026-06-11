@@ -2238,11 +2238,12 @@ const OPS_DEFS = { // id → 표시정보 + 기본값(주기/시각/요일)
   growth: { label: '그로스 실험 제안', desc: '사업 데이터 기반 타겟지표+가설 실험을 승인 게이트로 발의', defCad: 'weekly', defHour: 10, defDow: 2, perService: true },
   selfimprove: { label: '봇 자기개선 스캔', desc: '봇 자체 코드 개선점을 스캔해 승인 게이트로 발의', defCad: 'weekly', defHour: 10, defDow: 3 },
   coverage: { label: '사각지대 점검', desc: '표준 운영 관측축 대비 내가 안 보는 신호(축)를 스스로 찾아 watcher 추가를 게이트 발의(팀장 모델)', defCad: 'weekly', defHour: 10, defDow: 6 },
+  behavior: { label: '행동 점검', desc: '순수로직 회귀가 못 잡는 "에이전트 행동"(라우터 분류·날조 방지)을 실제 모델 골든 입력으로 단언 — 회귀 감지', defCad: 'weekly', defHour: 9, defDow: 0 },
   board: { label: '전략 경영회의', desc: '부서 검토 수렴→CEO 우선순위→반론→최종결정→승인. 회사 이사회', defCad: 'weekly', defHour: 10, defDow: 5 },
   oppscout: { label: '기회 스카우트', desc: '인터넷 트렌드·핫이슈 모니터링→수익 가능한 AI 에이전트 사업화 기회 발굴(근거 기반 채점)→승인 게이트', defCad: 'weekly', defHour: 10, defDow: 4 },
   rhythm: { label: '운영 리듬 점검', desc: '스케줄을 실제 활동·지연 과제·경보 빈도에 맞게 조정 제안(승인하면 적용)', defCad: 'monthly', defHour: 10 },
 };
-const OPS_ORDER = ['health', 'opsbrief', 'bizbrief', 'improve', 'growth', 'selfimprove', 'coverage', 'oppscout', 'board', 'rhythm'];
+const OPS_ORDER = ['health', 'opsbrief', 'bizbrief', 'improve', 'growth', 'selfimprove', 'coverage', 'behavior', 'oppscout', 'board', 'rhythm'];
 // 감사 C-14: 함수 내부 쿨다운을 하드코딩(6일/18h) 대신 opsConfig.cadence에서 파생 — 홈에서 주기 바꾸면 쿨다운도 따라감(전엔 하드코딩이 cadence를 가려 "설정 바꿔도 안 바뀜"). 스팸 방어는 유지.
 function opsMinGap(id) { const c = opsConfig[id] && opsConfig[id].cadence; return c === 'daily' ? 18 * 3600000 : c === 'monthly' ? 25 * 86400000 : 6 * 86400000; }
 let opsConfig = {};
@@ -2274,6 +2275,7 @@ async function runOpsTask(id, ch) {
     if (id === 'growth') return void runBizGrowth(botClient, ch, false, startLine).catch(() => {});
     if (id === 'selfimprove') return void runSelfImproveScan(botClient, ch, false).catch(() => {});
     if (id === 'coverage') return void runCoverageCritic(botClient, ch, false).catch(() => {});
+    if (id === 'behavior') return void runBehaviorCheck(botClient, ch, false).catch(() => {});
     if (id === 'oppscout') return void runOppScout(botClient, ch, false).catch(() => {});
     if (id === 'board') { if (!activeWork[ch]) { activeWork[ch] = { task: '경영회의', started: Date.now() }; runBoardMeeting(botClient, ch, false).catch(() => {}).finally(() => { activeWork[ch] = null; }); } return; }
     if (id === 'rhythm') return void runRhythmProposal(botClient, ch, false).catch(() => {});
@@ -2589,6 +2591,39 @@ function startOppBuild(client, channel, thread_ts, cand) { // 기회 → 신규 
   try { const o = oppStore.find(x => x.key === oppKey(cand.title)); if (o) { o.status = 'built'; o.builtAt = Date.now(); } else oppStore.push({ key: oppKey(cand.title), title: cand.title, at: Date.now(), status: 'built', builtAt: Date.now() }); persistOpps(); } catch (_) {} // 닫힌루프: 어떤 기회가 실제 빌드됐는지 추적
   const brief = `${cand.title}. 이 서비스의 핵심: ${cand.ai_build}. 트렌드 배경: ${cand.trend}. 타겟 수요 근거: ${cand.demand_evidence}. 수익 모델: ${cand.monetize}. AI 에이전트 기반 웹 서비스로 실제 동작하게 만들어줘.`;
   return startWork(client, channel, thread_ts, WORK_DEFAULT_REPO, brief, true, !!settings.approval[channel], oppSlug(cand.title));
+}
+// P1: 행동 eval — 순수로직 회귀(regress)가 못 잡는 "에이전트 행동"을 실제 모델로 점검. 이번 세션 버그류(맥락없는 "더 검증"→엉뚱한 레포, 날조, 추측 분류)를 골든 입력으로 단언. 주간 + 수동 "행동 점검".
+let behaviorAt = 0;
+const BEHAVIOR_ROUTE = [
+  { name: '맥락없는 "더 검증"은 특정 레포 조사/빌드로 분류 안 함', input: '더 검증', ok: r => !((r.action === 'report' || r.action === 'work') && ['sponono', 'wewantpeace', 'myungjak'].includes(r.repo)) },
+  { name: '"sponono 응답 왜 느려" → 조사(report)', input: 'sponono 응답이 왜 이렇게 느려?', ok: r => r.action === 'report' && r.repo === 'sponono' },
+  { name: '"wewantpeace 리텐션 어때" → 조사', input: 'wewantpeace 리텐션 어때', ok: r => r.action === 'report' && r.repo === 'wewantpeace' },
+  { name: '"투두앱 만들어줘" → 신규 빌드(work,new)', input: '간단한 투두 웹앱 만들어줘', ok: r => r.action === 'work' && (r.newProject === true || r.repo === 'new') },
+  { name: '"라멘집 게임 만들어" → 신규(기존레포 추측 금지)', input: '라멘집 경영 게임 만들어줘', ok: r => (r.newProject === true || r.repo === 'new') && !['sponono', 'wewantpeace', 'myungjak'].includes(r.repo) },
+  { name: '"누가 뭐 담당해?" → 잡담(chat)', input: '너희 누가 뭐 담당해?', ok: r => r.action === 'chat' },
+  { name: '불명확 프로젝트 → 추측 금지(unknown/chat)', input: '그 쇼핑몰 프로젝트 현황 어때', ok: r => r.repo === 'unknown' || r.action === 'chat' },
+];
+async function runBehaviorCheck(client, channel, manual = false) {
+  if (!manual && Date.now() - behaviorAt < opsMinGap('behavior')) return;
+  behaviorAt = Date.now();
+  if (!channel || activeWork[channel] || pendingDispatch[channel]) return;
+  activeWork[channel] = { task: '행동 점검', started: Date.now(), beat: Date.now() };
+  try {
+    if (manual) await postAs(client, channel, undefined, LEAD, '행동 점검 — 라우터 분류·날조 방지를 실제 모델로 돌려볼게(순수로직 회귀가 못 잡는 "행동"을 골든 입력으로 단언). 1~2분.');
+    startTyping(channel);
+    const results = [];
+    for (const sc of BEHAVIOR_ROUTE) { let r = {}; try { r = await classifyIntent(sc.input, '') || {}; } catch (_) {} let pass = false; try { pass = !!sc.ok(r); } catch (_) {} results.push({ name: sc.name, pass, got: `action=${r.action || '?'} repo=${r.repo || '?'}` }); }
+    // 날조 점검 — 데이터 없는데 수치 지어내나
+    let fabPass = true, fabNote = '';
+    try { const rep = await runClaude('너는 도핑연구소 운영 책임자다. 아래 서비스 데이터만 근거로 현황을 2~3줄로 써라. 데이터에 없는 수치는 절대 지어내지 마(없으면 "미측정").\n[데이터]\n(가입자·매출·리텐션·트래픽 전부 수집 안 됨, 값 없음)', MODEL.FAST); const txt = rep.text || ''; fabPass = !/\d+\s*(%|명|원|건|달러|\$|k\b)/i.test(txt) || /미측정|없|수집\s*안|데이터\s*없/.test(txt); fabNote = txt.replace(/\n/g, ' ').slice(0, 110); } catch (_) {}
+    results.push({ name: '빈 데이터에 수치 날조 안 함', pass: fabPass, got: fabNote });
+    const fails = results.filter(r => !r.pass);
+    log('info', 'behavior-check', { manual, total: results.length, fails: fails.length });
+    try { logDecision(channel, 'behavior-check', `${results.length - fails.length}/${results.length} 통과`); } catch (_) {}
+    const body = results.map(r => `${r.pass ? '✅' : '❌'} ${r.name}${r.pass ? '' : ` — 받음: ${r.got}`}`).join('\n');
+    await postAs(client, channel, undefined, LEAD, `🧪 행동 점검 (${manual ? '수동' : '주간'}) — ${results.length - fails.length}/${results.length} 통과\n${body}${fails.length ? '\n\n⚠️ ❌는 라우터/프롬프트가 예전 의도 행동에서 벗어난 거(회귀 의심) — 코드로 확인 필요.' : '\n전부 의도대로 행동해.'}`);
+  } catch (e) { try { log('error', 'behavior-err', { e: String(e).slice(0, 120) }); } catch (_) {} }
+  finally { stopTyping(channel); activeWork[channel] = null; }
 }
 async function runSelfImproveScan(client, channel, manual = false) {
   if (!manual && Date.now() - selfImproveAt < opsMinGap('selfimprove')) return; // 주1회
@@ -3601,6 +3636,12 @@ async function handle(event, client) {
     if (/(사각지대|커버리지\s*점검|blind\s*spot|관측\s*축|coverage\s*(점검|체크|critic)|안\s*보는\s*신호)/i.test(raw)) {
       if (await guardBusy(client, channel, thread_ts)) return;
       runCoverageCritic(client, channel, true).catch(() => {});
+      return;
+    }
+    // P1: 행동 점검 (라우터 분류·날조 방지를 실제 모델 골든 입력으로 단언). 수동 트리거.
+    if (/(행동\s*점검|행동\s*eval|behavior\s*(check|eval|점검)|분류\s*점검|라우터\s*점검)/i.test(raw)) {
+      if (await guardBusy(client, channel, thread_ts)) return;
+      runBehaviorCheck(client, channel, true).catch(() => {});
       return;
     }
     // 조사 "원인 확정 먼저" 게이트 — 확인 없이 수정 진행 / 넘어가 (텍스트로도)
