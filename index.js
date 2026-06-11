@@ -2156,11 +2156,12 @@ const OPS_DEFS = { // id → 표시정보 + 기본값(주기/시각/요일)
   improve: { label: '운영 개선 제안', desc: '운영 데이터에서 개선점 발굴해 승인 게이트로 발의', defCad: 'weekly', defHour: 10, defDow: 1 },
   growth: { label: '그로스 실험 제안', desc: '사업 데이터 기반 타겟지표+가설 실험을 승인 게이트로 발의', defCad: 'weekly', defHour: 10, defDow: 2, perService: true },
   selfimprove: { label: '봇 자기개선 스캔', desc: '봇 자체 코드 개선점을 스캔해 승인 게이트로 발의', defCad: 'weekly', defHour: 10, defDow: 3 },
+  coverage: { label: '사각지대 점검', desc: '표준 운영 관측축 대비 내가 안 보는 신호(축)를 스스로 찾아 watcher 추가를 게이트 발의(팀장 모델)', defCad: 'weekly', defHour: 10, defDow: 6 },
   board: { label: '전략 경영회의', desc: '부서 검토 수렴→CEO 우선순위→반론→최종결정→승인. 회사 이사회', defCad: 'weekly', defHour: 10, defDow: 5 },
   oppscout: { label: '기회 스카우트', desc: '인터넷 트렌드·핫이슈 모니터링→수익 가능한 AI 에이전트 사업화 기회 발굴(근거 기반 채점)→승인 게이트', defCad: 'weekly', defHour: 10, defDow: 4 },
   rhythm: { label: '운영 리듬 점검', desc: '스케줄을 실제 활동·지연 과제·경보 빈도에 맞게 조정 제안(승인하면 적용)', defCad: 'monthly', defHour: 10 },
 };
-const OPS_ORDER = ['health', 'opsbrief', 'bizbrief', 'improve', 'growth', 'selfimprove', 'oppscout', 'board', 'rhythm'];
+const OPS_ORDER = ['health', 'opsbrief', 'bizbrief', 'improve', 'growth', 'selfimprove', 'coverage', 'oppscout', 'board', 'rhythm'];
 let opsConfig = {};
 function seedOpsConfig() { for (const id of OPS_ORDER) { const d = OPS_DEFS[id]; if (!opsConfig[id]) opsConfig[id] = { cadence: d.defCad, hour: d.defHour, minute: 0, dow: d.defDow != null ? d.defDow : 1, dom: 1, channel: null, enabled: true, lastRunDay: null }; } }
 function loadOpsConfig() { try { if (fs.existsSync(OPS_CONFIG_FILE)) opsConfig = JSON.parse(fs.readFileSync(OPS_CONFIG_FILE, 'utf8')) || {}; } catch { opsConfig = {}; } seedOpsConfig(); }
@@ -2189,6 +2190,7 @@ async function runOpsTask(id, ch) {
     if (id === 'improve') return void runImprovementProposal(botClient, ch, false).catch(() => {});
     if (id === 'growth') return void runBizGrowth(botClient, ch, false, startLine).catch(() => {});
     if (id === 'selfimprove') return void runSelfImproveScan(botClient, ch, false).catch(() => {});
+    if (id === 'coverage') return void runCoverageCritic(botClient, ch, false).catch(() => {});
     if (id === 'oppscout') return void runOppScout(botClient, ch, false).catch(() => {});
     if (id === 'board') { if (!activeWork[ch]) { activeWork[ch] = { task: '경영회의', started: Date.now() }; runBoardMeeting(botClient, ch, false).catch(() => {}).finally(() => { activeWork[ch] = null; }); } return; }
     if (id === 'rhythm') return void runRhythmProposal(botClient, ch, false).catch(() => {});
@@ -2514,6 +2516,41 @@ async function runSelfImproveScan(client, channel, manual = false) {
     await proposeOrAuto(client, channel, SELF_REPO, items, `🛠️ 자기개선 제안 (${manual ? '수동' : '주간 자동'}) — 내 코드(index.js) · 초점: ${obj.focus || ''} · (코드 직접 검증한 것만)`);
   } catch (e) { try { log('error', 'self-improve-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
   finally { try { await sh(`rm -rf ${dir}`); } catch (_) {} }
+}
+
+// ── 사각지대 크리틱(메타 자기발전) — 자기개선은 "이미 가진 신호 안에서" 개선하니, 신호 자체가 없는 축(예: CI를 안 보던 것)은 영영 자각 못 한다. 그래서 "성숙한 운영조직이 보는 표준 관측축" 대비 내 커버리지를 대조해 빠진 신호를 스스로 찾아 게이트 제안. 설계급 메타 판단이라 LEAD 모델(fable-5)로.
+let coverageAt = 0;
+// 내가 "지금 실제로 보는" 신호 인벤토리 — 크리틱이 이미 커버된 걸 다시 제안하지 않게 그라운딩(코드 바뀌면 같이 갱신)
+const WATCHED_SIGNALS = `[내가 지금 실제로 보는 신호 — 이미 커버됨, 다시 제안하지 마라]
+- 서비스 헬스: 2분마다 라이브 curl, 다운/이상 시 내가 직접 curl·dig·openssl로 앱-엣지 진단 → 코드픽스 게이트
+- CI(GitHub Actions): 7분마다 서비스+자기 레포 워크플로 실패 폴링 → 로그 받아 진단 → 게이트 픽스
+- 사업 지표 이상: 4시간마다 임계 돌파 선제 경보
+- 잡 실패율·클로드 한도 스파이크: OWNER 드리프트 경보
+- 봇 런타임 에러: 자기 코드에서 원인 찾아 PR(자가치유)
+- 잡 실패: 진단 후 중단지점부터 자동 재개
+- 복구 후: 포스트모템·리스크 레지스터
+- 비용: 매출-토큰/인프라 추정 P&L
+- 봇 자기코드 품질: 주간 자기개선 스캔`;
+// 성숙한 운영/엔지니어링/사업 조직이 통상 감시하는 표준 관측축 — 위 인벤토리와 대조해 빠진 축을 찾는다
+const COVERAGE_AXES = `[표준 관측축 — 성숙한 조직이 통상 감시하는 신호]
+1.CI/테스트 2.빌드·배포 성공/롤백 3.서비스 가동·헬스 4.프로덕션 런타임 에러율·예외(서비스 자체, Sentry류) 5.레이턴시·성능 회귀(p95) 6.비용·번레이트·토큰사용 추이 7.의존성 취약점·CVE·노후 패키지 8.보안 권고·시크릿 노출 9.사업 지표 이상 10.데이터 신선도·파이프라인 지연(워커 심장박동) 11.SLO/가용성 예산·연속 장애 12.SSL 인증서 만료 임박 13.레이트리밋·쿼터·디스크 소진 14.고객 문의·리뷰·지원 급증 15.로그량 급변(에러 폭증)`;
+async function runCoverageCritic(client, channel, manual = false) {
+  if (!manual && Date.now() - coverageAt < 6 * 86400000) return; // 주1회
+  coverageAt = Date.now();
+  if (!channel || activeWork[channel] || pendingDispatch[channel]) return;
+  try {
+    if (manual) await postAs(client, channel, undefined, LEAD, '운영자로서 "내가 아직 안 보는 축"이 뭔지 표준 관측축에 대조해 스스로 점검할게 (팀장 모델 fable-5로).');
+    const r = await runClaude(`너는 이 슬랙 봇(도핑연구소)의 운영 총괄 아키텍트다 — sponono·wewantpeace를 운영하고 새 서비스를 만드는 자율 에이전트 회사의 두뇌.${GROUNDING_RULE}\n\n임무: 아래 [표준 관측축]과 [내가 지금 보는 신호]를 대조해, 성숙한 운영/엔지니어링 조직이라면 보는데 나는 아직 안 보는 "사각지대"를 찾아라. 이미 커버된 축은 절대 다시 제안하지 마(인벤토리에 있으면 끝). 부분 커버면 빠진 구체 조각만 짚어라.\n\n${COVERAGE_AXES}\n\n${WATCHED_SIGNALS}\n\n각 사각지대마다: 왜 중요한지(안 보이면 뭘 놓치나), 그 신호를 기술적으로 어떻게 잡을지(데이터 출처 — 예: GitHub API, 서비스 /status 엔드포인트, npm audit/pip-audit, 인증서 핸드셰이크, Railway 메트릭), 봇이 직접 index.js에 watcher를 심을 수 있는지(build/investigate) 아니면 키·계정·외부서비스가 필요한지(human). 막연한 건 빼고 실제 구현 가능한 구체 액션만. 억지로 만들지 마 — 이미 꽤 보고 있으면 솔직히 적게.\n\nJSON만: {"blindspots":[{"axis":"표준축 번호·이름","gap":"내가 놓치는 구체적인 것","why":"안 보이면 놓치는 것","signal":"그 신호를 어디서 어떻게 잡나","task":"index.js에 뭘 추가할지 구체적으로","kind":"build|investigate|human"}]}. 사각지대 없으면 빈 배열.`, MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 240000);
+    const m = (r.text || '').match(/\{[\s\S]*\}/); if (!m) { if (manual) await postAs(client, channel, undefined, LEAD, '점검 돌렸는데 결과 파싱이 안 됐어. 다시 시도해줄래?'); return; }
+    let obj; try { obj = JSON.parse(m[0]); } catch { return; }
+    const items = (obj.blindspots || []).filter(x => x && x.task && x.gap && ['build', 'investigate', 'human'].includes(x.kind)).slice(0, 5)
+      .map(x => ({ who: '사각지대', repo: SELF_REPO, task: `[${x.axis || '관측'}] ${x.task} (놓치는 것: ${String(x.gap).slice(0, 70)} · 신호원: ${String(x.signal || '').slice(0, 50)})`, kind: x.kind, source: 'coverage-critic' }));
+    if (!items.length) { if (manual) await postAs(client, channel, undefined, LEAD, '표준 관측축에 대조했는데, 지금 새로 뚫린 사각지대는 안 보여. 보던 축은 잘 보고 있어.'); return; }
+    logDecision(channel, 'coverage-critic', `${items.length}개 사각지대 (fable-5)`);
+    log('info', 'coverage-critic', { manual, n: items.length, model: MODEL.LEAD });
+    // 자기 신호체계(index.js) 확장이라 SELF_REPO = 항상 게이트(자가브릭 방지). 승인하면 그 신호를 보는 watcher를 심음.
+    await proposeOrAuto(client, channel, SELF_REPO, items, `🔭 사각지대 점검 (${manual ? '수동' : '주간 자동'}, 팀장 모델 fable-5) — 내가 아직 안 보는 운영 신호 ${items.length}개. 승인하면 그 신호를 보게 만들게.`);
+  } catch (e) { try { log('error', 'coverage-critic-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
 }
 
 // ── CI 워치독 — push 후 GitHub Actions가 비동기로 도는 결과(실패)는 런타임 에러도 헬스다운도 아니라(구버전이 계속 서빙) 봇이 모르던 사각지대. 이걸 직접 감시 → 실패 시 진단 → 게이트 자가교정.
@@ -3421,6 +3458,12 @@ async function handle(event, client) {
     if (/(자기\s*개선|자가\s*개선|self\s*improve|내\s*코드\s*개선|봇\s*개선|자체\s*개선)/i.test(raw)) {
       if (await guardBusy(client, channel, thread_ts)) return;
       runSelfImproveScan(client, channel, true).catch(() => {});
+      return;
+    }
+    // 메타 자기발전: 사각지대 점검 (표준 관측축 대비 안 보는 신호 발견 → 게이트). 팀장 모델(fable-5). 수동 트리거.
+    if (/(사각지대|커버리지\s*점검|blind\s*spot|관측\s*축|coverage\s*(점검|체크|critic)|안\s*보는\s*신호)/i.test(raw)) {
+      if (await guardBusy(client, channel, thread_ts)) return;
+      runCoverageCritic(client, channel, true).catch(() => {});
       return;
     }
     // 조사 "원인 확정 먼저" 게이트 — 확인 없이 수정 진행 / 넘어가 (텍스트로도)
