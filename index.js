@@ -447,7 +447,7 @@ function drainFeedback(channel) { const f = (feedback[channel] || []).join('\n')
 // 토론/회의 결론 → 실제 착수 가능한 액션아이템 추출 (조사/코드수정/사람만 분류). 자동 실행 아님 — 사용자 승인용 목록.
 async function extractActionItems(conclusion) {
   try {
-    const r = await runClaude(`다음은 팀 회의 결론이야. 우리 팀(에이전트)이 코드/레포로 실제 착수 가능한 구체 액션아이템만 뽑아 JSON 배열로만 출력해. 설명 금지.\n\n[결론]\n${String(conclusion || '').slice(0, 3000)}\n\n각 항목: {"who":"담당(한 단어)","task":"무엇을 할지 한 문장, 레포에서 확인/수정할 구체 대상 포함","kind":"investigate|build|human"}\n- investigate: 레포 코드/파일 까서 확인하는 읽기전용(예 "regex 실행에 타임아웃 있는지 확인")\n- build: 코드를 실제 고치거나 추가(예 "regex에 타임아웃 추가")\n- human: 계정·심사·결제·외부결정 등 사람만 가능(예 "Play Store 심사상태 확인"). 중요: 결론이 "먼저 확인/확정하라"고 강조한 진단·검증 단계(DB 쿼리 실행, Railway 로그·대시보드·환경변수·DNS 확인 등 코드 밖이라 에이전트가 못 보는 것)는 절대 빠뜨리지 말고 human으로 꼭 넣어라 — 이게 코드수정보다 우선일 때가 많다.\n추상적 방향·중복은 빼고 최대 8개. JSON 배열만.`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 120000);
+    const r = await runClaude(`다음은 팀 회의 결론이야. 우리 팀(에이전트)이 코드/레포로 실제 착수 가능한 구체 액션아이템만 뽑아 JSON 배열로만 출력해. 설명 금지.\n\n[결론]\n${String(conclusion || '').slice(0, 3000)}\n\n각 항목: {"who":"담당(한 단어)","task":"무엇을 할지 한 문장, 레포에서 확인/수정할 구체 대상 포함","kind":"investigate|build|human"}\n- investigate: 네가 직접 할 수 있는 읽기전용 — (a) 레포 코드/파일 까서 확인 (b) WebSearch로 정보 조사. 둘 다 너 담당이다.\n- build: 코드를 실제 고치거나 추가(예 "regex에 타임아웃 추가")\n- human: 오직 사람만 가능한 것만 — 사업·전략 방향 결정(예 "웹결제 vs 인앱결제 선택"), 계정·로그인·심사·스토어 제출·결제수단 연동, 그리고 네가 접근 못 하는 운영환경(프로드 DB 쿼리 실행, Railway 로그·대시보드·환경변수·DNS 확인). 이런 것만 human이고 코드수정보다 우선이면 꼭 넣어라.\n**중요: "정보를 찾는 것"은 절대 human이 아니다.** 경쟁사 상품/가격 구성, 시장 규모·수치·출처·연도·표본, 트렌드, 벤치마크 같은 건 전부 네가 WebSearch로 직접 조사한다 → investigate(작업 문구에 "WebSearch로 ~ 조사" 명시). 사용자한테 "자료 확보해줘 / 출처 달아줘 / 캡처 가져와"라고 시키면 안 된다 — 그건 네 일이다.\n추상적 방향·중복은 빼고 최대 8개. JSON 배열만.`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 120000);
     const m = (r.text || '').match(/\[[\s\S]*\]/);
     const arr = m ? JSON.parse(m[0]) : [];
     return Array.isArray(arr) ? arr.filter(x => x && x.task && ['investigate', 'build', 'human'].includes(x.kind)).slice(0, 8) : [];
@@ -3099,7 +3099,7 @@ async function handle(event, client) {
     if (pendingDispatch[channel]) {
       if (pendingDispatch[channel].at && Date.now() - pendingDispatch[channel].at > 30 * 60 * 1000) { delete pendingDispatch[channel]; } // 30분 만료
       else if (/^(넘어가|패스|무시|안\s?해|됐어|취소|놔둬|나중에)/.test(raw)) { delete pendingDispatch[channel]; await postAs(client, channel, thread_ts, LEAD, '오케이, 그건 안 돌릴게. 나중에 "스포노노 ~ 조사해줘"나 "작업: ..."로 직접 시켜도 돼.'); return; }
-      else if (/^(실행|진행해?|착수|돌려(줘)?|고고|ㄱㄱ|다\s*해|전부\s*(해|돌려))(\s*[\d,\s및과~-]+)?\s*$/.test(raw) && canCommand(event.user)) {
+      else if (/^(그거|그것|이거|이대로|다|전부)?\s*(실행|진행|착수|돌려|고고|ㄱㄱ|승인|ok|콜)\s*(해줘|해|할게|하자|시켜(줘)?|가자|줘)?(\s*[\d,\s및과~-]+)?\s*$/i.test(raw) && canCommand(event.user)) { // 감사: 구두 "실행"/자연어 변형(실행해줘·이대로 실행·그거 실행 등)도 버튼과 동일하게 게이트 실행
         if (await guardBusy(client, channel, thread_ts)) return; // 작업 중이면 안내만, pendingDispatch 유지
         const pd = pendingDispatch[channel]; delete pendingDispatch[channel];
         let items = pd.items;
