@@ -388,8 +388,8 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
       bumpWork(channel); // 토론은 자체 스피너가 없어서 여기서 생존신호 갱신 (긴 토론이 워치독에 안 끊기게)
       if (workCancel[channel]) { stopped = true; break; } // "중단"하면 토론 즉시 멈춤
       const guide = (r === 1
-        ? '네 입장과 핵심 근거를 말해. 앞 사람 의견 있으면 동의/반박도 같이.'
-        : `지금 ${r}라운드야. 앞 의견 중 약한 부분을 콕 집어 반박하고 네 주장을 다듬어. 반복 금지.`) + HONEST + TAG;
+        ? '네 분야 관점에서 이 아이디어에 분명한 입장과 근거를 내. 규칙 셋: (1) 정보가 부족하거나 형태가 모호해도 사용자한테 되묻지 마라 — 가장 그럴듯한 해석을 가정으로 정하거나, 갈래가 여럿이면(예: A안/B안/C안) 각 갈래에 네 분야의 판단을 직접 내려라. "이게 뭔지 모르겠다"를 반복하는 건 토론이 아니라 회피다. (2) 앞사람이 이미 한 말·같은 질문·같은 우려는 절대 반복 금지 — 너만 줄 수 있는 새 관점·반박·구체안만 더해라. (3) 막연한 방향 말고 "그래서 이렇게 하자"까지 구체적으로.'
+        : `지금 ${r}라운드야. 앞 의견에 동의만 하거나 같은 질문 반복하지 말고, 약한 부분을 콕 집어 반박하거나 네 입장을 정해서 결론 쪽으로 끌고 가. 반복·맞장구 금지.`) + HONEST + TAG;
       const struct = structured.length ? `\n\n[지금까지 핵심 주장(구조화)]\n${structured.slice(-8).map(s => `- ${s.who}: ${s.tag}`).join('\n')}` : '';
       const res = await runClaude(`${p.prompt}${STYLE}${rulesCtx(channel)}\n\n[지금까지 토론]\n${transcript.slice(-3000)}${struct}\n\n${guide}`, p.model);
       if (res.limited) { await postAs(client, channel, thread_ts, LEAD, '⏳ 한도 걸려서 토론 더 못 돌려. 리셋되면 다시 하자.'); return; }
@@ -404,7 +404,7 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
   if (stopped) { delete workCancel[channel]; await postAs(client, channel, thread_ts, LEAD, '토론 중단했어.'); return; }
   const structDigest = structured.length ? `\n\n[구조화된 핵심 주장 — 이걸 1차 입력으로 종합해라]\n${structured.map(s => `- ${s.who}: ${s.tag}`).join('\n')}` : '';
   const sfb = drainFeedback(channel); const sfbCtx = sfb ? `\n\n[사용자가 토론 중 준 추가 지시 — 결론에 반드시 반영]\n${wrapUntrusted(sfb)}` : ''; // 종합 직전 피드백(감사 A-4: 래핑)
-  const synth = await runClaude(`${LEAD.prompt}${STYLE}${rulesCtx(channel)}${structDigest}${sfbCtx}\n\n[토론 전문(참고)]\n${transcript.slice(-3500)}\n\n위 구조화된 핵심 주장을 1차 근거로, 전문은 보조로 종합해. 의견 갈린 지점 짚고, 가장 설득력 있는 쪽으로 최적 결론. 단순 요약 말고 결정과 다음 액션까지. 특히 '미해결'로 표시된 건 액션아이템 후보로 챙겨.${HONEST}`, LEAD.model);
+  const synth = await runClaude(`${LEAD.prompt}${STYLE}${rulesCtx(channel)}${structDigest}${sfbCtx}\n\n[토론 전문(참고)]\n${transcript.slice(-3500)}\n\n위 구조화된 핵심 주장을 1차 근거로, 전문은 보조로 종합해. 의견 갈린 지점 짚고, 가장 설득력 있는 쪽으로 최적 결론. 단순 요약 말고 결정과 다음 액션까지. 특히 '미해결'로 표시된 건 액션아이템 후보로 챙겨.\n중요: 팀이 "형태가 모호하다"며 사용자에게 되묻기만 했다면, 너는 CEO로서 그 회피를 그대로 옮기지 마라 — 가장 합리적인 형태·방향을 골라 명시적 가정으로 정하고(예: "일단 A안=서류생성+절차안내 묶음으로 가정") 그 위에서 결론·다음 액션을 내라. 정말 사용자만 결정할 수 있는 핵심은 1~2개로 압축해 맨 끝에 "이것만 네가 정해줘"로 남기고, 나머지는 네가 정한다.${HONEST}`, LEAD.model);
   await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}📋 결론\n` + (synth.text || '').trim().slice(0, 9000));
   extractFacts(repo || channel, `[토론: ${idea}]\n${(synth.text || '').slice(0, 1800)}`, '토론').catch(() => {}); // R7: 토론 결론에서 결정·사실 저장
   // 결론의 액션아이템을 뽑아서 "승인하면 실제로 착수"하게 제시 (자동 실행 X — 사용자 승인 게이트). 레포 있을 때만(코드로 할 게 있어야 함).
