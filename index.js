@@ -543,8 +543,17 @@ async function dispatchActionItems(client, channel, thread_ts, defaultRepo, item
 // ── 오토파일럿: 위험도별 자율 다이얼 ──
 const PROD_REPOS = ['nameofkk/sponono', 'nameofkk/wewantpeace', 'nameofkk/myungjak'];
 const SELF_REPO = 'nameofkk/doping-lab-slack';
-// 프로드 판정 — 정적 목록 ∪ 라이브 URL 있는 서비스 ∪ 사업지표 추적 중인 레포. onboardNewService로 편입된 신규 라이브 서비스도 실유저가 생기면 자동으로 게이트 대상(하드코딩 배열만으론 안전선이 신규 서비스에 안 미침 — 감사 P0).
-function isProd(repo) { try { return PROD_REPOS.includes(repo) || (services[repo] && !!services[repo].url) || !!bizData[repo]; } catch { return PROD_REPOS.includes(repo); } }
+// 감사 #8: 프로드 판정 강화 — 정적 목록 + 라이브 URL + 사업지표 + 최근 배포이력. 신규 서비스가 게이트 우회하던 구멍 수정.
+function isProd(repo) {
+  try {
+    if (PROD_REPOS.includes(repo)) return true;
+    if (services[repo] && !!services[repo].url) return true; // 라이브 URL 등록됨
+    if (bizData[repo]) return true; // 사업지표 추적 중
+    // 감사 P0: 최근 Railway 배포 이력이 있으면 라이브 서비스로 간주 (onboard 전이라도)
+    if (services[repo] && services[repo].lastCheck) return true;
+    return false;
+  } catch { return PROD_REPOS.includes(repo); }
+}
 // AP2: 액션아이템의 자율 티어 — auto(읽기전용 자동) / auto-build(비프로드 코드 자동) / gate(자기수정·프로드 승인유지) / block(파괴적)
 function apTier(kind, repo, task) {
   if (isDestructive(task)) return 'block';
@@ -771,7 +780,7 @@ async function waitHttp(url, ms) {
   }
   return false;
 }
-// Playwright로 첫 화면 스크린샷 (스크롤 안 함 → 진입 애니메이션 미작동 버그가 그대로 드러남)
+// Playwright로 첫 화면 스크린샷 + 콘솔에러·빈화면 검증 (감사 P0: 빈 화면을 성공으로 보고하던 버그 수정)
 async function captureShots(url, prefix = 'shot') {
   const { chromium } = require('playwright');
   const b = await chromium.launch({ args: ['--no-sandbox', '--disable-dev-shm-usage'], timeout: 30000 });
@@ -779,10 +788,28 @@ async function captureShots(url, prefix = 'shot') {
   try {
     for (const [w, h, label, file] of [[1440, 900, '데스크탑 첫 화면 (로드 직후, 스크롤 전)', `/tmp/${prefix}_d.png`], [375, 812, '모바일 첫 화면', `/tmp/${prefix}_m.png`]]) {
       const p = await b.newPage({ viewport: { width: w, height: h } });
+      // 감사 #4: 브라우저 콘솔 에러 수집 — JS 로드 실패/MIME 에러 등 감지
+      const consoleErrors = [];
+      p.on('console', msg => { if (msg.type() === 'error') consoleErrors.push(msg.text().slice(0, 200)); });
+      p.on('pageerror', err => { consoleErrors.push(`[JS에러] ${String(err).slice(0, 200)}`); });
       await p.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
-      await p.waitForTimeout(1800);
+      await p.waitForTimeout(2500); // 1800→2500: 애니메이션 완료 대기 여유 확보
       await p.screenshot({ path: file });
-      out.push({ path: file, label }); await p.close();
+      // 감사 #1: 빈 화면 검증 — 실제 콘텐츠가 있는지 body 텍스트량 + 콘솔에러 확인
+      let blank = false, blankReason = '';
+      try {
+        const bodyText = await p.evaluate(() => (document.body?.innerText || '').replace(/\s+/g, ' ').trim());
+        const visibleEls = await p.evaluate(() => {
+          const els = document.querySelectorAll('h1, h2, h3, p, button, a, img, svg');
+          return Array.from(els).filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; }).length;
+        });
+        if (bodyText.length < 10 && visibleEls < 3) { blank = true; blankReason = `보이는 텍스트 ${bodyText.length}자, 보이는 요소 ${visibleEls}개`; }
+      } catch (_) {}
+      out.push({
+        path: file, label, blank, blankReason,
+        consoleErrors: consoleErrors.length ? consoleErrors.slice(0, 10) : null,
+      });
+      await p.close();
     }
   } finally { try { await b.close(); } catch (_) {} }
   return out;
@@ -828,8 +855,22 @@ async function railwayDeploy(client, channel, thread_ts, dir, repo) {
   const dom = await sh(`env -u RAILWAY_TOKEN railway domain --service ${svc} </dev/null 2>&1`, dir);
   const m = (dom.out || '').match(/https?:\/\/[^\s'"]+/);
   const url = m ? m[0] : null;
-  if (url) await postAs(client, channel, thread_ts, arch, `라이브 올라갔어: ${url}`);
-  else await postAs(client, channel, thread_ts, arch, '배포는 올렸는데 도메인 자동발급이 안 떴어. 레일웨이 대시보드에서 도메인 한 번 눌러줘.');
+  if (url) {
+    // 감사 #7: Railway 배포 후 실제 접속 검증 — exit code만 보던 버그 수정
+    const ready = await waitHttp(url, 60000);
+    if (ready) {
+      const verify = await sh(`curl -s -o /dev/null -w "%{http_code} %{size_download}" --max-time 15 '${url.replace(/'/g, '')}' 2>/dev/null`);
+      const vm = (verify.out || '').match(/^(\d{3})\s+(\d+)/);
+      const vCode = vm ? vm[1] : '000'; const vSize = vm ? parseInt(vm[2], 10) : 0;
+      if (/^2/.test(vCode) && vSize > 200) {
+        await postAs(client, channel, thread_ts, arch, `라이브 올라갔어: ${url}`);
+      } else {
+        await postAs(client, channel, thread_ts, arch, `라이브 배포는 됐는데 접속 확인이 안 돼 (HTTP ${vCode}, ${vSize}bytes). 서비스가 기동 중인지 로그 확인 필요: ${url}`);
+      }
+    } else {
+      await postAs(client, channel, thread_ts, arch, `라이브 배포는 올렸는데 60초 안에 응답이 안 와. 기동 실패 가능성 있어. 레일웨이 로그 확인 필요: ${url}`);
+    }
+  } else await postAs(client, channel, thread_ts, arch, '배포는 올렸는데 도메인 자동발급이 안 떴어. 레일웨이 대시보드에서 도메인 한 번 눌러줘.');
   return url;
 }
 // 빌드 통과 후: 라이브 배포 시도 + 실제 화면(첫 화면) 스크린샷을 QA가 직접 올려 검증
@@ -861,10 +902,21 @@ async function liveCheck(client, channel, thread_ts, dir, repo) {
     const prefix = 'shot' + ((dir.match(/(\d+)/) || [])[1] || '0'); // 동시 빌드 스크린샷 파일명 충돌 방지
     const shots = await captureShots(target, prefix);
     let any = false;
+    // 감사 #1+#4: 빈 화면·콘솔에러 감지 → 성공이 아니라 문제로 보고
+    const blankShots = shots.filter(s => s.blank);
+    const errorShots = shots.filter(s => s.consoleErrors && s.consoleErrors.length);
     for (const s of shots) any = (await uploadShot(channel, thread_ts, s.path, s.label)) || any;
     const liveNote = url ? `\n실제로 열어서 테스트하려면 여기로: ${url}` : '\n근데 라이브 배포가 막혀서 너가 열어볼 공개 주소는 아직 없어(내 내부에서만 띄워서 확인한 거야). 배포 고쳐서 다시 올리면 공개 주소 줄게.';
-    if (any) await postAs(client, channel, thread_ts, qa, '첫 화면(로드 직후, 스크롤 전) 스크린샷 올렸어. 히어로 밑이 비어 보이면 스크롤 진입 애니메이션이 화면 밖에서 안 켜지는 문제니까 그건 잡아야 돼.' + liveNote);
-    else await postAs(client, channel, thread_ts, qa, '스크린샷 업로드는 막혔는데(files:write 권한 필요), 내가 직접 띄워서 화면은 확인했어.' + liveNote);
+    if (blankShots.length) {
+      const reasons = blankShots.map(s => `${s.label}: ${s.blankReason}`).join('\n');
+      const errors = errorShots.length ? '\n\n브라우저 콘솔 에러:\n' + errorShots.flatMap(s => s.consoleErrors).join('\n') : '';
+      await postAs(client, channel, thread_ts, qa, `빈 화면이 감지됐어. JS/CSS 로드 실패거나 런타임 에러일 가능성이 높아. 브라우저 개발자도구 콘솔 확인 필요.\n\n${reasons}${errors}` + liveNote);
+    } else if (errorShots.length) {
+      const errors = errorShots.flatMap(s => s.consoleErrors).join('\n');
+      await postAs(client, channel, thread_ts, qa, `화면은 떴는데 브라우저 콘솔에 에러가 있어. 확인 필요:\n${errors}` + liveNote);
+    } else if (any) {
+      await postAs(client, channel, thread_ts, qa, '첫 화면(로드 직후, 스크롤 전) 스크린샷 올렸어. 히어로 밑이 비어 보이면 스크롤 진입 애니메이션이 화면 밖에서 안 켜지는 문제니까 그건 잡아야 돼.' + liveNote);
+    } else await postAs(client, channel, thread_ts, qa, '스크린샷 업로드는 막혔는데(files:write 권한 필요), 내가 직접 띄워서 화면은 확인했어.' + liveNote);
   } catch (e) { await postAs(client, channel, thread_ts, qa, '화면 검증 중 문제: ' + String(e).slice(0, 200)); }
   finally { if (srv) try { srv.kill('SIGKILL'); } catch (_) {} }
 }
@@ -924,6 +976,39 @@ async function checkAppGaps(dir) {
   } catch {}
   return gaps;
 }
+// 감사 #6: 빌드 산출물 에셋 경로 검증 — index.html의 JS/CSS 참조가 실제 파일과 일치하는지 확인. base path 불일치(Railway vs Pages 등) 감지.
+async function verifyBuildAssets(dir) {
+  const issues = [];
+  try {
+    // dist 또는 build 폴더에서 빌드된 index.html 찾기
+    const idx = (await sh(`find ${dir} -maxdepth 3 \\( -path '*/dist/index.html' -o -path '*/build/index.html' -o -path '*/.next/server/app/index.html' \\) -not -path '*/node_modules/*' | head -1`, dir)).out.trim();
+    if (!idx) return issues; // 빌드 산출물 없으면 스킵
+    const html = (await sh(`cat "${idx}" 2>/dev/null | head -50`, dir)).out || '';
+    const outDir = idx.replace(/\/index\.html$/, '');
+    // script src와 link href에서 에셋 경로 추출
+    const srcMatches = html.match(/(?:src|href)="([^"]*\.(js|css|mjs))"/g) || [];
+    for (const m of srcMatches) {
+      const pathMatch = m.match(/(?:src|href)="([^"]+)"/);
+      if (!pathMatch) continue;
+      const assetPath = pathMatch[1];
+      if (/^https?:\/\//.test(assetPath)) continue; // 외부 CDN은 스킵
+      // 상대 경로로 실제 파일 존재 확인
+      const resolved = assetPath.startsWith('/') ? `${outDir}${assetPath}` : `${outDir}/${assetPath}`;
+      const exists = (await sh(`test -f "${resolved}" && echo yes || echo no`, dir)).out.includes('yes');
+      if (!exists) {
+        // base path 불일치 가능성 — 서브디렉토리 경로가 붙어 있는데 실제 파일은 루트에 있는 경우
+        const basename = assetPath.split('/').pop();
+        const found = (await sh(`find "${outDir}" -name "${basename}" 2>/dev/null | head -1`, dir)).out.trim();
+        if (found) {
+          issues.push(`에셋 경로 불일치: ${assetPath} → 파일은 ${found.replace(outDir, '')}에 있음 (base path 설정 확인 필요)`);
+        } else {
+          issues.push(`에셋 파일 없음: ${assetPath} (빌드 산출물에 해당 파일 없음)`);
+        }
+      }
+    }
+  } catch (_) {}
+  return issues;
+}
 // R3: Critic — PR/완료 전, 별도 claude가 "요청을 실제로 충족했나" 엄격 심사. FAIL이면 지적대로 1회 고치고 재심사. 빈껍데기·미충족을 거짓완료로 넘기는 것 방지(Devin Critic + evaluator-optimizer).
 async function runCritic(client, channel, thread_ts, dir, task, prd, repo) {
   const sec = byName('우정잉') || LEAD;
@@ -965,7 +1050,13 @@ async function verifyBuild(client, channel, thread_ts, dir, repo, pushRef = WORK
   await postAs(client, channel, thread_ts, qa, '잠깐, 코드만 올리고 끝내면 안 되지. 실제로 빌드되는지 내가 돌려볼게.');
   await sh('npm install --no-audit --no-fund 2>&1 | tail -3', dir);
   let bd = await sh('npm run build 2>&1', dir);
-  if (bd.code === 0) { const g = await checkAppGaps(dir); await postAs(client, channel, thread_ts, qa, g.length ? `빌드는 통과하는데, 솔직히 아직 껍데기야 — ${g.join(', ')}. 컴파일만 되고 실제 화면이 없어서 이대로는 못 써.` : '빌드 통과 확인했어. 실제로 컴파일까지 돼.'); await qaGate(client, channel, thread_ts, dir); if (!incomplete && !g.length) await liveCheck(client, channel, thread_ts, dir, repo); else await postAs(client, channel, thread_ts, qa, '아직 미완성이라(심사 미통과나 빈 화면) 라이브 배포·서비스 등록·온보딩은 보류할게. "이어서"로 완성하면 그때 띄우고 운영에 편입할게.'); return; }
+  if (bd.code === 0) {
+    const g = await checkAppGaps(dir);
+    // 감사 #6: 빌드 산출물 에셋 경로 검증 — exit code만 보던 버그 수정. 빌드된 index.html의 JS/CSS 경로가 배포 환경과 맞는지 확인
+    const assetIssues = await verifyBuildAssets(dir);
+    if (assetIssues.length) g.push(...assetIssues);
+    await postAs(client, channel, thread_ts, qa, g.length ? `빌드는 통과하는데, 솔직히 아직 껍데기야 — ${g.join(', ')}. 컴파일만 되고 실제 화면이 없어서 이대로는 못 써.` : '빌드 통과 확인했어. 실제로 컴파일까지 돼.'); await qaGate(client, channel, thread_ts, dir); if (!incomplete && !g.length) await liveCheck(client, channel, thread_ts, dir, repo); else await postAs(client, channel, thread_ts, qa, '아직 미완성이라(심사 미통과나 빈 화면) 라이브 배포·서비스 등록·온보딩은 보류할게. "이어서"로 완성하면 그때 띄우고 운영에 편입할게.'); return;
+  }
   // 실패 → 1회 자동 수정
   await postAs(client, channel, thread_ts, qa, '빌드가 깨졌네. 에러 보고 한 번 고쳐볼게.\n' + (bd.out || '').slice(-500));
   const fix = await runClaude(`이 저장소 빌드가 다음 에러로 실패했어. 원인 찾아서 실제로 고쳐. 추측 말고 에러 그대로 보고 고쳐라.\n\n[에러]\n${(bd.out || '').slice(-2500)}`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 300000);
@@ -1131,8 +1222,18 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   if (!n2) await postAs(client, channel, thread_ts, LEAD, (res.text || '').trim().slice(0, 1500));
   await verifyBuild(client, channel, thread_ts, dir, repo, branch, incomplete); // PR 경로 → 빌드 자동수정도 PR 브랜치로(main 직행 금지). 미완성이면 배포·온보딩 보류
   jobUpdate(channel, { status: 'awaiting-approval', artifacts: [url], note: 'PR 머지 대기' });
-  // 감사 B-9: PR 경로(승인작업·스케줄·프로드·selfHeal 등 주력 실행)에서도 학습. PR은 머지 전이라 사실은 source='PR작업'으로 구분, 스킬은 심사통과+완성된 것만.
-  if (repo) { extractFacts(repo, `[PR작업] ${task}\n[한 일] ${(res.text || '').slice(0, 1500)}`, 'PR작업').catch(() => {}); if (criticPass && !incomplete) { extractSkill(repo, `[성공한 작업·PR] ${task}\n[한 일] ${(res.text || '').slice(0, 1500)}`).catch(() => {}); try { bumpSkills(repo, task, true); } catch (_) {} } }
+  // 감사 B-9+#9: PR 경로에서도 학습. 성공은 스킬 추출, 실패는 교훈 추출(같은 실수 반복 방지).
+  if (repo) {
+    extractFacts(repo, `[PR작업] ${task}\n[한 일] ${(res.text || '').slice(0, 1500)}`, 'PR작업').catch(() => {});
+    if (criticPass && !incomplete) {
+      extractSkill(repo, `[성공한 작업·PR] ${task}\n[한 일] ${(res.text || '').slice(0, 1500)}`).catch(() => {});
+      try { bumpSkills(repo, task, true); } catch (_) {}
+    } else if (incomplete) {
+      // 감사 #9: 실패한 PR 작업에서도 교훈 추출 — 같은 실수 반복 방지
+      extractLesson(repo, `[PR작업·미완성] ${task}\n미충족: ${finalGaps.join(', ') || '심사 미통과'}\n한 일: ${(res.text || '').slice(0, 700)}`).catch(() => {});
+      try { bumpSkills(repo, task, false); } catch (_) {} // 실패 기여 스킬 강등
+    }
+  }
   if (pr && pr.html_url) { addBlocker(repo, `PR 머지: ${task.slice(0, 50)} — ${url}`, 'merge'); lastPR[channel] = { repo, num: pr.number, url, at: Date.now() }; } // Wave1: PR 머지 대기를 당신차례 큐로 + 채널 최근 PR 기억(머지 버튼·명령용)
   const prWhy = forcePR ? '승인모드라' : prodForced ? '프로드(라이브) 서비스라 안전하게' : incompleteForced ? '아직 미완성이라 main 직행 막고' : gateBuildsForced ? '빌드 게이트 켜져 있어 (네 승인=머지로 반영, 빠른 직행은 "빌드 게이트 꺼")' : '';
   await postAs(client, channel, undefined, LEAD, `${mention(channel)}${doneHead} ${prWhy} PR로 올렸어.\nPR: ${url}\n코드 브라우저로 보려면: https://github.dev/${repo}\n\n머지는 내가 할 수 있어 — 확인하고 "머지"(또는 아래 버튼) 하면 CI 초록인지 보고 머지할게. (프로드라 머지 결정은 네 승인으로)`); // 최종 결과 top-level
@@ -2441,6 +2542,26 @@ async function checkServices(client, channel, announce = true, onlyAlert = false
     const code = m ? m[1] : '000'; const ms = m ? Math.round(parseFloat(m[2]) * 1000) : null; const size = m && m[3] != null ? parseInt(m[3], 10) : null;
     let up = /^2\d\d|^3\d\d/.test(code); const issues = []; // up이지만 문제 있으면 degraded — 매 체크마다(실시간), SSL만 일1회 캐시
     if (up && size != null && size < 200) issues.push('응답 내용 거의 빈(껍데기·에러페이지 의심)');
+    // 감사 #5: 200이어도 실제 콘텐츠(JS/CSS 로드 여부)를 확인 — HTML만 오고 에셋이 깨진 케이스 감지
+    if (up && size != null && size > 200 && /^2\d\d/.test(code)) {
+      try {
+        const body = (await sh(`curl -s --max-time 10 '${String(s.url).replace(/'/g, '')}' 2>/dev/null | head -100`, undefined, 15000)).out || '';
+        // JS/CSS 에셋 참조가 있는데 src 경로에 서브디렉토리가 끼어있으면 base path 불일치 의심
+        const assetRefs = body.match(/(?:src|href)="(\/[^"]*\.(js|css|mjs))"/g) || [];
+        for (const ref of assetRefs.slice(0, 3)) {
+          const ap = (ref.match(/(?:src|href)="([^"]+)"/) || [])[1];
+          if (!ap) continue;
+          const ar = await sh(`curl -s -o /dev/null -w "%{http_code} %{content_type}" --max-time 8 '${String(s.url).replace(/\/$/, '')}${ap}' 2>/dev/null`);
+          const am = (ar.out || '').match(/^(\d{3})\s+(.*)/);
+          if (am && am[1] !== '000') {
+            const aCode = am[1]; const aMime = am[2] || '';
+            if (!/^2/.test(aCode)) { issues.push(`에셋 로드 실패: ${ap} → HTTP ${aCode}`); break; }
+            if (/\.js/.test(ap) && !/javascript/.test(aMime)) { issues.push(`JS 에셋 MIME 불일치: ${ap} → ${aMime} (빈화면 원인)`); break; }
+            if (/\.css/.test(ap) && !/css/.test(aMime)) { issues.push(`CSS 에셋 MIME 불일치: ${ap} → ${aMime}`); break; }
+          }
+        }
+      } catch (_) {}
+    }
     if (/^https:/i.test(s.url)) { const today = kstNow().day; if (s.sslDay !== today) { s.sslDay = today; try { const host = s.url.replace(/^https?:\/\//i, '').split('/')[0]; const so = await sh(`echo | timeout 12 openssl s_client -servername ${host} -connect ${host}:443 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null`); const me = (so.out || '').match(/notAfter=(.+)/); if (me) s.sslDays = Math.round((new Date(me[1]).getTime() - Date.now()) / 86400000); } catch (_) {} } if (typeof s.sslDays === 'number' && s.sslDays <= 14) issues.push(`SSL 인증서 ${s.sslDays}일 남음(갱신 필요)`); }
     if (s.healthUrl) { try { const hr = await sh(`curl -s --max-time 12 -w "\\n%{http_code}" '${String(s.healthUrl).replace(/'/g, '')}' 2>/dev/null`); const ho = (hr.out || '').trim(); const hc = ((ho.match(/(\d{3})\s*$/) || [])[1]) || '000'; const hbody = ho.replace(/\d{3}\s*$/, ''); if (!/^2/.test(hc) || (s.healthKeyword && !hbody.includes(s.healthKeyword))) issues.push(`헬스 엔드포인트 이상(${hc}${s.healthKeyword ? ', 기대문구 없음' : ''})`); } catch (_) {} }
     const degraded = up && issues.length; s.issues = issues;
