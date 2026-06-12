@@ -2495,11 +2495,13 @@ async function runOpsBriefing(client, channel, manual = false) {
     const nudge = staleBlk.length ? `\n\n⏳ 너한테 막힌 지 오래된 것 ${staleBlk.length}건 — ${staleBlk.slice(0, 4).map(b => `${b.what.slice(0, 40)}(${Math.round((Date.now() - b.at) / 86400000)}일)`).join(', ')}. "당신차례"로 전체 확인.` : '';
     if (channel) await postAs(client, channel, undefined, LEAD, `🗞️ 운영 브리핑\n${text}${nudge}`);
     if (!channel && OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: `🗞️ 운영 브리핑\n${scrubOutput(text)}${nudge}` }).catch(() => {}); // 채널에 올렸으면 OWNER DM 중복 금지 — 지정채널 없을 때만 DM 폴백(버그: 채널·DM 둘 다 가서 DM에 자꾸 떴음)
-    // ④개선 후보 → 착수 가능한 액션으로 뽑아 승인 게이트(읽기전용 브리핑에 실행 유도). 채널 한가할 때만.
+    // ④개선 후보 → 읽기전용 조사는 봇이 "직접" 자동 착수(사용자한테 골라 실행하라고 안 떠넘김), 코드 고칠 것만 승인 게이트. "어쩌라는거 많다" 부담 완화.
     if (channel && r.ok !== false && !pendingDispatch[channel] && !activeWork[channel]) {
       const items = await extractActionItems(text).catch(() => []);
       const acts = (items || []).filter(i => i && i.task && i.kind !== 'human').slice(0, 4).map(i => { const k = ['sponono', '스포노노', 'wewantpeace', '위원트피스', 'myungjak', '명작'].find(a => i.task.includes(a)); return { who: '운영', repo: k ? resolveRepo(k) : (Object.keys(bizData)[0] || SELF_REPO), task: i.task, kind: ['investigate', 'build'].includes(i.kind) ? i.kind : 'investigate', source: 'opsbrief' }; });
-      if (acts.length) await proposeOrAuto(client, channel, acts[0].repo, acts, '운영 브리핑 개선 후보 — 착수할 거 골라("실행"/"실행 1,3", 버튼). 안 할 거면 "넘어가"', { forceGate: true });
+      const inv = acts.filter(a => a.kind === 'investigate').slice(0, 1), builds = acts.filter(a => a.kind === 'build'); // 조사는 1건만 자동(비용 절제)
+      if (inv.length) { await postAs(client, channel, undefined, LEAD, `👉 ④ 중 조사(읽기전용)는 내가 지금 바로 들어갈게 — "${inv[0].task.slice(0, 50)}". 코드 고칠 게 나오면 그때 네 승인만 받을게.`); dispatchActionItems(client, channel, undefined, inv[0].repo, inv).catch(() => {}); } // 봇이 직접 조사→발견된 수정은 내부 게이트
+      else if (builds.length) await proposeOrAuto(client, channel, builds[0].repo, builds, '운영 브리핑 ④ — 코드 고칠 후보(승인하면 착수). 안 할 거면 "넘어가"', { forceGate: true });
     }
   } catch (e) { try { log('error', 'ops-briefing-err', { e: String(e).slice(0, 150) }); } catch (_) {} }
 }
@@ -3904,7 +3906,9 @@ async function handle(event, client) {
       return;
     }
     if (intent && intent.action === 'debate' && intent.task) {
-      const drepo = (intent.repo && intent.repo !== 'new') ? resolveR(intent.repo) : null;
+      // 새 아이디어 토론(나홀로소송 AI 등)이 stale한 레포(예: sleepwalking-friends-4)로 태깅되던 버그 — drepo는 명시적으로 알려진 프로드/봇 레포일 때만, new/unknown/그외는 null(개념 토론은 레포 없음).
+      const KNOWN_REPO = ['sponono', '스포노노', 'wewantpeace', '위원트피스', 'myungjak', '명작', 'bot', '봇', '도핑봇'];
+      const drepo = (intent.repo && KNOWN_REPO.includes(intent.repo)) ? resolveR(intent.repo) : null;
       activeWork[channel] = { task: intent.task, started: Date.now() };
       runDebate(client, channel, event.thread_ts || event.ts, intent.task, drepo).catch(e => { jobUpdate(channel, { status: 'failed', error: String(e).slice(0, 150) }); failNotifyOwner('토론', null, e); postAs(client, channel, thread_ts, LEAD, '토론 오류: ' + String(e).slice(0, 300)); }).finally(() => { endJob(channel); activeWork[channel] = null; });
       return;
