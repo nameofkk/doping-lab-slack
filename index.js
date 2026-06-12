@@ -407,6 +407,7 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
   const synth = await runClaude(`${LEAD.prompt}${STYLE}${rulesCtx(channel)}${structDigest}${sfbCtx}\n\n[토론 전문(참고)]\n${transcript.slice(-3500)}\n\n위 구조화된 핵심 주장을 1차 근거로, 전문은 보조로 종합해. 의견 갈린 지점 짚고, 가장 설득력 있는 쪽으로 최적 결론. 단순 요약 말고 결정과 다음 액션까지. 특히 '미해결'로 표시된 건 액션아이템 후보로 챙겨.\n중요: 팀이 "형태가 모호하다"며 사용자에게 되묻기만 했다면, 너는 CEO로서 그 회피를 그대로 옮기지 마라 — 가장 합리적인 형태·방향을 골라 명시적 가정으로 정하고(예: "일단 A안=서류생성+절차안내 묶음으로 가정") 그 위에서 결론·다음 액션을 내라. 정말 사용자만 결정할 수 있는 핵심은 1~2개로 압축해 맨 끝에 "이것만 네가 정해줘"로 남기고, 나머지는 네가 정한다.${HONEST}`, LEAD.model);
   await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}📋 결론\n` + (synth.text || '').trim().slice(0, 9000));
   extractFacts(repo || channel, `[토론: ${idea}]\n${(synth.text || '').slice(0, 1800)}`, '토론').catch(() => {}); // R7: 토론 결론에서 결정·사실 저장
+  if (synth.text && synth.ok !== false) lastDebate[channel] = { idea, conclusion: synth.text, at: Date.now() }; // 신규 기획이 이어받게 최근 토론 결론 보관
   // 결론의 액션아이템을 뽑아서 "승인하면 실제로 착수"하게 제시 (자동 실행 X — 사용자 승인 게이트). 레포 있을 때만(코드로 할 게 있어야 함).
   if (synth.text && synth.ok !== false) {
     const items = await extractActionItems(synth.text);
@@ -445,7 +446,7 @@ async function runLegalReview(client, channel, thread_ts, dir, repo, task) {
   } catch (_) {}
 }
 // ── 실제 작업 모드: 레포 클론 → claude 코드 작업 → 브랜치 push → PR → 보고 ──
-let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {}; const pendingPlan = {}; const pendingSchedule = {}; const pendingMcp = {}; const pendingRhythm = {}; const pendingDesign = {}; const pendingPayment = {}; const limitedResume = {}; const pendingOpp = {}; const pendingVerify = {}; const lastPR = {}; const lastRepoAt = {}; // 한도 재개 대기 + 기회 스카우트 게이트 + 조사 "원인 확정 먼저" 게이트 + 채널별 최근 PR + lastRepo 갱신시점(stale 컨텍스트 재개 방지)
+let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {}; const pendingPlan = {}; const pendingSchedule = {}; const pendingMcp = {}; const pendingRhythm = {}; const pendingDesign = {}; const pendingPayment = {}; const limitedResume = {}; const pendingOpp = {}; const pendingVerify = {}; const lastPR = {}; const lastRepoAt = {}; const lastDebate = {}; // 한도 재개 대기 + 기회 스카우트 게이트 + 조사 "원인 확정 먼저" 게이트 + 채널별 최근 PR + lastRepo 갱신시점 + 최근 토론 결론(신규 기획에 이어받기)
 const legalReviewedAt = {}; // repo → ts (법무·규제 검토 레포별 쿨다운 — 이어서/피드백 반복마다 재실행 방지)
 // 감사 C-16: 쿨다운 영속 — 봇이 자주 재배포되는데 메모리 전용이면 매 재시작마다 리셋돼 법무 재검토·중복 경보가 반복됨. (boot에서만 호출 — bizAlertSeen const 초기화 이후)
 const COOLDOWN_FILE = process.env.COOLDOWN_FILE || '/data/cooldowns.json';
@@ -706,8 +707,9 @@ async function runPRD(client, channel, thread_ts, task) {
   const TARGET = parseInt(process.env.PRD_TARGET || '98', 10);
   const scope = scopeOf(task); // I5: 규모 추정
   const MAX = parseInt(process.env.PRD_MAX_ROUNDS || (scope === 'core' ? '1' : '3'), 10); // 작은 건 1라운드, 큰 건 3
-  await postAs(client, channel, thread_ts, LEAD, `오 좋다. "${task}" 이거 바로 코드 안 짜고 기획부터 잡자.${scope === 'core' ? ' (간단해 보여서 핵심만 빠르게)' : ` PRD 완성도 ${TARGET}% 될 때까지 핑퐁 돌릴게.`}`);
-  let convo = `[만들 것]\n${task}\n`, prd = '', score = 0, limited = false;
+  const dbt = (lastDebate[channel] && Date.now() - lastDebate[channel].at < 3 * 3600000) ? lastDebate[channel] : null; // 최근(3h내) 토론 결론이면 기획에 이어받기
+  await postAs(client, channel, thread_ts, LEAD, `오 좋다. "${task}" 이거 바로 코드 안 짜고 기획부터 잡자.${dbt ? ' 아까 팀이 토론한 결론 그대로 이어받아서 PRD로 구체화할게.' : ''}${scope === 'core' ? ' (간단해 보여서 핵심만 빠르게)' : ` PRD 완성도 ${TARGET}% 될 때까지 핑퐁 돌릴게.`}`);
+  let convo = `[만들 것]\n${task}\n${dbt ? `\n[방금 이 채널에서 이 아이디어로 팀이 토론한 결론 — 이걸 기획의 출발점·근거로 삼아라. 처음부터 다시 묻지 말고 이 결론을 이어서 PRD로 구체화해라(이미 정한 형태·가정·리스크 대응을 반영)]\n${dbt.conclusion.slice(0, 2500)}\n` : ''}`, prd = '', score = 0, limited = false;
   const devil = byName('안다연');
   for (let round = 1; round <= MAX; round++) {
     if (workCancel[channel]) return null;
