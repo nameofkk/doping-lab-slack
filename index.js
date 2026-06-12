@@ -408,11 +408,17 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
   await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}📋 결론\n` + (synth.text || '').trim().slice(0, 9000));
   extractFacts(repo || channel, `[토론: ${idea}]\n${(synth.text || '').slice(0, 1800)}`, '토론').catch(() => {}); // R7: 토론 결론에서 결정·사실 저장
   // 결론의 액션아이템을 뽑아서 "승인하면 실제로 착수"하게 제시 (자동 실행 X — 사용자 승인 게이트). 레포 있을 때만(코드로 할 게 있어야 함).
-  if (repo && synth.text && synth.ok !== false) {
+  if (synth.text && synth.ok !== false) {
     const items = await extractActionItems(synth.text);
     const doable = items.filter(x => x.kind !== 'human');
     if (doable.length) {
-      await proposeOrAuto(client, channel, repo, items, '위 결론에서 착수 가능한 액션 뽑았어 (🟢저위험 🟡보통 🔴고위험)');
+      if (repo) { await proposeOrAuto(client, channel, repo, items, '위 결론에서 착수 가능한 액션 뽑았어 (🟢저위험 🟡보통 🔴고위험)'); }
+      else { // 새 아이디어 토론(기존 레포 없음): 조사는 WebSearch로 발의, build는 엉뚱한 레포에 박지 말고 "신규 빌드"로 안내
+        const inv = items.filter(x => x.kind === 'investigate').map(x => ({ ...x, repo: null }));
+        const blds = items.filter(x => x.kind === 'build');
+        if (inv.length) await proposeOrAuto(client, channel, WORK_DEFAULT_REPO, inv, '결론에서 지금 할 수 있는 조사 뽑았어 — WebSearch로 사실 확인할게 ("실행"). 안 할 거면 "넘어가"');
+        if (blds.length) await postAs(client, channel, thread_ts, LEAD, `이걸 실제로 만들려면 "${String(idea).slice(0, 30)}… 만들어줘"라고 해 — 신규 프로젝트로 기획→제작 들어갈게(기존 레포에 안 섞어). 만들 거 후보: ${blds.slice(0, 3).map(b => b.task.slice(0, 40)).join(' / ')}`);
+      }
     }
   }
 }
@@ -481,10 +487,21 @@ async function dispatchActionItems(client, channel, thread_ts, defaultRepo, item
       if (repos.length > 1) await postAs(client, channel, thread_ts, LEAD, `■ ${repo.split('/').pop()}`);
       activeWork[channel].repo = repo;
       if (investigates.length) {
-        const combined = '팀이 "확인 필요"라고 한 것들을 레포 코드로 직접 확인해서 사실로 답해라(추측 금지, 코드 근거로):\n' + investigates.map((x, i) => `${i + 1}. ${x.task}`).join('\n');
-        await postAs(client, channel, thread_ts, LEAD, `조사 ${investigates.length}건 까볼게.`);
-        const reportText = await runReport(client, channel, thread_ts, byName('우정잉') || LEAD, repo, combined);
-        if (reportText) followups.push({ repo, text: reportText });
+        // 버그: WebSearch/시장/외부정보 조사인데 레포 코드를 까던 것(나홀로소송 조사가 게임 레포를 클론). research는 WebSearch로(레포 안 깜), 코드 조사만 클론.
+        const isResearch = t => /websearch|web\s*search|검색량|시장\s*(조사|규모|분석|성)|외부\s*(개방|공개|api|제공)|트렌드|경쟁(사|자|작|상황)|수요\s*(조사|확인|검증)|벤치마크|api\s*(외부|공개|제공|개방|여부)|키워드\s*검색/i.test(t);
+        const research = investigates.filter(x => isResearch(x.task)), codeInv = investigates.filter(x => !isResearch(x.task));
+        if (research.length) {
+          await postAs(client, channel, thread_ts, byName('아이유') || LEAD, `웹조사 ${research.length}건 — WebSearch로 사실 확인할게(레포 안 까).`);
+          const rr = await runClaude(`WebSearch를 여러 각도로 적극적으로 써서 아래를 사실로 조사해 답해라. 추측 금지, 각 답에 출처 URL을 달아. 이건 레포 코드 얘기가 아니라 웹/시장 조사다:\n${research.map((x, i) => `${i + 1}. ${x.task}`).join('\n')}${STYLE}`, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 360000, false);
+          if (rr.text && rr.ok !== false && !rr.limited) { await postAs(client, channel, thread_ts, byName('아이유') || LEAD, deMd(rr.text.trim()).slice(0, 6000)); followups.push({ repo: null, text: rr.text }); }
+          else if (rr.limited) await postAs(client, channel, thread_ts, LEAD, '⏳ 웹조사 중 한도 걸림. 리셋되면 다시.');
+        }
+        if (codeInv.length) {
+          const combined = '팀이 "확인 필요"라고 한 것들을 레포 코드로 직접 확인해서 사실로 답해라(추측 금지, 코드 근거로):\n' + codeInv.map((x, i) => `${i + 1}. ${x.task}`).join('\n');
+          await postAs(client, channel, thread_ts, LEAD, `코드 조사 ${codeInv.length}건 까볼게.`);
+          const reportText = await runReport(client, channel, thread_ts, byName('우정잉') || LEAD, repo, combined);
+          if (reportText) followups.push({ repo, text: reportText });
+        }
       }
       const todo = builds.slice(0, 3);
       for (let bi = 0; bi < todo.length; bi++) {
