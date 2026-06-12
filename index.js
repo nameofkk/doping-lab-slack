@@ -699,15 +699,16 @@ const byName = (frag) => TEAM.find(p => p.name.includes(frag));
 // 기획에 의견 내는 빌더들 (PM·리서처·UX·아키텍트·보안·마케터). 반론자 안다연은 이들 뒤에 따로 반박 턴.
 // I5: 적응형 기획 — 작업 규모에 따라 기획 참여 페르소나 수 조절(작은 건 핵심 3명, 큰 건 풀 6명). 멀티에이전트 토큰 ~15배 비용을 규모에 맞게.
 function planTeam(scope) { const core = ['김채원', '윈터', '정소민']; const full = ['김채원', '아이유', '정소민', '윈터', '우정잉', '영듀']; return (scope === 'core' ? core : full).map(byName).filter(Boolean); }
-function scopeOf(task) { const big = /실시간|서버|백엔드|결제|구독|멀티|플랫폼|소셜|데이터베이스|\bdb\b|인증|소켓|\bapi\b|대시보드|관리자|게임|커머스|쇼핑|예약|채팅/i.test(task) || (task || '').length > 120; return big ? 'full' : 'core'; }
+// 규모/리스크 판단 — 큰 기술스택뿐 아니라 규제·법무·개인정보·결제 신호가 있으면 풀팀(우정잉 보안·법무 포함). 법률 서비스가 'core'로 축소돼 법무 검토가 빠지던 것 방지.
+function scopeOf(task) { const t = String(task || ''); const big = /실시간|서버|백엔드|결제|구독|멀티|플랫폼|소셜|데이터베이스|\bdb\b|인증|소켓|\bapi\b|대시보드|관리자|게임|커머스|쇼핑|예약|채팅|법률|소송|변호사|법무|규제|개인정보|민감정보|약관|계약|금융|의료|건강|아동|청소년|rag|벡터|벡터db|결제|토스|결제연동/i.test(t) || t.length > 120; return big ? 'full' : 'core'; }
 
 // 제작 전 라이브 기획 핑퐁 — 팀이 구어체로 PRD를 만들고, 팀장이 완성도 98% 될 때까지 반복해서 끌어올림.
 // 반환: 완성된 PRD 문서(문자열). 한도/중단이면 null (호출측이 제작 중단).
 async function runPRD(client, channel, thread_ts, task) {
   const TARGET = parseInt(process.env.PRD_TARGET || '98', 10);
-  const scope = scopeOf(task); // I5: 규모 추정
-  const MAX = parseInt(process.env.PRD_MAX_ROUNDS || (scope === 'core' ? '1' : '3'), 10); // 작은 건 1라운드, 큰 건 3
   const dbt = (lastDebate[channel] && Date.now() - lastDebate[channel].at < 3 * 3600000) ? lastDebate[channel] : null; // 최근(3h내) 토론 결론이면 기획에 이어받기
+  const scope = scopeOf(task + ' ' + (dbt ? dbt.conclusion.slice(0, 1200) : '')); // I5: 규모/리스크 추정 — 요청이 짧아도 토론 결론에 규제·결제·법무 신호 있으면 풀팀(우정잉 법무 포함)
+  const MAX = parseInt(process.env.PRD_MAX_ROUNDS || (scope === 'core' ? '1' : '3'), 10); // 작은 건 1라운드, 큰 건 3
   await postAs(client, channel, thread_ts, LEAD, `오 좋다. "${task}" 이거 바로 코드 안 짜고 기획부터 잡자.${dbt ? ' 아까 팀이 토론한 결론 그대로 이어받아서 PRD로 구체화할게.' : ''}${scope === 'core' ? ' (간단해 보여서 핵심만 빠르게)' : ` PRD 완성도 ${TARGET}% 될 때까지 핑퐁 돌릴게.`}`);
   let convo = `[만들 것]\n${task}\n${dbt ? `\n[방금 이 채널에서 이 아이디어로 팀이 토론한 결론 — 이걸 기획의 출발점·근거로 삼아라. 처음부터 다시 묻지 말고 이 결론을 이어서 PRD로 구체화해라(이미 정한 형태·가정·리스크 대응을 반영)]\n${dbt.conclusion.slice(0, 2500)}\n` : ''}`, prd = '', score = 0, limited = false;
   const devil = byName('안다연');
