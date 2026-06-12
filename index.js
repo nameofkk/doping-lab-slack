@@ -936,10 +936,10 @@ async function runCritic(client, channel, thread_ts, dir, task, prd, repo) {
     if (/"test"\s*:/.test(pkg) && !/no test specified/.test(pkg)) { bumpWork(channel); const ts = await sh('npm test 2>&1 | tail -15', dir, 240000); signals.push(ts.code === 0 ? '✅ 테스트 통과' : '❌ 테스트 실패:\n' + (ts.out || '').slice(-800)); }
     const buildSignal = signals.length ? signals.join('\n') : '(빌드/테스트 스크립트 없음 — 정적/단순 프로젝트)';
     const crit = repo ? soulCriteria(repo) : '';
-    const c = await runClaude(`너는 깐깐한 심사자(critic)다. 의견이 아니라 아래 [실제 검증 결과(빌드·타입·테스트)]와 코드를 근거로만 판정해라. 후하게 주지 마.\n\n요청: "${task}"\n\n[실제 검증 결과 — 이게 1차 ground truth]\n${buildSignal}${crit}\n\n루브릭(각 0~1, 코드 근거로):\n- 요청충족: 요청한 걸 실제 구현(빈껍데기·플레이스홀더·TODO=0)\n- 검증: 위 빌드/타입/테스트 결과 기준(하나라도 실패면 0)\n- 정합성: 명백한 버그·미연결·깨진 import 없음\n- 보안: 하드코딩 시크릿·주입 구멍 없음${crit ? '\n- 제품기준: 위 고정 합격기준이 실제로 동작(일부라도 미동작이면 감점)' : ''}${prd ? '\n- PRD반영: PRD 핵심기능 구현' : ''}\n\n첫 줄에 반드시 "PASS"(평균 ≥0.7 그리고 검증=1) 또는 "FAIL". 다음 줄에 각 항목 점수, 그 다음 FAIL이면 무엇을·어느 파일을 고쳐야 하는지. 마크다운 금지.`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 300000);
+    const c = await runClaude(`너는 깐깐한 심사자(critic)다. 의견이 아니라 아래 [실제 검증 결과(빌드·타입·테스트)]와 코드를 근거로만 판정해라. 후하게 주지 마.\n\n요청: "${task}"\n\n[실제 검증 결과 — 이게 1차 ground truth]\n${buildSignal}${crit}\n\n루브릭(각 0~1, 코드 근거로):\n- 요청충족: 요청한 걸 실제 구현(빈껍데기·플레이스홀더·TODO=0)\n- 검증: 위 빌드/타입/테스트 결과 기준(하나라도 실패면 0)\n- 정합성: 명백한 버그·미연결·깨진 import 없음\n- 보안: 하드코딩 시크릿·주입 구멍 없음${crit ? '\n- 제품기준: 위 고정 합격기준이 실제로 동작(일부라도 미동작이면 감점)' : ''}${prd ? '\n- PRD반영: PRD 핵심기능 구현' : ''}\n\n첫 줄에 반드시 "PASS"(평균 ≥0.7 그리고 검증=1) 또는 "FAIL"(이 두 글자만, 다른 말 붙이지 마). 다음 줄에 각 항목 점수, 그 다음 FAIL이면 무엇을·어느 파일을 고쳐야 하는지. 판정 근거는 보고서체("~이다/~한다/거짓이다") 말고 팀 동료한테 말하듯 반말 구어체로 써("이거 테스트 통과라는 거 거짓이야, 실제로 npm test 돌리면 깨져" 식). 단 첫 줄 PASS/FAIL과 점수 줄은 형식 그대로. 마크다운 금지.`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 300000);
     const verdict = (c.text || '').trim();
     if (c.limited || /^\s*PASS/i.test(verdict)) { jobUpdate(channel, { critic: 'PASS' }); return true; }
-    await postAs(client, channel, thread_ts, sec, `🔎 심사에서 걸렸어(빌드결과 기반). 고치고 갈게:\n${verdict.slice(0, 500)}`);
+    await postAs(client, channel, thread_ts, sec, `🔎 심사에서 걸렸어(빌드결과 기반). 고치고 갈게:\n${verdict.slice(0, 4000)}`); // 500→4000: 판정 근거가 "디렉터리가 하"처럼 문장 중간 잘리던 버그(postAs가 분할게시)
     jobUpdate(channel, { critic: 'FAIL→수정', note: verdict.replace(/\n/g, ' ').slice(0, 150) });
     if (attempt >= 2) return false; // 두 번째도 FAIL이면 더 안 돌리고 정직하게 미충족 보고(아래 호출측)
     const fix = await runClaude(`심사자가 [실제 빌드 결과]와 코드를 근거로 다음을 지적했어. 지적대로 실제로 고쳐라(추측 말고 코드 직접 수정). 빌드 통과 유지.\n\n[지적]\n${verdict.slice(0, 2000)}\n\n원래 요청: "${task}"`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 540000, true);
@@ -1042,8 +1042,8 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
     let prevGapCount = Infinity, stallStreak = 0; const progress = [];
     for (let pass = 1; pass <= 4 && !workCancel[channel]; pass++) {
       bumpWork(channel);
-      if (jobTokens(channel) > JOB_TOKEN_CAP) { progress.push(`토큰 캡 초과 → 하드스톱`); await postAs(client, channel, thread_ts, LEAD, '⚠️ 이 작업이 토큰 한도(설정값)를 넘어서 더 안 돌리고 지금까지 만든 걸로 마무리할게. 부족하면 "이어서".'); break; }
-      if (activeWork[channel] && Date.now() - activeWork[channel].started > JOB_WALL_CAP_MS) { progress.push(`시간 캡 초과 → 하드스톱`); await postAs(client, channel, thread_ts, LEAD, '⚠️ 이 작업이 너무 오래 걸려서(시간 한도) 여기서 마무리할게. 부족하면 "이어서".'); break; }
+      if (jobTokens(channel) > JOB_TOKEN_CAP) { progress.push(`토큰 캡 초과 → 하드스톱`); await postAs(client, channel, thread_ts, LEAD, newProject ? '큰 프로젝트라 한 번에 다 못 만들었어(토큰 한도). 지금까지 만든 건 레포에 저장해뒀어 — 날아간 거 없어. "이어서" 하면 남은 부분 그대로 이어서 채울게.' : '⚠️ 이 작업이 토큰 한도(설정값)를 넘어서 더 안 돌리고 지금까지 만든 걸로 마무리할게. 부족하면 "이어서".'); break; }
+      if (activeWork[channel] && Date.now() - activeWork[channel].started > (newProject ? JOB_WALL_CAP_NEW_MS : JOB_WALL_CAP_MS)) { progress.push(`시간 캡 초과 → 하드스톱`); await postAs(client, channel, thread_ts, LEAD, newProject ? '큰 프로젝트라 한 번에 다 못 만들었어 — 이런 규모는 원래 한 번에 안 끝나. 지금까지 만든 건 레포에 저장해뒀고(날아간 거 없어), "이어서" 하면 남은 부분 그대로 이어서 채울게. 몇 번 "이어서" 하면 완성돼.' : '⚠️ 이 작업이 너무 오래 걸려서(시간 한도) 여기서 마무리할게. 부족하면 "이어서".'); break; }
       const gaps = await checkAppGaps(dir);
       const fbCont = drainFeedback(channel);
       if (!gaps.length && !fbCont) { progress.push(`${pass - 1}차 후 갭 없음 → 완료`); break; }
@@ -1091,8 +1091,10 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   } catch (_) {}
   let mainErr = '';
   // 감사 P0: 프로드 레포(라이브/사업지표) 변경은 항상 PR(사람 머지 게이트), 미완성(심사 실패·빈구멍)도 main 직행 금지 → 검증 안 된/실패한 코드가 자동배포로 라이브 나가는 것 차단.
-  const prodForced = isProd(repo) && !forcePR, incompleteForced = incomplete && !forcePR;
-  const gateBuildsForced = settings.gateBuilds !== false && !forcePR && !prodForced && !incompleteForced; // 모든 빌드 기본 게이트(PR→머지). "빌드 게이트 꺼"로 비프로드 직행 허용
+  const prodForced = isProd(repo) && !forcePR;
+  // 신규 프로젝트 첫 빌드는 미완성이어도 자기 레포 main에 올린다 — 빈 레포라 보호할 라이브가 없고(프로드 아님), main에 있어야 "이어서"가 PR브랜치 고아 없이 이어간다(전엔 미완성 신규→PR브랜치→"이어서"는 빈 main 클론해 처음부터 다시 짜던 치명버그). 단 승인모드(forcePR)는 사용자 선택이라 존중.
+  const incompleteForced = incomplete && !forcePR && !newProject;
+  const gateBuildsForced = settings.gateBuilds !== false && !forcePR && !prodForced && !incompleteForced && !newProject; // 모든 빌드 기본 게이트(PR→머지). 신규 첫 빌드는 제외(자기 레포 main이 집). "빌드 게이트 꺼"로 비프로드 직행 허용
   const mustPR = forcePR || prodForced || incompleteForced || gateBuildsForced;
   if (!mustPR) {
     const pushMain = await sh(`git push origin HEAD:${WORK_BASE}`, dir);
@@ -1439,6 +1441,7 @@ function addJobTokens(channel, n) { const id = activeWork[channel] && activeWork
 function jobTokens(channel) { const id = activeWork[channel] && activeWork[channel].jobId; return (id && jobs[id] && jobs[id].tokens) || 0; }
 const JOB_TOKEN_CAP = parseInt(process.env.JOB_TOKEN_CAP || '900000', 10); // job당 출력토큰 추정 상한 — 초과 시 루프 하드스톱(2700만 토큰 루프류 방지)
 const JOB_WALL_CAP_MS = parseInt(process.env.JOB_WALL_CAP_MIN || '20', 10) * 60000; // job당 벽시계 상한
+const JOB_WALL_CAP_NEW_MS = parseInt(process.env.JOB_WALL_CAP_NEW_MIN || '40', 10) * 60000; // 신규 프로젝트는 통째 빌드(RAG·결제·다화면)라 더 긴 창 — 20분으론 한 번에 못 끝내 매번 잘렸음. 토큰 캡(JOB_TOKEN_CAP)이 비용 백스톱이라 시간창은 넉넉히 줘도 폭주 안 함.
 function endJob(channel) { const id = activeWork[channel] && activeWork[channel].jobId; if (id && jobs[id] && jobs[id].status === 'running') jobUpdateById(id, { status: 'done' }); } // 종료 시 아직 running이면 done (정확한 상태는 각 함수가 먼저 박음)
 function jobBoard(channel) {
   const mine = Object.values(jobs).filter(j => j.channel === channel).sort((a, b) => b.id - a.id).slice(0, 12);
