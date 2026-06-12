@@ -700,7 +700,7 @@ async function runPRD(client, channel, thread_ts, task) {
     for (const p of planTeam(scope)) {
       bumpWork(channel); // PRD 핑퐁 도는 동안 생존신호(외부 스피너가 덮지만 이중 보강)
       if (workCancel[channel]) return null;
-      const guide = round === 1 ? '네 담당 관점에서 이걸 어떻게 만들지 핵심 2~3개 구체적으로.' : '지금 PRD에서 네 영역에 빠졌거나 약한 부분만 콕 집어 보강해. 반복 말고 새로 더할 것만.';
+      const guide = round === 1 ? '네 담당 관점에서 이걸 어떻게 만들지 핵심 2~3개를 구체적으로 "결정"해라. 요청이 모호하거나 형태가 여럿이면(예: 서류생성/절차안내/연결) 사용자한테 되묻지 말고 가장 합리적인 형태를 가정으로 정해 그 위에서 설계해라 — "이게 뭔지 모르겠다"로 멈추는 건 기획이 아니다. 앞사람과 같은 말·질문 반복 금지.' : '지금 PRD에서 네 영역에 빠졌거나 약한 부분만 콕 집어 보강해. 반복·맞장구·되묻기 금지, 새로 더하거나 결정할 것만.';
       const r = await runClaude(`${p.prompt}${STYLE}${rulesCtx(channel)}\n\n[지금까지 기획/PRD]\n${convo}\n\n${guide} 친한 동료처럼 편하게, 마크다운 금지.`, p.model, WORKDIR, CLAUDE_PERMISSION_MODE, 120000);
       if (r.limited) { limited = true; break; }
       const msg = (r.text || '').trim().slice(0, 900);
@@ -714,7 +714,7 @@ async function runPRD(client, channel, thread_ts, task) {
       if (dm && r.ok !== false) { await postAs(client, channel, thread_ts, devil, dm); convo += `\n안다연(반론): ${dm}`; }
     }
     // 팀장: PRD 문서 작성 + 완성도 평가
-    const synth = await runClaude(`${LEAD.prompt}${PLAIN}${rulesCtx(channel)}\n\n[지금까지 팀 논의]\n${convo}\n\n위 논의를 바탕으로 이 프로젝트 PRD를 아래 항목으로 작성해라. 구어체로 쓰되 내용은 구체적으로:\n목표 /\n타겟·사용맥락 /\n핵심기능(우선순위) /\n화면·플로우 /\n기술스택 /\n차별화 훅 /\n성공지표 /\n리스크·대응\n\n맨 마지막 줄에 반드시 "완성도: NN%" 형식으로 이 PRD 완성도를 숫자로 매겨라. ${TARGET}% 미만이면 뭐가 부족한지 한두 줄. 마크다운 별표·샵 금지.`, LEAD.model, WORKDIR, CLAUDE_PERMISSION_MODE, 180000);
+    const synth = await runClaude(`${LEAD.prompt}${PLAIN}${rulesCtx(channel)}\n\n[지금까지 팀 논의]\n${convo}\n\n위 논의를 바탕으로 이 프로젝트 PRD를 아래 항목으로 작성해라. 구어체로 쓰되 내용은 구체적으로:\n목표 /\n타겟·사용맥락 /\n핵심기능(우선순위) /\n화면·플로우 /\n기술스택 /\n차별화 훅 /\n성공지표 /\n리스크·대응\n\n모호한 결정(형태·범위·스택 등)은 합리적 기본값으로 PRD에 "확정"해 박아라 — "TBD"나 "사용자 확인 필요"로 비워두면 완성도가 안 올라가고 제작도 못 들어간다. 정말 사용자만 정할 수 있는 1~2개만 맨 끝에 "이것만 확인 요망"으로 짧게.\n맨 마지막 줄에 반드시 "완성도: NN%" 형식으로 이 PRD 완성도를 숫자로 매겨라. ${TARGET}% 미만이면 뭐가 부족한지 한두 줄. 마크다운 별표·샵 금지.`, LEAD.model, WORKDIR, CLAUDE_PERMISSION_MODE, 180000);
     if (synth.limited) { limited = true; break; }
     if (synth.text && synth.ok !== false) { prd = synth.text.trim(); convo += `\n[팀장 PRD v${round}]\n${prd}`; await postAs(client, channel, thread_ts, LEAD, prd.slice(0, 2800)); }
     const all = [...prd.matchAll(/완성도\s*[^0-9%]{0,5}([0-9]{1,3})\s*(?:%|퍼센트|점)/g)]; score = all.length ? parseInt(all[all.length - 1][1], 10) : score; // 맨 마지막 "완성도 NN%"(최종 점수)를 잡음 — 본문에 목표치(예 "완성도 98% 목표") 먼저 언급해도 그걸로 오인해 조기 제작 안 하게. "완성도는 95%"/"95점"도 인식
