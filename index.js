@@ -990,7 +990,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
     await postAs(client, channel, thread_ts, LEAD, `🛠️ 작업 받았어\n레포: ${repo}\n할 일: ${task}\n클론하고 코드 손본 다음 ${forcePR ? 'PR로 올릴게(승인모드)' : WORK_BASE + '에 바로 반영할게'}. 좀 걸려.`);
   }
   lastRepo[channel] = repo; lastRepoAt[channel] = Date.now(); persistLastRepo(); // 채널이 방금 다룬 레포 + 시점 기억 (후속 "이거 고쳐줘" 문맥용 + stale 재개 방지)
-  const prog = startProgress(channel, thread_ts, '일단 레포 받아오는 중');
+  let prog = startProgress(channel, thread_ts, '일단 레포 받아오는 중'); // let: 신규 프로젝트는 긴 PRD 후 스피너를 맨 아래로 다시 앵커(아래 참고)
   try {
   const cl = await sh(`rm -rf ${dir} && git clone https://x-access-token:${GITHUB_TOKEN}@github.com/${repo}.git ${dir} && chmod -R 777 ${dir} && git -C ${dir} config core.fileMode false`);
   if (cl.code !== 0) { await postAs(client, channel, thread_ts, LEAD, `클론 실패ㅠ — '${repo}' 레포 이름이 맞는지 확인해줘 (없는 이름이면 못 받아와). "서비스 목록"으로 확인되고, sponono/wewantpeace/myungjak 중 하나거나 정확한 owner/repo면 돼.\n` + (cl.err || '').slice(0, 300)); return; }
@@ -1005,7 +1005,11 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const prd = newProject ? await runPRD(client, channel, thread_ts, task) : '';
   if (workCancel[channel]) { delete workCancel[channel]; await postAs(client, channel, thread_ts, LEAD, '기획 단계에서 중단했어. 아무것도 안 올렸어.'); return; }
   if (newProject && prd === null) return; // 한도/중단 → runPRD가 이미 안내함, 제작 안 들어감
-  if (newProject) await postAs(client, channel, thread_ts, LEAD, '좋아 PRD 확정됐고, 이제 이 PRD 그대로 실제 코드 짤게. 좀 걸려.');
+  if (newProject) {
+    await postAs(client, channel, thread_ts, LEAD, '좋아 PRD 확정됐고, 이제 이 PRD 그대로 실제 코드 짤게. 좀 걸려.');
+    // 스피너 재앵커 — 긴 PRD 핑퐁이 스피너를 위로 밀어버려서 빌드(9분) 동안 진행표시가 안 보이던 것. 빌드 시작점에 새 스피너를 맨 아래로.
+    try { await prog.done(); } catch (_) {} prog = startProgress(channel, thread_ts, '지금 코드 짜는 중이야');
+  }
   if (newProject && prd && repo) await buildSoul(repo, prd, task).catch(() => {}); // 제품 혼(원래 목적·합격기준) 영속 — 이후 이어서·심사에 주입
   prog.phase('지금 코드 짜는 중이야');
   const assetHeavy = /게임|game|sprite|스프라이트|캐릭터|에셋|asset|픽셀|pixel|애니메이션|아케이드|arcade|2d|3d|canvas|phaser/i.test(task);
