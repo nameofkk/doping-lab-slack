@@ -722,15 +722,15 @@ async function runPRD(client, channel, thread_ts, task) {
       const guide = round === 1 ? '네 담당 관점에서 이걸 어떻게 만들지 핵심 2~3개를 구체적으로 "결정"해라. 요청이 모호하거나 형태가 여럿이면(예: 서류생성/절차안내/연결) 사용자한테 되묻지 말고 가장 합리적인 형태를 가정으로 정해 그 위에서 설계해라 — "이게 뭔지 모르겠다"로 멈추는 건 기획이 아니다. 앞사람과 같은 말·질문 반복 금지.' : '지금 PRD에서 네 영역에 빠졌거나 약한 부분만 콕 집어 보강해. 반복·맞장구·되묻기 금지, 새로 더하거나 결정할 것만.';
       const r = await runClaude(`${p.prompt}${STYLE}${rulesCtx(channel)}\n\n[지금까지 기획/PRD]\n${convo}\n\n${guide} 친한 동료처럼 편하게, 마크다운 금지.`, p.model, WORKDIR, CLAUDE_PERMISSION_MODE, 120000);
       if (r.limited) { limited = true; break; }
-      const msg = (r.text || '').trim().slice(0, 900);
-      if (msg && r.ok !== false) { await postAs(client, channel, thread_ts, p, msg); convo += `\n${p.name}: ${msg}`; }
+      const msg = (r.text || '').trim().slice(0, 6000); // 900→6000: 페르소나 의견이 길어도 안 잘리게(postAs가 분할게시)
+      if (msg && r.ok !== false) { await postAs(client, channel, thread_ts, p, msg); convo += `\n${p.name}: ${msg.slice(0, 1500)}`; } // convo 누적은 1500로(컨텍스트 비대 방지)
     }
     if (limited) break;
     if (devil && !workCancel[channel]) {
       const r = await runClaude(`${devil.prompt}${STYLE}${rulesCtx(channel)}\n\n[지금 PRD/논의]\n${convo}\n\n넌 반론자야. 빠졌거나 위험하거나 과하거나 사용자가 안 쓸 부분 콕 집어 반박하고, 지적마다 보완책 한 줄씩. 편하게, 마크다운 금지.`, devil.model, WORKDIR, CLAUDE_PERMISSION_MODE, 120000);
       if (r.limited) { limited = true; break; }
-      const dm = (r.text || '').trim().slice(0, 900);
-      if (dm && r.ok !== false) { await postAs(client, channel, thread_ts, devil, dm); convo += `\n안다연(반론): ${dm}`; }
+      const dm = (r.text || '').trim().slice(0, 6000); // 900→6000: 반론 5~6개가 잘려서 "지급명령이나 말하다가 끊기는거"처럼 중간에 잘리던 버그(postAs가 분할)
+      if (dm && r.ok !== false) { await postAs(client, channel, thread_ts, devil, dm); convo += `\n안다연(반론): ${dm.slice(0, 1800)}`; } // convo 누적은 1800로
     }
     // 팀장: PRD 문서 작성 + 완성도 평가
     const synth = await runClaude(`${LEAD.prompt}${PLAIN}${rulesCtx(channel)}\n\n[지금까지 팀 논의]\n${convo}\n\n위 논의를 바탕으로 이 프로젝트 PRD를 아래 항목으로 작성해라. 구어체로 쓰되 내용은 구체적으로:\n목표 /\n타겟·사용맥락 /\n핵심기능(우선순위) /\n화면·플로우 /\n기술스택 /\n차별화 훅 /\n성공지표 /\n리스크·대응\n\n모호한 결정(형태·범위·스택 등)은 합리적 기본값으로 PRD에 "확정"해 박아라 — "TBD"나 "사용자 확인 필요"로 비워두면 완성도가 안 올라가고 제작도 못 들어간다. 정말 사용자만 정할 수 있는 1~2개만 맨 끝에 "이것만 확인 요망"으로 짧게.\n맨 마지막 줄에 반드시 "완성도: NN%" 형식으로 이 PRD 완성도를 숫자로 매겨라. ${TARGET}% 미만이면 뭐가 부족한지 한두 줄. 마크다운 별표·샵 금지.`, LEAD.model, WORKDIR, CLAUDE_PERMISSION_MODE, 180000);
@@ -874,7 +874,7 @@ async function qaGate(client, channel, thread_ts, dir) {
   else if ((au.out || '').trim()) await postAs(client, channel, thread_ts, sec, '의존성에 취약점 좀 떴어. 심각한 건 잡자:\n' + au.out.slice(-400));
   // 3) 코드/보안 리뷰 (진짜 문제만)
   const rev = await runClaude(`이 저장소를 보안·버그 관점에서 빠르게 리뷰해라. 진짜 문제만 짚어 (하드코딩된 시크릿/키, 입력검증 누락, 명백한 버그, 인증·권한 허점, 위험한 패턴). 없으면 솔직히 "큰 문제 없음"이라고 해. 지어내지 마.${PLAIN}`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 180000);
-  if (rev.text && rev.ok !== false && !rev.limited) await postAs(client, channel, thread_ts, sec, '코드 보안/버그 리뷰했어:\n' + rev.text.trim().slice(0, 900));
+  if (rev.text && rev.ok !== false && !rev.limited) await postAs(client, channel, thread_ts, sec, '코드 보안/버그 리뷰했어:\n' + rev.text.trim().slice(0, 4000)); // 900→4000(분할게시라 안 잘림)
 }
 
 // 앱 빈구멍 탐지 — 빌드는 통과해도 실제 사용자 화면/핵심이 비어있는 "껍데기"를 잡아냄 (빈 Next 앱도 build는 통과하므로 build 성공≠완성)
