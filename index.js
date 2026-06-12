@@ -3034,7 +3034,9 @@ async function startWork(client, channel, thread_ts, repo, task, newProject, for
   const autoPilot = !!(settings.autopilot && settings.autopilot[channel]);
   if (autoPilot && newProject) { logDecision(channel, 'autopilot-newproject', `무게이트 신규제작: ${String(task).slice(0, 50)}`); await postAs(client, channel, thread_ts, LEAD, `🛸 오토파일럿: 질문·승인 없이 바로 기획→제작→QA→배포까지 알아서 갈게. 계정·키 필요한 건 그때 알려줄게.`); launchWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName); return; }
   // 기존 레포 작업·이어가기·완성은 질문 없이 바로 진행 (정체성/경로 같은 쓸데없는 재질문 마찰 제거). 질문은 방향이 크게 갈리는 '신규 제작'에서만.
-  const qs = newProject ? await planQuestions(task, newProject) : [];
+  // 단, 방금(3h내) 이 아이디어를 팀이 토론해 방향을 잡았으면 clarify는 중복 — 되묻지 말고 토론 결론을 runPRD가 이어받게(transcript: 나홀로소송 토론 직후 "기능 3가지는?" 또 묻던 버그). runPRD의 dbt 조건과 동일.
+  const hasFreshDebate = !!(lastDebate[channel] && Date.now() - lastDebate[channel].at < 3 * 3600000);
+  const qs = (newProject && !hasFreshDebate) ? await planQuestions(task, newProject) : [];
   if (qs.length) {
     pendingProject[channel] = { repo, task, newProject, forcePR, projName, at: Date.now() }; persistPending();
     await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오 좋다. ${newProject ? '만들기' : '작업'} 전에 이것만 먼저 정해주라:\n${qs.map((q, i) => `${i + 1}. ${q}`).join('\n')}\n\n답 주면 그대로 들어갈게. 알아서 정해도 되면 "알아서 해"라고 해도 돼.`);
