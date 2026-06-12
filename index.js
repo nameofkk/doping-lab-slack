@@ -520,9 +520,16 @@ async function dispatchActionItems(client, channel, thread_ts, defaultRepo, item
     for (const f of followups) {
       try {
         const acts = await extractActionItems(f.text);
-        const fixes = (acts || []).filter(a => a && a.task && ['build', 'investigate'].includes(a.kind)).slice(0, 3)
-          .map(a => { const nm = f.repo === SELF_REPO ? '봇' : f.repo.split('/').pop(); return { who: '조사후속', repo: f.repo, task: `[${nm}] ${a.task}`, kind: a.kind }; });
-        if (fixes.length) { await proposeOrAuto(client, channel, fixes[0].repo, fixes, `조사 결과 — 다음 실행 제안 (${f.repo === SELF_REPO ? '봇' : f.repo.split('/').pop()})`, { forceGate: true }); followProposed = true; }
+        const items = (acts || []).filter(a => a && a.task && ['build', 'investigate'].includes(a.kind)).slice(0, 3);
+        if (!items.length) continue;
+        if (f.repo) { // 코드조사 후속 — 해당 레포에 수정/조사 제안을 게이트로
+          const nm = f.repo === SELF_REPO ? '봇' : f.repo.split('/').pop();
+          const fixes = items.map(a => ({ who: '조사후속', repo: f.repo, task: `[${nm}] ${a.task}`, kind: a.kind }));
+          await proposeOrAuto(client, channel, fixes[0].repo, fixes, `조사 결과 — 다음 실행 제안 (${nm})`, { forceGate: true }); followProposed = true;
+        } else { // 웹/시장 조사 후속 — 붙일 레포가 없음(repo:null). build류는 신규 프로젝트 착수가 필요해 레포에 디스패치 못 함(전엔 null.split로 조용히 유실). 텍스트로 다음 액션 제시.
+          const nb = items.filter(a => a.kind === 'build');
+          if (nb.length) { await postAs(client, channel, thread_ts, LEAD, `조사 결과 바탕으로 다음으로 만들 만한 것:\n${nb.map((a, i) => `${i + 1}. ${a.task}`).join('\n')}\n— "신규 프로젝트로 <위 내용> 만들어"라고 하면 기획부터 들어갈게.`); followProposed = true; }
+        }
       } catch (_) {}
     }
     if (followProposed) await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}조사 끝났어. 결과 바탕으로 다음 실행안을 위에 제안해놨으니, "실행"으로 승인하면 착수할게(원인 확인됐으면 바로 고치는 거야).`);
@@ -736,7 +743,7 @@ async function runPRD(client, channel, thread_ts, task) {
     // 팀장: PRD 문서 작성 + 완성도 평가
     const synth = await runClaude(`${LEAD.prompt}${PLAIN}${rulesCtx(channel)}\n\n[지금까지 팀 논의]\n${convo}\n\n위 논의를 바탕으로 이 프로젝트 PRD를 아래 항목으로 작성해라. 구어체로 쓰되 내용은 구체적으로:\n목표 /\n타겟·사용맥락 /\n핵심기능(우선순위) /\n화면·플로우 /\n기술스택 /\n차별화 훅 /\n성공지표 /\n리스크·대응\n\n모호한 결정(형태·범위·스택 등)은 합리적 기본값으로 PRD에 "확정"해 박아라 — "TBD"나 "사용자 확인 필요"로 비워두면 완성도가 안 올라가고 제작도 못 들어간다. 정말 사용자만 정할 수 있는 1~2개만 맨 끝에 "이것만 확인 요망"으로 짧게.\n맨 마지막 줄에 반드시 "완성도: NN%" 형식으로 이 PRD 완성도를 숫자로 매겨라. ${TARGET}% 미만이면 뭐가 부족한지 한두 줄. 마크다운 별표·샵 금지.`, LEAD.model, WORKDIR, CLAUDE_PERMISSION_MODE, 180000);
     if (synth.limited) { limited = true; break; }
-    if (synth.text && synth.ok !== false) { prd = synth.text.trim(); convo += `\n[팀장 PRD v${round}]\n${prd}`; await postAs(client, channel, thread_ts, LEAD, prd.slice(0, 2800)); }
+    if (synth.text && synth.ok !== false) { prd = synth.text.trim(); convo += `\n[팀장 PRD v${round}]\n${prd}`; await postAs(client, channel, thread_ts, LEAD, prd.slice(0, 6000)); } // 2800→6000: PRD 본문이 "8.리스크와 대응"에서 문장 중간 잘리던 버그(postAs가 알아서 분할). 사용자가 "말하다가 끊기는거"로 짚은 더 큰 원인
     const all = [...prd.matchAll(/완성도\s*[^0-9%]{0,5}([0-9]{1,3})\s*(?:%|퍼센트|점)/g)]; score = all.length ? parseInt(all[all.length - 1][1], 10) : score; // 맨 마지막 "완성도 NN%"(최종 점수)를 잡음 — 본문에 목표치(예 "완성도 98% 목표") 먼저 언급해도 그걸로 오인해 조기 제작 안 하게. "완성도는 95%"/"95점"도 인식
     if (score >= TARGET) { await postAs(client, channel, thread_ts, LEAD, `좋아 PRD 완성도 ${score}% 나왔어. 이 PRD 그대로 제작 들어갈게.`); break; }
     if (round < MAX) await postAs(client, channel, thread_ts, LEAD, `아직 ${score || '미정'}%라 한 라운드 더 보강하자.`);
@@ -1006,9 +1013,9 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   if (workCancel[channel]) { delete workCancel[channel]; await postAs(client, channel, thread_ts, LEAD, '기획 단계에서 중단했어. 아무것도 안 올렸어.'); return; }
   if (newProject && prd === null) return; // 한도/중단 → runPRD가 이미 안내함, 제작 안 들어감
   if (newProject) {
-    await postAs(client, channel, thread_ts, LEAD, '좋아 PRD 확정됐고, 이제 이 PRD 그대로 실제 코드 짤게. 좀 걸려.');
+    // runPRD가 직전에 "PRD 그대로 제작 들어갈게"를 이미 말했으니 같은 말 반복 안 함(중복 메시지 제거).
     // 스피너 재앵커 — 긴 PRD 핑퐁이 스피너를 위로 밀어버려서 빌드(9분) 동안 진행표시가 안 보이던 것. 빌드 시작점에 새 스피너를 맨 아래로.
-    try { await prog.done(); } catch (_) {} prog = startProgress(channel, thread_ts, '지금 코드 짜는 중이야');
+    try { await prog.done(); } catch (_) {} prog = startProgress(channel, thread_ts, '지금 코드 짜는 중이야 (좀 걸려)');
   }
   if (newProject && prd && repo) await buildSoul(repo, prd, task).catch(() => {}); // 제품 혼(원래 목적·합격기준) 영속 — 이후 이어서·심사에 주입
   prog.phase('지금 코드 짜는 중이야');
