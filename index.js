@@ -1098,6 +1098,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const cl = await sh(`rm -rf ${dir} && git clone https://x-access-token:${GITHUB_TOKEN}@github.com/${repo}.git ${dir} && chmod -R 777 ${dir} && git -C ${dir} config core.fileMode false`);
   if (cl.code !== 0) { await postAs(client, channel, thread_ts, LEAD, `클론 실패ㅠ — '${repo}' 레포 이름이 맞는지 확인해줘 (없는 이름이면 못 받아와). "서비스 목록"으로 확인되고, sponono/wewantpeace/myungjak 중 하나거나 정확한 owner/repo면 돼.\n` + (cl.err || '').slice(0, 300)); return; }
   await sh(`git config user.name "doping-lab[bot]" && git config user.email "bot@doping.lab"`, dir);
+  const cloneHead = (await sh('git rev-parse HEAD', dir)).out.trim(); // 클론 시점 HEAD — 에이전트가 직접 push했는지 감지용
   // P3: 한도로 저장됐던 WIP 브랜치에서 이어가기 — 그 지점부터 계속 만들어 손실 0
   if (resumeBranch) { const co = await sh(`git checkout ${resumeBranch} 2>&1`, dir); if (co.code === 0) await postAs(client, channel, thread_ts, LEAD, `(${resumeBranch}에 저장돼 있던 데까지 불러와서 거기서 이어 만들게)`).catch(() => {}); }
   const intro = newProject
@@ -1159,11 +1160,16 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const repoUrl = `https://github.com/${repo}`;
   const cmsg = task.slice(0, 60).replace(/[`$"\\!\r\n;|&<>()]/g, '').trim() || '작업'; // 셸 명령치환/인젝션 방지 (백틱·$·따옴표 등 제거)
   // 빈 커밋 방지: 에이전트가 언스테이지로 남기거나 빈 커밋만 만들어도 여기서 전량 커밋 → 워킹트리 깨끗하게(critic이 깔끔한 상태를 봄). 변경 판정은 origin 대비 커밋 차이로.
+  // 감사: 에이전트가 직접 push해서 origin/main이 이동한 경우도 감지 — fetch 후 비교
+  await sh(`git fetch origin ${WORK_BASE} 2>/dev/null`, dir); // origin 최신화 (에이전트가 push했으면 origin이 앞으로 감)
   await sh('git add -A', dir);
   const stagedNow = (await sh('git diff --cached --quiet; echo $?', dir)).out.trim().endsWith('1'); // 1=스테이지된 변경 있음
   if (stagedNow) await sh(`git commit -m "도핑연구소: ${cmsg}"`, dir);
-  const aheadN = parseInt(((await sh(`git rev-list --count origin/${WORK_BASE}..HEAD 2>/dev/null || echo 0`, dir)).out || '0').trim(), 10) || 0; // origin보다 앞선 커밋 수(에이전트가 이미 커밋했어도 잡힘)
-  if (!stagedNow && aheadN === 0) { jobUpdate(channel, { status: 'done', note: '변경 없음' }); await postAs(client, channel, thread_ts, LEAD, `변경/생성된 게 없었어.\n${repoUrl}\n\n` + (res.text || '').trim().slice(0, 1500)); return; }
+  const aheadN = parseInt(((await sh(`git rev-list --count origin/${WORK_BASE}..HEAD 2>/dev/null || echo 0`, dir)).out || '0').trim(), 10) || 0; // HEAD가 origin보다 앞선 커밋 수
+  // 에이전트가 직접 push한 경우: origin/main이 클론 시점보다 앞으로 갔는지 확인 (aheadN=0이어도 변경 있음)
+  const originMoved = parseInt(((await sh(`git rev-list --count ${cloneHead}..origin/${WORK_BASE} 2>/dev/null || echo 0`, dir)).out || '0').trim(), 10) || 0;
+  if (!stagedNow && aheadN === 0 && originMoved === 0) { jobUpdate(channel, { status: 'done', note: '변경 없음' }); await postAs(client, channel, thread_ts, LEAD, `변경/생성된 게 없었어.\n${repoUrl}\n\n` + (res.text || '').trim().slice(0, 1500)); return; }
+  if (originMoved > 0 && aheadN === 0) { jobUpdate(channel, { status: 'done', note: `에이전트가 직접 ${originMoved}커밋 push` }); } // 에이전트가 이미 push 완료 — 아래 push는 no-op이 됨
   if (workCancel[channel]) { delete workCancel[channel]; jobUpdate(channel, { status: 'cancelled' }); await postAs(client, channel, thread_ts, LEAD, '작업 중단했어. main엔 아무것도 안 올렸어.'); return; }
   // R3: 커밋된 깨끗한 상태에서 critic 심사 (신규·UI 작업만). FAIL이면 runCritic이 1회 고치고 재심사 → 고친 것 추가 커밋.
   let criticPass = true;
