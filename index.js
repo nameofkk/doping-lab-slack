@@ -342,19 +342,22 @@ async function runClaudeOnce(prompt, model, cwd = WORKDIR, perm = CLAUDE_PERMISS
     child.stdout.on('data', d => (out += d));
     child.stderr.on('data', d => (err += d));
     child.on('error', e => finish({ ok: false, text: String(e) }));
-    const isLimit = (s) => /session limit|usage limit|rate limit|api_error_status.{0,6}429|429/i.test(s || '');
+    // 한도 신호 — 단어경계 없는 bare 429 제거(성공 응답 본문의 "4290원"·"HTTP 429 처리"·상태코드 등을 한도로 오분류하던 버그). 에러 컨텍스트의 한도 문구만.
+    const isLimit = (s) => /session limit|usage limit|rate[ _-]?limit|too many requests|quota exceeded|api_error_status["':\s]{0,6}429|status["':\s]{0,8}429/i.test(s || '');
     child.on('close', code => {
       let j = null; try { j = JSON.parse(out); } catch {}
       if (j) {
         const res = typeof j.result === 'string' ? j.result : '';
-        const lim = isLimit(res) || j.api_error_status === 429;
+        // 한도 판정은 "실제 에러일 때"만 — 성공 응답 본문에 한도 문구가 들어가도 멀쩡한 결과를 버리던 버그(결제·법률앱은 상태코드·금액 흔함). 구조화 신호(api_error_status) 우선, 에러일 때만 텍스트 검사.
+        const lim = j.api_error_status === 429 || (j.is_error && (isLimit(res) || isLimit(j.subtype) || isLimit(j.error)));
         bumpUsage(j, lim);
         if (j.is_error || lim) {
-          return finish({ ok: false, limited: lim, text: lim ? '⏳ 지금 클로드 사용량 한도에 걸렸어. 한도 리셋되면 다시 할게.' : (res || '오류가 났어').slice(0, 500) });
+          return finish({ ok: false, limited: lim, text: lim ? '⏳ 지금 클로드 사용량 한도에 걸렸어. 한도 리셋되면 다시 할게.' : (res || j.error || '오류가 났어').slice(0, 500) });
         }
         return finish({ ok: true, text: res || out.slice(0, 1500), outTokens: (j.usage && (j.usage.output_tokens || 0)) || 0 });
       }
-      if (code !== 0 || isLimit(out) || isLimit(err)) return finish({ ok: false, limited: isLimit(out) || isLimit(err), text: (isLimit(out) || isLimit(err)) ? '⏳ 지금 클로드 사용량 한도에 걸렸어. 한도 리셋되면 다시 할게.' : (err || out || 'error').slice(0, 800) });
+      const limErr = code !== 0 && (isLimit(out) || isLimit(err)); // 한도는 비정상 종료(code≠0)일 때만 — 성공 출력에 "429"·"rate limit" 문자열 들어가도 오분류 안 함
+      if (code !== 0 || limErr) return finish({ ok: false, limited: limErr, text: limErr ? '⏳ 지금 클로드 사용량 한도에 걸렸어. 한도 리셋되면 다시 할게.' : (err || out || 'error').slice(0, 800) });
       finish({ ok: true, text: out.slice(0, 1500) });
     });
   });
@@ -949,18 +952,20 @@ async function runCritic(client, channel, thread_ts, dir, task, prd, repo) {
   return false;
 }
 // 제작 후 실제 빌드 검증 — npm 설치+빌드를 진짜로 돌려서 통과/실패를 정직하게 보고. 깨지면 1회 수정 시도.
-async function verifyBuild(client, channel, thread_ts, dir, repo, pushRef = WORK_BASE) {
+async function verifyBuild(client, channel, thread_ts, dir, repo, pushRef = WORK_BASE, incomplete = false) {
+  // incomplete(심사 미통과·빈 화면)면 라이브 배포·서비스 등록·온보딩·채널 생성을 전부 보류 — 깨진 앱을 라이브 서비스로 띄우고 운영 루프에 편입하던 버그(껍데기를 배포→실패→온보딩까지). 완성("이어서"로 채운 뒤)에만.
   const has = await sh('test -f package.json && grep -q \'"build"\' package.json && echo yes || echo no', dir);
   if (!has.out.includes('yes')) { // 빌드 스크립트 없음(정적 HTML 등) → 빌드는 스킵하되 라이브/스크린샷은 띄워
     const idx = (await sh(`find ${dir} -maxdepth 3 -name index.html -not -path '*/node_modules/*' | head -1`, dir)).out.trim();
-    if (idx) await liveCheck(client, channel, thread_ts, dir, repo); // index.html 있으면 정적 서빙해서 화면 찍음
+    if (idx && !incomplete) await liveCheck(client, channel, thread_ts, dir, repo); // index.html 있으면 정적 서빙해서 화면 찍음(미완성이면 보류)
+    else if (idx) await postAs(client, channel, thread_ts, LEAD, '미완성이라 라이브 배포·서비스 등록은 완성된 뒤에 할게. "이어서"로 채우자.');
     return;
   }
   const qa = byName('윈터') || LEAD; // 빌드 검증 = 엔지니어링
   await postAs(client, channel, thread_ts, qa, '잠깐, 코드만 올리고 끝내면 안 되지. 실제로 빌드되는지 내가 돌려볼게.');
   await sh('npm install --no-audit --no-fund 2>&1 | tail -3', dir);
   let bd = await sh('npm run build 2>&1', dir);
-  if (bd.code === 0) { const g = await checkAppGaps(dir); await postAs(client, channel, thread_ts, qa, g.length ? `빌드는 통과하는데, 솔직히 아직 껍데기야 — ${g.join(', ')}. 컴파일만 되고 실제 화면이 없어서 이대로는 못 써.` : '빌드 통과 확인했어. 실제로 컴파일까지 돼.'); await qaGate(client, channel, thread_ts, dir); await liveCheck(client, channel, thread_ts, dir, repo); return; }
+  if (bd.code === 0) { const g = await checkAppGaps(dir); await postAs(client, channel, thread_ts, qa, g.length ? `빌드는 통과하는데, 솔직히 아직 껍데기야 — ${g.join(', ')}. 컴파일만 되고 실제 화면이 없어서 이대로는 못 써.` : '빌드 통과 확인했어. 실제로 컴파일까지 돼.'); await qaGate(client, channel, thread_ts, dir); if (!incomplete && !g.length) await liveCheck(client, channel, thread_ts, dir, repo); else await postAs(client, channel, thread_ts, qa, '아직 미완성이라(심사 미통과나 빈 화면) 라이브 배포·서비스 등록·온보딩은 보류할게. "이어서"로 완성하면 그때 띄우고 운영에 편입할게.'); return; }
   // 실패 → 1회 자동 수정
   await postAs(client, channel, thread_ts, qa, '빌드가 깨졌네. 에러 보고 한 번 고쳐볼게.\n' + (bd.out || '').slice(-500));
   const fix = await runClaude(`이 저장소 빌드가 다음 에러로 실패했어. 원인 찾아서 실제로 고쳐. 추측 말고 에러 그대로 보고 고쳐라.\n\n[에러]\n${(bd.out || '').slice(-2500)}`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 300000);
@@ -1075,7 +1080,8 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   jobUpdate(channel, { stage: '빌드·배포' }); // R9: 체크포인트
   prog.phase('빌드 되나 돌려보고 라이브로 띄우는 중');
   // C: 법무·규제 검토 — 신규 빌드 OR 규제 건드리는 기존작업. 단 레포별 쿨다운(12h)으로 "이어서·피드백 반복"마다 재실행 방지(같은 프로젝트 매번 검토 X)
-  const legalDue = newProject || (regulatedTask(task) && Date.now() - (legalReviewedAt[repo] || 0) > 12 * 3600000 && await legalRelevant(task)); // 키워드 매칭 + 실제 법무표면 변경일 때만(내부 버그픽스·로깅·표시수정 제외)
+  const legalDue = (newProject && criticPass) || (regulatedTask(task) && Date.now() - (legalReviewedAt[repo] || 0) > 12 * 3600000 && await legalRelevant(task)); // 신규는 심사 통과(완성)했을 때만 — 미완성 초안에 법무검토는 어차피 앱이 바뀌어 낭비+마라톤 꼬리에 무거운 호출 더해 실제 한도 치던 것. "이어서"로 완성 후에. 키워드 매칭 + 실제 법무표면 변경일 때만
+
   if (!workCancel[channel] && legalDue) { legalReviewedAt[repo] = Date.now(); persistCooldowns(); await runLegalReview(client, channel, thread_ts, dir, repo, task).catch(() => {}); }
   const finalGaps = (newProject || uiish) ? await checkAppGaps(dir) : []; // 최종 빈구멍 — "다 끝냈어 상용수준" 거짓완료 방지
   const incomplete = finalGaps.length > 0 || !criticPass; // R3: 심사 미통과도 미완성으로
@@ -1087,7 +1093,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   try {
     const changed = (await sh(`git diff --stat origin/${WORK_BASE}..HEAD 2>/dev/null | tail -25`, dir)).out.trim();
     const sr = await runClaude(`아래는 방금 끝낸 작업이야. 비개발자 사용자한테 쉽게 알려줘. 딱 세 덩어리로(각 1~3줄, 마크다운·별표 금지, 반말, 코드용어 최소화):\n바뀐 것: 기능 관점에서 뭐가 어떻게 달라졌는지 쉬운 말로\n기대 효과: 사용자나 지표에 뭐가 좋아지는지\n다음 할 것: 사용자가 지금 뭘 하면 되는지(확인/머지/배포/피드백 중 실제 필요한 것)${incomplete ? ' — 아직 미완성이라 "이어서로 마저 완성"을 꼭 포함' : ''}\n\n[작업 요청]\n${wrapUntrusted(task)}\n[바뀐 파일]\n${changed || '(파악 안됨)'}\n[팀 보고]\n${(res.text || '').slice(0, 1500)}`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 150000);
-    summaryMsg = deMd((sr.text || '').trim());
+    if (sr.text && !sr.limited && sr.ok !== false) summaryMsg = deMd(sr.text.trim()); // 한도/실패면 요약 비움 — "결과 요약: ⏳한도 걸려" 같은 쓰레기가 요약자리에 박히던 것 방지
   } catch (_) {}
   let mainErr = '';
   // 감사 P0: 프로드 레포(라이브/사업지표) 변경은 항상 PR(사람 머지 게이트), 미완성(심사 실패·빈구멍)도 main 직행 금지 → 검증 안 된/실패한 코드가 자동배포로 라이브 나가는 것 차단.
@@ -1101,7 +1107,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
     if (pushMain.code === 0) {
       const n = await distributeReport(client, channel, thread_ts, res.text);
       if (!n) await postAs(client, channel, thread_ts, LEAD, (res.text || '').trim().slice(0, 1500));
-      await verifyBuild(client, channel, thread_ts, dir, repo);
+      await verifyBuild(client, channel, thread_ts, dir, repo, WORK_BASE, incomplete);
       jobUpdate(channel, { status: incomplete ? 'awaiting-approval' : 'done', artifacts: [repoUrl], note: incomplete ? '미완성(이어서 필요)' : undefined });
       extractFacts(repo, `[작업] ${task}\n[한 일] ${(res.text || '').slice(0, 1500)}`, '작업').catch(() => {}); // R7: 이 작업에서 기억할 사실 저장
       if (!incomplete) { extractSkill(repo, `[성공한 작업] ${task}\n[한 일] ${(res.text || '').slice(0, 1500)}`).catch(() => {}); try { bumpSkills(repo, task, true); } catch (_) {} } // B1: 성공 작업에서 재사용 스킬 추출(Voyager) + B-10: 주입 스킬 성공 가점
@@ -1123,7 +1129,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   const url = pr && pr.html_url ? pr.html_url : `(브랜치: ${branch})`;
   const n2 = await distributeReport(client, channel, thread_ts, res.text);
   if (!n2) await postAs(client, channel, thread_ts, LEAD, (res.text || '').trim().slice(0, 1500));
-  await verifyBuild(client, channel, thread_ts, dir, repo, branch); // PR 경로 → 빌드 자동수정도 PR 브랜치로(main 직행 금지)
+  await verifyBuild(client, channel, thread_ts, dir, repo, branch, incomplete); // PR 경로 → 빌드 자동수정도 PR 브랜치로(main 직행 금지). 미완성이면 배포·온보딩 보류
   jobUpdate(channel, { status: 'awaiting-approval', artifacts: [url], note: 'PR 머지 대기' });
   // 감사 B-9: PR 경로(승인작업·스케줄·프로드·selfHeal 등 주력 실행)에서도 학습. PR은 머지 전이라 사실은 source='PR작업'으로 구분, 스킬은 심사통과+완성된 것만.
   if (repo) { extractFacts(repo, `[PR작업] ${task}\n[한 일] ${(res.text || '').slice(0, 1500)}`, 'PR작업').catch(() => {}); if (criticPass && !incomplete) { extractSkill(repo, `[성공한 작업·PR] ${task}\n[한 일] ${(res.text || '').slice(0, 1500)}`).catch(() => {}); try { bumpSkills(repo, task, true); } catch (_) {} } }
