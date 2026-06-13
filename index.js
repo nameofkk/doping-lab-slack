@@ -357,7 +357,9 @@ async function runClaudeOnce(prompt, model, cwd = WORKDIR, perm = CLAUDE_PERMISS
         return finish({ ok: true, text: res || out.slice(0, 1500), outTokens: (j.usage && (j.usage.output_tokens || 0)) || 0 });
       }
       const limErr = code !== 0 && (isLimit(out) || isLimit(err)); // 한도는 비정상 종료(code≠0)일 때만 — 성공 출력에 "429"·"rate limit" 문자열 들어가도 오분류 안 함
-      if (code !== 0 || limErr) return finish({ ok: false, limited: limErr, text: limErr ? '⏳ 지금 클로드 사용량 한도에 걸렸어. 한도 리셋되면 다시 할게.' : (err || out || 'error').slice(0, 800) });
+      // 런타임 크래시 덤프 감지 — Bun/Node가 죽으면 덤프를 에이전트 응답으로 그대로 올리던 버그 방지
+      const isCrashDump = /^[=]{10,}|^Bun v\d|^Node\.js v\d|Builtins:|Features:|CPU:|Linux Kernel/m.test((err || '') + (out || ''));
+      if (code !== 0 || limErr) return finish({ ok: false, limited: limErr, text: limErr ? '⏳ 지금 클로드 사용량 한도에 걸렸어. 한도 리셋되면 다시 할게.' : isCrashDump ? '에이전트 프로세스가 비정상 종료됐어(런타임 크래시). 다시 시도해줘.' : (err || out || 'error').slice(0, 800) });
       finish({ ok: true, text: out.slice(0, 1500) });
     });
   });
@@ -1323,7 +1325,7 @@ const seen = new Set();
 // 특정 단어 없이도 메시지가 "작업 요청"인지 AI가 판단
 async function classifyIntent(text, ctx) {
   try {
-    const res = await runClaude(`${ctx ? '[최근 대화]\n' + ctx + '\n\n' : ''}다음 메시지의 의도를 판단해서 JSON만 출력해라. 설명 금지.\n메시지: ${JSON.stringify(text)}\n\n형식: {"action": "work"|"report"|"debate"|"chat", "task": "할 일/주제/볼 것을 한 문장", "newProject": true|false, "repo": "sponono|wewantpeace|myungjak|new 중 해당", "name": "newProject일 때만, 이 프로젝트를 잘 나타내는 영문 짧은 레포이름(소문자와 하이픈만, 예: ramen-shop-game, todo-app). 아니면 빈문자열"}\n기준: 코드를 만들/고치/추가/개선/구현하라면 action=work. 프로젝트의 현황·상태·운영·구조를 조사·보고하라면 action=report. "토론하자/논의하자/토론해줘"처럼 새로운 주제로 팀 토론을 새로 시작하라고 할 때만 action=debate(task=토론 주제). 단 "다른 의견은?", "더 말해봐", "넌 어때", "다른사람들은?" 같은 진행 중 대화의 추가 질문이나 안부·잡담·단순 질문은 action=chat. 너희(이 봇/팀원들) 자신에 대한 질문(누가 뭐 담당하냐, 무슨 모델 쓰냐, 자기소개, 인사, "각자 ~해봐" 같은 멤버 호출)은 프로젝트 보고가 아니라 action=chat. 새로 뭔가(홈페이지/사이트/포트폴리오/앱/게임/툴/서비스 등) 만들거나 개발하라면 거의 다 newProject=true 이고 repo=new. "X 만들고 싶어", "X 게임 만들어줘", "새로 ~ 하나" 같은 건 무조건 newProject=true, repo=new (기존 레포에 작업하는 게 절대 아님). 위원트피스=wewantpeace, 스포노노=sponono, 명작=myungjak. 사용자가 말한 프로젝트가 sponono/wewantpeace/myungjak 중 어느 것도 아니거나 어느 프로젝트인지 불명확하면 repo는 반드시 "unknown"으로 해. 절대 가까운 걸로 추측해서 고르지 마. 이 슬랙 봇(도핑연구소 봇/너희들 자체)을 고치라면 repo="bot".`, MODEL.FAST);
+    const res = await runClaude(`${ctx ? '[최근 대화]\n' + ctx + '\n\n' : ''}다음 메시지의 의도를 판단해서 JSON만 출력해라. 설명 금지.\n메시지: ${JSON.stringify(text)}\n\n형식: {"action": "work"|"report"|"debate"|"chat", "task": "할 일/주제/볼 것을 한 문장", "newProject": true|false, "repo": "sponono|wewantpeace|myungjak|solo-lawsuit-ai|new 중 해당", "name": "newProject일 때만, 이 프로젝트를 잘 나타내는 영문 짧은 레포이름(소문자와 하이픈만, 예: ramen-shop-game, todo-app). 아니면 빈문자열"}\n기준: 코드를 만들/고치/추가/개선/구현하라면 action=work. 프로젝트의 현황·상태·운영·구조를 조사·보고하라면 action=report. "토론하자/논의하자/토론해줘"처럼 새로운 주제로 팀 토론을 새로 시작하라고 할 때만 action=debate(task=토론 주제). 단 "다른 의견은?", "더 말해봐", "넌 어때", "다른사람들은?" 같은 진행 중 대화의 추가 질문이나 안부·잡담·단순 질문은 action=chat. 너희(이 봇/팀원들) 자신에 대한 질문(누가 뭐 담당하냐, 무슨 모델 쓰냐, 자기소개, 인사, "각자 ~해봐" 같은 멤버 호출)은 프로젝트 보고가 아니라 action=chat. 새로 뭔가(홈페이지/사이트/포트폴리오/앱/게임/툴/서비스 등) 만들거나 개발하라면 거의 다 newProject=true 이고 repo=new. "X 만들고 싶어", "X 게임 만들어줘", "새로 ~ 하나" 같은 건 무조건 newProject=true, repo=new (기존 레포에 작업하는 게 절대 아님). 위원트피스=wewantpeace, 스포노노=sponono, 명작=myungjak, 나홀로소송=solo-lawsuit-ai. 사용자가 말한 프로젝트가 sponono/wewantpeace/myungjak/solo-lawsuit-ai 중 어느 것도 아니거나 어느 프로젝트인지 불명확하면 repo는 반드시 "unknown"으로 해. 절대 가까운 걸로 추측해서 고르지 마. 이 슬랙 봇(도핑연구소 봇/너희들 자체)을 고치라면 repo="bot".`, MODEL.FAST);
     const mm = (res.text || '').match(/\{[\s\S]*\}/);
     return mm ? JSON.parse(mm[0]) : { action: 'chat' };
   } catch { return { action: 'chat' }; }
@@ -1332,7 +1334,7 @@ async function classifyIntent(text, ctx) {
 function resolveRepo(hint) {
   if (!hint) return WORK_DEFAULT_REPO;
   if (hint.includes('/')) return hint;
-  const m = { sponono: 'nameofkk/sponono', 스포노노: 'nameofkk/sponono', wewantpeace: 'nameofkk/wewantpeace', 위원트피스: 'nameofkk/wewantpeace', myungjak: 'nameofkk/myungjak', 명작: 'nameofkk/myungjak', 몽유병친구들: 'nameofkk/sleepwalking-friends-4', 몽유병: 'nameofkk/sleepwalking-friends-4', sleepwalking: 'nameofkk/sleepwalking-friends-4', bot: 'nameofkk/doping-lab-slack', 봇: 'nameofkk/doping-lab-slack', 도핑봇: 'nameofkk/doping-lab-slack' };
+  const m = { sponono: 'nameofkk/sponono', 스포노노: 'nameofkk/sponono', wewantpeace: 'nameofkk/wewantpeace', 위원트피스: 'nameofkk/wewantpeace', myungjak: 'nameofkk/myungjak', 명작: 'nameofkk/myungjak', 'solo-lawsuit-ai': 'nameofkk/solo-lawsuit-ai', 나홀로소송: 'nameofkk/solo-lawsuit-ai', 몽유병친구들: 'nameofkk/sleepwalking-friends-4', 몽유병: 'nameofkk/sleepwalking-friends-4', sleepwalking: 'nameofkk/sleepwalking-friends-4', bot: 'nameofkk/doping-lab-slack', 봇: 'nameofkk/doping-lab-slack', 도핑봇: 'nameofkk/doping-lab-slack' };
   return m[hint] || m[hint.toLowerCase()] || `nameofkk/${hint}`;
 }
 // 메시지에서 명시된 레포 이름을 뽑아냄 (분류기가 모르는 doping-portfolio 같은 것도 인식)
@@ -1340,7 +1342,7 @@ function extractRepo(raw) {
   // owner/repo — 단, client/server·24/7·and/or·TCP/IP 같은 일반 표현 오탐 방지(소유자 명시되거나 레포명에 하이픈/숫자 있는 진짜 레포꼴만)
   let m = raw.match(/\b([A-Za-z][\w.-]{1,38}\/[A-Za-z0-9][\w.-]{1,38})\b/);
   if (m && (/^nameofkk\//i.test(m[1]) || /[-\d]/.test(m[1].split('/')[1]))) return m[1];
-  for (const k of ['sponono', '스포노노', 'wewantpeace', '위원트피스', 'myungjak', '명작', '몽유병친구들', '몽유병', 'sleepwalking']) if (raw.includes(k)) return resolveRepo(k); // 알려진 프로젝트 별칭
+  for (const k of ['sponono', '스포노노', 'wewantpeace', '위원트피스', 'myungjak', '명작', 'solo-lawsuit-ai', '나홀로소송', '몽유병친구들', '몽유병', 'sleepwalking']) if (raw.includes(k)) return resolveRepo(k); // 알려진 프로젝트 별칭
   const svc = svcList().find(s => raw.includes(s.repo.split('/').pop())); if (svc) return svc.repo; // 등록된 서비스
   m = raw.match(/\b(doping-[a-z0-9-]+|[a-z0-9][a-z0-9-]{2,}-(?:game|app|web|site|portfolio|tool|bot))\b/i); // doping-* 또는 -game/-app 등으로 끝나는 토큰
   if (m) return `${GH_OWNER}/${m[1].toLowerCase()}`;
@@ -1521,7 +1523,7 @@ const SET_FILE = process.env.SETTINGS_FILE || '/data/settings.json';
 let settings = { commanders: [], approval: {}, autopilot: {} };
 function loadSettings() { try { if (fs.existsSync(SET_FILE)) settings = JSON.parse(fs.readFileSync(SET_FILE, 'utf8')) || settings; } catch {} settings.commanders = settings.commanders || []; settings.approval = settings.approval || {}; settings.autopilot = settings.autopilot || {}; settings.repoChannel = settings.repoChannel || {}; settings.hqChannel = settings.hqChannel || null; settings.workRoute = settings.workRoute || {}; settings.sentinel = settings.sentinel || { enabled: true }; if (settings.monitorChannel === undefined) settings.monitorChannel = settings.sentinel && settings.sentinel.channel || null; if (settings.paused === undefined) settings.paused = false; if (settings.autoRecover === undefined) settings.autoRecover = true; if (settings.designGate === undefined) settings.designGate = true; if (settings.gateBuilds === undefined) settings.gateBuilds = true; } // 기본: 모든 빌드 PR 게이트(승인=머지). "빌드 게이트 꺼"로 비프로드 직행
 // 텍스트에서 등록된 사업 서비스(repo) 찾기 — 영문 레포명 + 한글 별칭
-function repoFromText(raw) { const t = String(raw || ''); for (const rp of Object.keys(bizData)) { const nm = rp.split('/').pop(); if (nm && new RegExp(nm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(t)) return rp; } if (/위원트피스|위피|wewantpeace/i.test(t)) return Object.keys(bizData).find(r => /wewantpeace/i.test(r)) || null; if (/스포노노|스포논|sponono/i.test(t)) return Object.keys(bizData).find(r => /sponono/i.test(r)) || null; return null; }
+function repoFromText(raw) { const t = String(raw || ''); for (const rp of Object.keys(bizData)) { const nm = rp.split('/').pop(); if (nm && new RegExp(nm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(t)) return rp; } if (/위원트피스|위피|wewantpeace/i.test(t)) return Object.keys(bizData).find(r => /wewantpeace/i.test(r)) || null; if (/스포노노|스포논|sponono/i.test(t)) return Object.keys(bizData).find(r => /sponono/i.test(r)) || null; if (/나홀로소송|solo.lawsuit/i.test(t)) return 'nameofkk/solo-lawsuit-ai'; return null; }
 function persistSettings() { try { fs.writeFileSync(SET_FILE, JSON.stringify(settings)); } catch {} }
 function canCommand(user) { return !settings.commanders.length || settings.commanders.includes(user); }
 const TASK_FILE = process.env.TASKS_FILE || '/data/tasks.json';
@@ -2791,6 +2793,7 @@ const BEHAVIOR_ROUTE = [
   { name: '"라멘집 게임 만들어" → 신규(기존레포 추측 금지)', input: '라멘집 경영 게임 만들어줘', ok: r => (r.newProject === true || r.repo === 'new') && !['sponono', 'wewantpeace', 'myungjak'].includes(r.repo) },
   { name: '"누가 뭐 담당해?" → 잡담(chat)', input: '너희 누가 뭐 담당해?', ok: r => r.action === 'chat' },
   { name: '불명확 프로젝트 → 추측 금지(unknown/chat)', input: '그 쇼핑몰 프로젝트 현황 어때', ok: r => r.repo === 'unknown' || r.action === 'chat' },
+  { name: '"나홀로소송" → solo-lawsuit-ai(myungjak 아님)', input: '나홀로소송 링크 들어가면 화면 안나오는이슈 해결', ok: r => r.repo === 'solo-lawsuit-ai' && r.action === 'work' },
 ];
 async function runBehaviorCheck(client, channel, manual = false) {
   if (!manual && Date.now() - behaviorAt < opsMinGap('behavior')) return;
@@ -4055,7 +4058,7 @@ async function handle(event, client) {
       if (lastRepo[channel]) { intent.repo = '__last__'; intent.newProject = false; }
       else if (intent.action === 'work') {
         // 다룬 적 없는 채널에서 코드를 고치라는데 대상 불명 → 추측 말고 물어봄
-        await postAs(client, channel, thread_ts, LEAD, '어느 프로젝트(레포)를 말하는 거야? sponono, wewantpeace, myungjak 중에 있어, 아니면 정확한 레포 이름 알려줘. 모르는 채로는 엉뚱한 데 손대거나 헛소리해서 안 할게.');
+        await postAs(client, channel, thread_ts, LEAD, '어느 프로젝트(레포)를 말하는 거야? sponono, wewantpeace, myungjak, solo-lawsuit-ai(나홀로소송) 중에 있어, 아니면 정확한 레포 이름 알려줘. 모르는 채로는 엉뚱한 데 손대거나 헛소리해서 안 할게.');
         return;
       }
       else { intent.action = 'chat'; } // report/debate인데 대상 불명 → 게이트 대신 그냥 대화로 답함(레포 안 건드림)
