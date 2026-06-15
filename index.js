@@ -4182,24 +4182,43 @@ function buildHomeBlocksNew() {
   B.push({ type: 'divider' });
   // ── Threads 뉴스 봇 (@nameofkk) ──
   B.push({ type: 'header', text: { type: 'plain_text', text: 'Threads 뉴스 봇 (@nameofkk)', emoji: true } });
-  if (threadsStatus && threadsStatus.ok) {
-    const ts = threadsStatus;
-    const st = ts.stats || {};
-    B.push({ type: 'section', text: { type: 'mrkdwn', text: `*상태:* 🟢 가동 중 · 오늘 수집 ${st.today || 0}건 · 미가공 ${st.raw || 0}건 · 게시 ${st.published || 0}건\n*채널:* ${ts.channel ? `<#${ts.channel}>` : '미지정'} · *자동승인:* ${ts.auto_approve ? 'ON' : 'OFF'}\n*수집 간격:* ${ts.collect_interval || 15}분 · *일간:* ${ts.daily_hour || 9}시 · *주간:* ${ts.weekly_hour || 10}시` } });
-    if (ts.jobs && ts.jobs.length) {
-      const jt = ts.jobs.map(j => `${j.name}: ${j.next_run ? new Date(j.next_run).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}`).join(' · ');
-      B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `다음 실행: ${jt}` }] });
-    }
-  } else {
-    B.push({ type: 'section', text: { type: 'mrkdwn', text: '*상태:* 🔴 오프라인 또는 연결 안 됨\n_threads-bot 서비스가 꺼져 있거나 아직 시작 중일 수 있어요_' } });
-  }
+  const tsCfg = threadsStatus && threadsStatus.ok ? threadsStatus : null;
+  const tsSt = tsCfg && tsCfg.stats || {};
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: tsCfg
+    ? `🟢 *가동 중* · 오늘 수집 ${tsSt.today || 0}건 · 미가공(raw) ${tsSt.raw || 0}건 · 게시 ${tsSt.published || 0}건`
+    : '🔴 *오프라인* — threads-bot 서비스가 꺼져 있거나 시작 중' } });
+  // 수집
+  const tsCollect = (tsCfg && tsCfg.collect_interval) || 15;
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*뉴스 수집* — ${tsCollect}분 간격` }, accessory: hbtn('지금 수집', 'thbot_trigger_collect', { style: 'primary' }) });
   B.push({ type: 'actions', elements: [
-    hbtn('수집 실행', 'thbot_trigger_collect', { style: 'primary' }),
-    hbtn('일간 다이제스트', 'thbot_trigger_daily'),
-    hbtn('주간 다이제스트', 'thbot_trigger_weekly'),
-    hbtn('속보 체크', 'thbot_trigger_breaking'),
+    staticSel('thbot_cfg_collect_interval', [selOpt('10분', '10'), selOpt('15분', '15'), selOpt('30분', '30'), selOpt('60분', '60')], String(tsCollect), '수집 간격'),
   ] });
-  B.push({ type: 'actions', elements: [chanSel('thbot_channel', threadsStatus && threadsStatus.channel || null, 'Threads 알림 채널')] });
+  // 일간 다이제스트
+  const tsDaily = (tsCfg && tsCfg.daily_hour) || 21;
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*일간 다이제스트* — 매일 ${tsDaily}시` }, accessory: hbtn('지금 실행', 'thbot_trigger_daily') });
+  B.push({ type: 'actions', elements: [
+    timeSel('thbot_cfg_daily_time', tsDaily, 0),
+    chanSel('thbot_cfg_daily_ch', tsCfg && tsCfg.channel || null, '알림 채널'),
+  ] });
+  // 주간 다이제스트
+  const tsWeekly = (tsCfg && tsCfg.weekly_hour) || 20;
+  const tsWeeklyDay = (tsCfg && tsCfg.weekly_day) || 'sun';
+  const DOW_MAP = { mon: '월', tue: '화', wed: '수', thu: '목', fri: '금', sat: '토', sun: '일' };
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*주간 다이제스트* — 매주 ${DOW_MAP[tsWeeklyDay] || '일'}요일 ${tsWeekly}시` }, accessory: hbtn('지금 실행', 'thbot_trigger_weekly') });
+  B.push({ type: 'actions', elements: [
+    staticSel('thbot_cfg_weekly_day', [selOpt('월요일', 'mon'), selOpt('화요일', 'tue'), selOpt('수요일', 'wed'), selOpt('목요일', 'thu'), selOpt('금요일', 'fri'), selOpt('토요일', 'sat'), selOpt('일요일', 'sun')], tsWeeklyDay, '요일'),
+    timeSel('thbot_cfg_weekly_time', tsWeekly, 0),
+  ] });
+  // 속보
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: '*속보 체크* — 수집 시 자동 확인 (수동 실행도 가능)' }, accessory: hbtn('속보 체크', 'thbot_trigger_breaking') });
+  // 자동승인
+  const tsAutoApprove = tsCfg ? tsCfg.auto_approve : true;
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*포스팅 승인* — ${tsAutoApprove ? '자동 승인 (바로 게시)' : '수동 승인 (Slack에서 확인 후 게시)'}` }, accessory: hbtn(tsAutoApprove ? '수동으로 전환' : '자동으로 전환', 'thbot_cfg_auto_approve', { style: tsAutoApprove ? 'danger' : 'primary', value: tsAutoApprove ? 'false' : 'true' }) });
+  // 다음 스케줄
+  if (tsCfg && tsCfg.jobs && tsCfg.jobs.length) {
+    const jt = tsCfg.jobs.map(j => `${j.name}: ${j.next_run ? new Date(j.next_run).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}`).join(' · ');
+    B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `다음 실행: ${jt}` }] });
+  }
   B.push({ type: 'divider' });
   // 정기 업무(자동) — 주기·시각·요일·채널·켜기를 홈에서 직접 편집
   B.push({ type: 'header', text: { type: 'plain_text', text: '정기 업무 (자동) — 주기·시각·채널 설정', emoji: true } });
@@ -4443,24 +4462,52 @@ app.action(/^threads_/, async ({ ack, body, action }) => {
     } catch (e) { console.log('[threads] forward err', String(e).slice(0, 100)); }
   } catch (e) { console.log('[threads-action] err', String(e).slice(0, 120)); }
 });
-// ── Threads Bot 홈 탭 트리거 버튼 & 채널 설정 ──
+// ── Threads Bot 홈 탭 트리거 버튼 & 설정 핸들러 ──
 app.action(/^thbot_trigger_/, async ({ ack, body, client }) => {
   await ack();
   const aid = (body.actions && body.actions[0] && body.actions[0].action_id) || '';
-  const action = aid.replace('thbot_trigger_', ''); // collect, daily, weekly, breaking
+  const action = aid.replace('thbot_trigger_', '');
+  const label = { collect: '수집', daily: '일간 다이제스트', weekly: '주간 다이제스트', breaking: '속보 체크' }[action] || action;
+  const notifChannel = (threadsStatus && threadsStatus.channel) || (body.user && body.user.id);
   try {
     const resp = await fetch(`https://threads-bot-production-7e0e.up.railway.app/trigger/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(30000) });
     const data = resp.ok ? await resp.json() : null;
-    const label = { collect: '수집', daily: '일간 다이제스트', weekly: '주간 다이제스트', breaking: '속보 체크' }[action] || action;
-    const msg = data && data.ok ? `✅ Threads ${label} 실행 완료${data.saved != null ? ` (${data.saved}건)` : ''}` : `❌ Threads ${label} 실행 실패`;
-    try { await botClient.chat.postMessage({ channel: body.user.id, text: msg }); } catch (_) {}
-  } catch (e) { console.log('[thbot-trigger] err', String(e).slice(0, 100)); try { await botClient.chat.postMessage({ channel: body.user.id, text: `❌ threads-bot 연결 실패: ${String(e).slice(0, 60)}` }); } catch (_) {} }
+    const msg = data && data.ok
+      ? `✅ *Threads ${label}* 실행 완료${data.saved != null ? ` — ${data.saved}건 저장` : ''}${data.message ? `\n${data.message}` : ''}`
+      : `❌ *Threads ${label}* 실행 실패`;
+    try { await botClient.chat.postMessage({ channel: notifChannel, text: msg }); } catch (_) {}
+  } catch (e) {
+    console.log('[thbot-trigger] err', String(e).slice(0, 100));
+    try { await botClient.chat.postMessage({ channel: notifChannel, text: `❌ *Threads ${label}* — threads-bot 연결 실패` }); } catch (_) {}
+  }
+  await fetchThreadsStatus();
   try { await publishHome(client, body.user.id); } catch (_) {}
 });
-app.action('thbot_channel', async ({ ack, body, action, client }) => {
+// threads-bot 설정 변경 핸들러 (수집간격, 시각, 요일, 채널, 자동승인 등)
+app.action(/^thbot_cfg_/, async ({ ack, body, action, client }) => {
   await ack();
-  const ch = action.selected_conversation;
-  if (ch) { console.log('[thbot] channel set:', ch); /* TODO: threads-bot에 채널 변경 API 추가 시 연동 */ }
+  const aid = action.action_id;
+  const cfg = {};
+
+  if (aid === 'thbot_cfg_collect_interval') cfg.collect_interval = parseInt(action.selected_option.value);
+  else if (aid === 'thbot_cfg_daily_time') cfg.daily_hour = parseInt(action.selected_time.split(':')[0]);
+  else if (aid === 'thbot_cfg_daily_ch') cfg.slack_channel_id = action.selected_conversation;
+  else if (aid === 'thbot_cfg_weekly_day') cfg.weekly_day = action.selected_option.value;
+  else if (aid === 'thbot_cfg_weekly_time') cfg.weekly_hour = parseInt(action.selected_time.split(':')[0]);
+  else if (aid === 'thbot_cfg_auto_approve') cfg.auto_approve = action.value === 'true';
+
+  if (Object.keys(cfg).length) {
+    try {
+      const resp = await fetch('https://threads-bot-production-7e0e.up.railway.app/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cfg),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!resp.ok) console.log('[thbot-cfg] fail', resp.status);
+    } catch (e) { console.log('[thbot-cfg] err', String(e).slice(0, 100)); }
+  }
+  await fetchThreadsStatus();
   try { await publishHome(client, body.user.id); } catch (_) {}
 });
 // ── 피드백 루프 UI: 버튼 → 텍스트박스(모달) → 큐 적재 → 단계 경계에서 반영 ──
