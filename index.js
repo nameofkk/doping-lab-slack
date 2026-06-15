@@ -4180,6 +4180,27 @@ function buildHomeBlocksNew() {
   B.push({ type: 'section', text: { type: 'mrkdwn', text: `*부서 검토 돌리기* — 각 부서가 실데이터로 진단·개선 제안${settings.deptRunChannel ? `\n실행 채널: <#${settings.deptRunChannel}> (지정됨 — 아래서 바꾸거나 비우면 서비스별 기본채널로)` : '\n실행 채널: 서비스별 기본 채널(아래서 지정하면 거기로 모아서)'}`, }, accessory: chanSel('home_deptrun_ch', settings.deptRunChannel, '검토 실행 채널') });
   B.push({ type: 'actions', elements: [hbtn('고객(CX)', 'home_dept_cx'), hbtn('마케팅', 'home_dept_marketing'), hbtn('재무', 'home_dept_finance'), hbtn('시장·경쟁', 'home_dept_market'), hbtn('그로스 제안', 'home_run_growth')] });
   B.push({ type: 'divider' });
+  // ── Threads 뉴스 봇 (@nameofkk) ──
+  B.push({ type: 'header', text: { type: 'plain_text', text: 'Threads 뉴스 봇 (@nameofkk)', emoji: true } });
+  if (threadsStatus && threadsStatus.ok) {
+    const ts = threadsStatus;
+    const st = ts.stats || {};
+    B.push({ type: 'section', text: { type: 'mrkdwn', text: `*상태:* 🟢 가동 중 · 오늘 수집 ${st.today || 0}건 · 미가공 ${st.raw || 0}건 · 게시 ${st.published || 0}건\n*채널:* ${ts.channel ? `<#${ts.channel}>` : '미지정'} · *자동승인:* ${ts.auto_approve ? 'ON' : 'OFF'}\n*수집 간격:* ${ts.collect_interval || 15}분 · *일간:* ${ts.daily_hour || 9}시 · *주간:* ${ts.weekly_hour || 10}시` } });
+    if (ts.jobs && ts.jobs.length) {
+      const jt = ts.jobs.map(j => `${j.name}: ${j.next_run ? new Date(j.next_run).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}`).join(' · ');
+      B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `다음 실행: ${jt}` }] });
+    }
+  } else {
+    B.push({ type: 'section', text: { type: 'mrkdwn', text: '*상태:* 🔴 오프라인 또는 연결 안 됨\n_threads-bot 서비스가 꺼져 있거나 아직 시작 중일 수 있어요_' } });
+  }
+  B.push({ type: 'actions', elements: [
+    hbtn('수집 실행', 'thbot_trigger_collect', { style: 'primary' }),
+    hbtn('일간 다이제스트', 'thbot_trigger_daily'),
+    hbtn('주간 다이제스트', 'thbot_trigger_weekly'),
+    hbtn('속보 체크', 'thbot_trigger_breaking'),
+  ] });
+  B.push({ type: 'actions', elements: [chanSel('thbot_channel', threadsStatus && threadsStatus.channel || null, 'Threads 알림 채널')] });
+  B.push({ type: 'divider' });
   // 정기 업무(자동) — 주기·시각·요일·채널·켜기를 홈에서 직접 편집
   B.push({ type: 'header', text: { type: 'plain_text', text: '정기 업무 (자동) — 주기·시각·채널 설정', emoji: true } });
   const cadOpts = [selOpt('매일', 'daily'), selOpt('매주', 'weekly'), selOpt('매월', 'monthly')];
@@ -4251,27 +4272,6 @@ function buildHomeBlocksNew() {
   const dN = rj.filter(j => j.status === 'done').length, fN = rj.filter(j => j.status === 'failed').length; const sr = (dN + fN) ? Math.round(dN / (dN + fN) * 100) : null;
   B.push({ type: 'section', text: { type: 'mrkdwn', text: `*이번 주 봇 비용/사용량* (최근 ${mdays.length}일)\n호출 ${mtot.c}회 · 출력토큰 ~${Math.round(mtot.t / 1000)}k · 한도걸림 ${mtot.l}회  _(구독제라 추가 과금 없음, 활동량 참고)_` } });
   B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `잡 완료 ${dN} / 실패 ${fN}${sr !== null ? ` (성공 ${sr}%)` : ''} · 채널에서 "봇 비용"·"전체 정지"로도 가능` }] });
-  B.push({ type: 'divider' });
-  // ── Threads 뉴스 봇 (@nameofkk) ──
-  B.push({ type: 'header', text: { type: 'plain_text', text: 'Threads 뉴스 봇 (@nameofkk)', emoji: true } });
-  if (threadsStatus && threadsStatus.ok) {
-    const ts = threadsStatus;
-    const st = ts.stats || {};
-    B.push({ type: 'section', text: { type: 'mrkdwn', text: `*상태:* 🟢 가동 중 · 오늘 수집 ${st.today || 0}건 · 미가공 ${st.raw || 0}건 · 게시 ${st.published || 0}건\n*채널:* ${ts.channel ? `<#${ts.channel}>` : '미지정'} · *자동승인:* ${ts.auto_approve ? 'ON' : 'OFF'}\n*수집 간격:* ${ts.collect_interval || 15}분 · *일간:* ${ts.daily_hour || 9}시 · *주간:* ${ts.weekly_hour || 10}시` } });
-    if (ts.jobs && ts.jobs.length) {
-      const jt = ts.jobs.map(j => `${j.name}: ${j.next_run ? new Date(j.next_run).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}`).join(' · ');
-      B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `다음 실행: ${jt}` }] });
-    }
-  } else {
-    B.push({ type: 'section', text: { type: 'mrkdwn', text: '*상태:* 🔴 오프라인 또는 연결 안 됨\n_threads-bot 서비스가 꺼져 있거나 아직 시작 중일 수 있어요_' } });
-  }
-  B.push({ type: 'actions', elements: [
-    hbtn('수집 실행', 'thbot_trigger_collect', { style: 'primary' }),
-    hbtn('일간 다이제스트', 'thbot_trigger_daily'),
-    hbtn('주간 다이제스트', 'thbot_trigger_weekly'),
-    hbtn('속보 체크', 'thbot_trigger_breaking'),
-  ] });
-  B.push({ type: 'actions', elements: [chanSel('thbot_channel', threadsStatus && threadsStatus.channel || null, 'Threads 알림 채널')] });
   return B.slice(0, 98); // 블록 상한 안전
 }
 async function publishHome(client, userId) { try { await fetchThreadsStatus(); await client.views.publish({ user_id: userId, view: { type: 'home', blocks: buildHomeBlocksNew() } }); } catch (e) { try { console.log('[home] publish 실패(앱설정에서 Home 탭 켜야 함?):', String(e && e.data && e.data.error || e).slice(0, 120)); } catch (_) {} } }
