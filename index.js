@@ -4403,6 +4403,22 @@ app.action(/^resume_/, async ({ ack, body, action }) => {
     }
   } catch (e) { try { console.log('[resume-action] err', String(e).slice(0, 120)); } catch (_) {} }
 });
+// ── Threads Bot 승인 버튼 포워딩 — threads-bot 서비스로 인터랙션 중계 ──
+app.action(/^threads_/, async ({ ack, body, action }) => {
+  await ack();
+  try {
+    const channel = (body.channel && body.channel.id) || (body.container && body.container.channel_id);
+    const msgTs = body.message && body.message.ts;
+    const aid = action.action_id;
+    const lbl = aid === 'threads_approve' ? '승인' : aid === 'threads_reject' ? '거부' : '수정요청';
+    const icon = aid === 'threads_approve' ? '✅' : aid === 'threads_reject' ? '❌' : '✏️';
+    if (msgTs && channel) { try { await botClient.chat.update({ channel, ts: msgTs, text: `${icon} ${lbl}`, blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `${icon} Threads 포스팅 ${lbl} 처리됨` } }] }); } catch (_) {} }
+    try {
+      const resp = await fetch('http://threads-bot.railway.internal:8080/slack/interaction', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ actions: [action], user: body.user, channel: body.channel, message: body.message }) });
+      if (!resp.ok) console.log('[threads] forward fail', resp.status);
+    } catch (e) { console.log('[threads] forward err', String(e).slice(0, 100)); }
+  } catch (e) { console.log('[threads-action] err', String(e).slice(0, 120)); }
+});
 // ── 피드백 루프 UI: 버튼 → 텍스트박스(모달) → 큐 적재 → 단계 경계에서 반영 ──
 // PR 머지 버튼 — 사람이 클릭(승인) → 봇이 CI 확인 후 머지. 프로드 무인 머지 금지(클릭 필수).
 app.action(/^pr_(merge|later)$/, async ({ ack, body, action }) => {
