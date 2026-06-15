@@ -4494,9 +4494,11 @@ app.action(/^thbot_trigger_/, async ({ ack, body, client }) => {
       } else if (action === 'daily') {
         const skip = data.message && data.message.includes('건너뛰');
         await postAs(botClient, notifChannel, undefined, yD, skip ? '오늘 수집된 기사가 없어서 다이제스트는 패스할게' : '일간 다이제스트 만들고 있어, 좀 걸릴 수 있어\n다 되면 여기로 승인 요청 올릴게');
+        if (!skip) startTyping(notifChannel); // 생성 완료까지 스피너 (자동 2분 만료)
       } else if (action === 'weekly') {
         const skip = data.message && data.message.includes('건너뛰');
         await postAs(botClient, notifChannel, undefined, yD, skip ? '이번 주 수집된 기사가 없어서 다이제스트는 패스할게' : '주간 다이제스트 만들고 있어, 좀 걸릴 수 있어\n다 되면 여기로 승인 요청 올릴게');
+        if (!skip) startTyping(notifChannel); // 생성 완료까지 스피너 (자동 2분 만료)
       } else if (action === 'breaking') {
         await postAs(botClient, notifChannel, undefined, yD, data.saved > 0 ? `속보 체크 돌렸어 (${data.saved}건 수집), 급한 거 있으면 바로 알려줄게` : '속보 체크 돌렸어, 지금은 급한 뉴스 없어');
       }
