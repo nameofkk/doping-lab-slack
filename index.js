@@ -4469,26 +4469,33 @@ app.action(/^thbot_trigger_/, async ({ ack, body, client }) => {
   await ack();
   const aid = (body.actions && body.actions[0] && body.actions[0].action_id) || '';
   const action = aid.replace('thbot_trigger_', '');
-  const label = { collect: '뉴스 수집', daily: '일간 다이제스트', weekly: '주간 다이제스트', breaking: '속보 체크' }[action] || action;
   const notifChannel = (threadsStatus && threadsStatus.channel) || (body.user && body.user.id);
   const yD = byName('영듀') || LEAD;
-  startTyping(notifChannel);
+  const isAsync = action === 'daily' || action === 'weekly'; // daily/weekly는 비동기(즉시 반환) — 스피너 의미 없음
+  if (!isAsync) startTyping(notifChannel);
   try {
     const resp = await fetch(`https://threads-bot-production-7e0e.up.railway.app/trigger/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(30000) });
-    stopTyping(notifChannel);
     const data = resp.ok ? await resp.json() : null;
     if (data && data.ok) {
-      const parts = [`${label} 돌렸어`];
-      if (data.saved != null) parts[0] += ` (${data.saved}건 새로 저장)`;
-      if (data.message) parts.push(data.message);
-      await postAs(botClient, notifChannel, undefined, yD, parts.join('\n'));
+      if (action === 'collect') {
+        await postAs(botClient, notifChannel, undefined, yD, data.saved > 0 ? `뉴스 ${data.saved}건 새로 긁어왔어` : '새로 올라온 뉴스 없어, 다음에 또 확인할게');
+      } else if (action === 'daily') {
+        const skip = data.message && data.message.includes('건너뛰');
+        await postAs(botClient, notifChannel, undefined, yD, skip ? '오늘 수집된 기사가 없어서 다이제스트는 패스할게' : '일간 다이제스트 만들고 있어, 좀 걸릴 수 있어\n다 되면 여기로 승인 요청 올릴게');
+      } else if (action === 'weekly') {
+        const skip = data.message && data.message.includes('건너뛰');
+        await postAs(botClient, notifChannel, undefined, yD, skip ? '이번 주 수집된 기사가 없어서 다이제스트는 패스할게' : '주간 다이제스트 만들고 있어, 좀 걸릴 수 있어\n다 되면 여기로 승인 요청 올릴게');
+      } else if (action === 'breaking') {
+        await postAs(botClient, notifChannel, undefined, yD, data.saved > 0 ? `속보 체크 돌렸어 (${data.saved}건 수집), 급한 거 있으면 바로 알려줄게` : '속보 체크 돌렸어, 지금은 급한 뉴스 없어');
+      }
     } else {
-      await postAs(botClient, notifChannel, undefined, yD, `${label} 실행하다 에러 났어, 로그 확인해봐`);
+      if (!isAsync) stopTyping(notifChannel);
+      await postAs(botClient, notifChannel, undefined, yD, '실행하다 에러 났어, 로그 확인해봐');
     }
   } catch (e) {
-    stopTyping(notifChannel);
+    if (!isAsync) stopTyping(notifChannel);
     console.log('[thbot-trigger] err', String(e).slice(0, 100));
-    await postAs(botClient, notifChannel, undefined, yD, `threads-bot이랑 연결이 안 돼, 서비스 상태 확인해봐`);
+    await postAs(botClient, notifChannel, undefined, yD, 'threads-bot이랑 연결이 안 돼, 서비스 상태 확인해봐');
   }
   await fetchThreadsStatus();
   try { await publishHome(client, body.user.id); } catch (_) {}
