@@ -4202,7 +4202,7 @@ function buildHomeBlocksNew() {
   B.push({ type: 'header', text: { type: 'plain_text', text: 'Threads 뉴스 봇 (@nameofkk)', emoji: true } });
   const tsCfg = threadsStatus && threadsStatus.ok ? threadsStatus : null;
   const tsSt = tsCfg && tsCfg.stats || {};
-  const apiWarn = tsCfg && (tsCfg.api_key_set === false ? '\n⚠️ *ANTHROPIC_API_KEY 미설정* — 콘텐츠 생성 불가' : tsCfg.content_gen_ok === false ? `\n⚠️ *콘텐츠 생성 에러* — ${tsCfg.content_gen_error || 'API 키 확인 필요'}` : '') || '';
+  const apiWarn = tsCfg && (tsCfg.api_key_set === false ? '\n⚠️ *CLAUDE_CODE_OAUTH_TOKEN 미설정* — 콘텐츠 생성 불가' : tsCfg.content_gen_ok === false ? `\n⚠️ *콘텐츠 생성 에러* — ${tsCfg.content_gen_error || '토큰 확인 필요'}` : '') || '';
   B.push({ type: 'section', text: { type: 'mrkdwn', text: tsCfg
     ? `🟢 *가동 중* · 오늘 수집 ${tsSt.today || 0}건 · 미가공(raw) ${tsSt.raw || 0}건 · 게시 ${tsSt.published || 0}건${apiWarn}`
     : '🔴 *오프라인* — threads-bot 서비스가 꺼져 있거나 시작 중\n_아래 설정값은 마지막 확인 기준이라 실제와 다를 수 있어_' } });
@@ -4508,11 +4508,11 @@ app.action(/^thbot_trigger_/, async ({ ack, body, action: triggerAction, client 
       } else if (action === 'daily') {
         const skip = data.skipped;
         await postAs(botClient, notifChannel, undefined, yD, skip ? '오늘 수집된 기사가 없어서 다이제스트는 패스할게' : '일간 다이제스트 만들고 있어, 좀 걸릴 수 있어\n다 되면 여기로 승인 요청 올릴게');
-        if (!skip) startTyping(notifChannel); // 생성 완료까지 스피너 (자동 2분 만료)
+        if (!skip) { startTyping(notifChannel); setTimeout(() => stopTyping(notifChannel), 180000); } // 3분 안전 타임아웃
       } else if (action === 'weekly') {
         const skip = data.skipped;
         await postAs(botClient, notifChannel, undefined, yD, skip ? '이번 주 수집된 기사가 없어서 다이제스트는 패스할게' : '주간 다이제스트 만들고 있어, 좀 걸릴 수 있어\n다 되면 여기로 승인 요청 올릴게');
-        if (!skip) startTyping(notifChannel); // 생성 완료까지 스피너 (자동 2분 만료)
+        if (!skip) { startTyping(notifChannel); setTimeout(() => stopTyping(notifChannel), 180000); } // 3분 안전 타임아웃
       } else if (action === 'breaking') {
         await postAs(botClient, notifChannel, undefined, yD, data.saved > 0 ? `속보 체크 돌렸어 (${data.saved}건 수집), 급한 거 있으면 바로 알려줄게` : '속보 체크 돌렸어, 지금은 급한 뉴스 없어');
       }
