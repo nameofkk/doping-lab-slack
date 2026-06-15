@@ -2115,9 +2115,23 @@ async function runBizBriefing(client, channel, manual = false, startLine = null)
 const EXP_FILE = process.env.EXP_FILE || '/data/experiments.json';
 let experiments = [];
 function loadExperiments() { experiments = loadJson(EXP_FILE, []) || []; }
-// ── Threads Bot 상태 캐시 (홈 탭 표시용) ──
+// ── Threads Bot 상태 캐시 (홈 탭 표시용) + 상태 변화 감지 ──
 let threadsStatus = null; // { ok, status, channel, auto_approve, collect_interval, daily_hour, weekly_hour, stats: {raw,published,today}, jobs: [...] }
-async function fetchThreadsStatus() { try { const r = await fetch('https://threads-bot-production-7e0e.up.railway.app/status', { signal: AbortSignal.timeout(3000) }); if (r.ok) threadsStatus = await r.json(); } catch (_) { /* offline */ } }
+let _thbotWasOnline = null; // null=아직 모름, true/false=이전 상태
+async function fetchThreadsStatus() {
+  let online = false;
+  try { const r = await fetch('https://threads-bot-production-7e0e.up.railway.app/status', { signal: AbortSignal.timeout(3000) }); if (r.ok) { threadsStatus = await r.json(); online = true; } } catch (_) { /* offline */ }
+  // 상태 전환 감지 → 알림 (다른 에이전트 재시작 알림과 동일 패턴)
+  if (_thbotWasOnline !== null && _thbotWasOnline !== online && botClient) {
+    const ch = (threadsStatus && threadsStatus.channel) || process.env.THREADS_NOTIFY_CHANNEL;
+    if (ch) {
+      const yD = byName('영듀') || LEAD;
+      if (online) postAs(botClient, ch, undefined, yD, 'threads-bot 다시 살아났어, 스케줄러 정상 작동 중').catch(() => {});
+      else postAs(botClient, ch, undefined, yD, 'threads-bot 연결이 끊겼어, 재배포 중이면 금방 돌아올 거야').catch(() => {});
+    }
+  }
+  _thbotWasOnline = online;
+}
 // 대기 제안(pendingDispatch) 영속 — 재배포·재시작에도 발의된 제안이 안 날아가게(30분 만료는 유지). 메모리에만 있던 게 배포 때마다 사라지던 문제 해결. (pendingProject용 PENDING_FILE과 별개)
 const PENDING_DISPATCH_FILE = process.env.PENDING_DISPATCH_FILE || '/data/pending_dispatch.json';
 function loadPendingDispatch() { try { if (fs.existsSync(PENDING_DISPATCH_FILE)) { const j = JSON.parse(fs.readFileSync(PENDING_DISPATCH_FILE, 'utf8')) || {}; for (const ch of Object.keys(j)) { if (j[ch] && j[ch].at && Date.now() - j[ch].at < 30 * 60 * 1000) pendingDispatch[ch] = j[ch]; } } } catch (_) {} }
@@ -4598,8 +4612,12 @@ async function postButtons(channel, thread_ts, buttons) {
   loadServices();
   loadPending();
   reconcileServices(); // M1: bizData 서비스도 헬스 모니터링 받게(services 누락분 보충)
+  // threads-bot 서비스 등록 (헬스 모니터링 대상 — 다른 서비스와 동일 패턴)
+  if (!services['nameofkk/threads-bot']) { registerService('nameofkk/threads-bot', 'https://threads-bot-production-7e0e.up.railway.app', null); if (services['nameofkk/threads-bot']) { services['nameofkk/threads-bot'].healthUrl = 'https://threads-bot-production-7e0e.up.railway.app/health'; persistServices(); } }
   setInterval(persistMemory, 15000);
   setInterval(persistPendingDispatch, 8000); // 대기 제안 주기 플러시(재배포 생존)
+  setInterval(() => { fetchThreadsStatus().catch(() => {}); }, 120000); // threads-bot 헬스체크 2분마다 (상태 변화 감지 → 알림)
+  setTimeout(() => { fetchThreadsStatus().catch(() => {}); }, 5000); // 부팅 5초 후 첫 체크
   const OPS_HOUR = parseInt(process.env.OPS_HOUR || '10', 10); // (레거시) 일부 분기에서 사용
   let bizFetchDay = null; // M3: 일별 지표 수집 day-gate
   let driftAt = 0; // Q3 드리프트 알림 쿨다운
