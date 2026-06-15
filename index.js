@@ -2115,7 +2115,7 @@ let experiments = [];
 function loadExperiments() { experiments = loadJson(EXP_FILE, []) || []; }
 // ── Threads Bot 상태 캐시 (홈 탭 표시용) ──
 let threadsStatus = null; // { ok, status, channel, auto_approve, collect_interval, daily_hour, weekly_hour, stats: {raw,published,today}, jobs: [...] }
-async function fetchThreadsStatus() { try { const r = await fetch('http://threads-bot.railway.internal:8080/status', { signal: AbortSignal.timeout(3000) }); if (r.ok) threadsStatus = await r.json(); } catch (_) { /* offline */ } }
+async function fetchThreadsStatus() { try { const r = await fetch('https://threads-bot-production-7e0e.up.railway.app/status', { signal: AbortSignal.timeout(3000) }); if (r.ok) threadsStatus = await r.json(); } catch (_) { /* offline */ } }
 // 대기 제안(pendingDispatch) 영속 — 재배포·재시작에도 발의된 제안이 안 날아가게(30분 만료는 유지). 메모리에만 있던 게 배포 때마다 사라지던 문제 해결. (pendingProject용 PENDING_FILE과 별개)
 const PENDING_DISPATCH_FILE = process.env.PENDING_DISPATCH_FILE || '/data/pending_dispatch.json';
 function loadPendingDispatch() { try { if (fs.existsSync(PENDING_DISPATCH_FILE)) { const j = JSON.parse(fs.readFileSync(PENDING_DISPATCH_FILE, 'utf8')) || {}; for (const ch of Object.keys(j)) { if (j[ch] && j[ch].at && Date.now() - j[ch].at < 30 * 60 * 1000) pendingDispatch[ch] = j[ch]; } } } catch (_) {} }
@@ -4438,7 +4438,7 @@ app.action(/^threads_/, async ({ ack, body, action }) => {
     const icon = aid === 'threads_approve' ? '✅' : aid === 'threads_reject' ? '❌' : '✏️';
     if (msgTs && channel) { try { await botClient.chat.update({ channel, ts: msgTs, text: `${icon} ${lbl}`, blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `${icon} Threads 포스팅 ${lbl} 처리됨` } }] }); } catch (_) {} }
     try {
-      const resp = await fetch('http://threads-bot.railway.internal:8080/slack/interaction', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ actions: [action], user: body.user, channel: body.channel, message: body.message }) });
+      const resp = await fetch('https://threads-bot-production-7e0e.up.railway.app/slack/interaction', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ actions: [action], user: body.user, channel: body.channel, message: body.message }) });
       if (!resp.ok) console.log('[threads] forward fail', resp.status);
     } catch (e) { console.log('[threads] forward err', String(e).slice(0, 100)); }
   } catch (e) { console.log('[threads-action] err', String(e).slice(0, 120)); }
@@ -4449,7 +4449,7 @@ app.action(/^thbot_trigger_/, async ({ ack, body, client }) => {
   const aid = (body.actions && body.actions[0] && body.actions[0].action_id) || '';
   const action = aid.replace('thbot_trigger_', ''); // collect, daily, weekly, breaking
   try {
-    const resp = await fetch(`http://threads-bot.railway.internal:8080/trigger/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(30000) });
+    const resp = await fetch(`https://threads-bot-production-7e0e.up.railway.app/trigger/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(30000) });
     const data = resp.ok ? await resp.json() : null;
     const label = { collect: '수집', daily: '일간 다이제스트', weekly: '주간 다이제스트', breaking: '속보 체크' }[action] || action;
     const msg = data && data.ok ? `✅ Threads ${label} 실행 완료${data.saved != null ? ` (${data.saved}건)` : ''}` : `❌ Threads ${label} 실행 실패`;
