@@ -4469,18 +4469,26 @@ app.action(/^thbot_trigger_/, async ({ ack, body, client }) => {
   await ack();
   const aid = (body.actions && body.actions[0] && body.actions[0].action_id) || '';
   const action = aid.replace('thbot_trigger_', '');
-  const label = { collect: '수집', daily: '일간 다이제스트', weekly: '주간 다이제스트', breaking: '속보 체크' }[action] || action;
+  const label = { collect: '뉴스 수집', daily: '일간 다이제스트', weekly: '주간 다이제스트', breaking: '속보 체크' }[action] || action;
   const notifChannel = (threadsStatus && threadsStatus.channel) || (body.user && body.user.id);
+  const yD = byName('영듀') || LEAD;
+  startTyping(notifChannel);
   try {
     const resp = await fetch(`https://threads-bot-production-7e0e.up.railway.app/trigger/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(30000) });
+    stopTyping(notifChannel);
     const data = resp.ok ? await resp.json() : null;
-    const msg = data && data.ok
-      ? `✅ *Threads ${label}* 실행 완료${data.saved != null ? ` — ${data.saved}건 저장` : ''}${data.message ? `\n${data.message}` : ''}`
-      : `❌ *Threads ${label}* 실행 실패`;
-    try { await botClient.chat.postMessage({ channel: notifChannel, text: msg }); } catch (_) {}
+    if (data && data.ok) {
+      const parts = [`${label} 돌렸어`];
+      if (data.saved != null) parts[0] += ` (${data.saved}건 새로 저장)`;
+      if (data.message) parts.push(data.message);
+      await postAs(botClient, notifChannel, undefined, yD, parts.join('\n'));
+    } else {
+      await postAs(botClient, notifChannel, undefined, yD, `${label} 실행하다 에러 났어, 로그 확인해봐`);
+    }
   } catch (e) {
+    stopTyping(notifChannel);
     console.log('[thbot-trigger] err', String(e).slice(0, 100));
-    try { await botClient.chat.postMessage({ channel: notifChannel, text: `❌ *Threads ${label}* — threads-bot 연결 실패` }); } catch (_) {}
+    await postAs(botClient, notifChannel, undefined, yD, `threads-bot이랑 연결이 안 돼, 서비스 상태 확인해봐`);
   }
   await fetchThreadsStatus();
   try { await publishHome(client, body.user.id); } catch (_) {}
