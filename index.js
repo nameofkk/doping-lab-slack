@@ -4278,6 +4278,15 @@ function buildHomeBlocksNew() {
     ] });
   });
   B.push({ type: 'divider' });
+  // 라이브 서비스 + 운영 메트릭 (잘리면 안 되니 당신 차례/로드맵보다 위에)
+  const sLine = s => { const last = (s.history || [])[s.history.length - 1]; const ms = last && last.ms != null ? `${last.ms}ms` : '—'; const issues = (s.issues || []).length; const icon = s.lastStatus === 'down' ? '🔴' : issues ? '🟡' : '🟢'; const extras = [typeof s.sslDays === 'number' ? `SSL ${s.sslDays}일` : null, s.healthUrl ? '헬스EP✓' : '헬스EP✗'].filter(Boolean).join(' · '); return `${icon} ${s.repo.split('/').pop()} (${ms})${extras ? ' · ' + extras : ''}${issues ? '\n   주의: ' + s.issues.join(' / ') : ''}`; };
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*라이브 서비스 헬스* (${svcs.length}) — 2분마다 실시간 감시\n` + (svcs.length ? svcs.map(sLine).join('\n').slice(0, 2600) : '_등록된 서비스 없음_') } });
+  const mdays = [...usageHist, usageStat].filter(d => d && d.day).slice(-7);
+  const mtot = mdays.reduce((a, d) => ({ c: a.c + (d.calls || 0), t: a.t + (d.outTokens || 0), l: a.l + (d.limitedHits || 0) }), { c: 0, t: 0, l: 0 });
+  const rj = Object.values(jobs).filter(j => Date.now() - (j.createdAt || 0) < 7 * 86400000);
+  const dN = rj.filter(j => j.status === 'done').length, fN = rj.filter(j => j.status === 'failed').length; const sr = (dN + fN) ? Math.round(dN / (dN + fN) * 100) : null;
+  B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `봇 비용: ${mdays.length}일간 호출 ${mtot.c}회 · 토큰 ~${Math.round(mtot.t / 1000)}k · 한도걸림 ${mtot.l} · 잡 ${dN}완료/${fN}실패${sr !== null ? ` (${sr}%)` : ''}` }] });
+  B.push({ type: 'divider' });
   // Wave1: 당신 차례 (사람만 가능한 막힌 것) + 로드맵
   const ob = openBlockers();
   B.push({ type: 'header', text: { type: 'plain_text', text: `당신 차례 (${ob.length})`, emoji: true } });
@@ -4296,18 +4305,7 @@ function buildHomeBlocksNew() {
     B.push({ type: 'section', text: { type: 'mrkdwn', text: lines.join('\n').slice(0, 2900) } });
     if (cnt.hit + cnt.bad) B.push({ type: 'actions', elements: [hbtn('완료된 것 정리', 'home_board_archive')] });
   } else B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '_아직 추적 중인 과제 없음 — 경영회의·그로스·부서 검토에서 타겟지표 붙은 과제를 승인·실행하면 여기 쌓여_' }] });
-  B.push({ type: 'divider' });
-  // 라이브 서비스 + 운영 메트릭
-  const sLine = s => { const last = (s.history || [])[s.history.length - 1]; const ms = last && last.ms != null ? `${last.ms}ms` : '—'; const issues = (s.issues || []).length; const icon = s.lastStatus === 'down' ? '🔴' : issues ? '🟡' : '🟢'; const extras = [typeof s.sslDays === 'number' ? `SSL ${s.sslDays}일` : null, s.healthUrl ? '헬스EP✓' : '헬스EP✗'].filter(Boolean).join(' · '); return `${icon} ${s.repo.split('/').pop()} (${ms})${extras ? ' · ' + extras : ''}${issues ? '\n   주의: ' + s.issues.join(' / ') : ''}`; };
-  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*라이브 서비스 헬스* (${svcs.length}) — 2분마다 실시간 감시\n` + (svcs.length ? svcs.map(sLine).join('\n').slice(0, 2600) : '_등록된 서비스 없음_') } });
-  B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '감시 항목: HTTP상태·응답속도·응답크기(껍데기감지)·SSL만료·앱 헬스엔드포인트. 헬스EP 지정: "헬스 항목 <서비스> <헬스URL> [기대문구]"' }] });
-  const mdays = [...usageHist, usageStat].filter(d => d && d.day).slice(-7);
-  const mtot = mdays.reduce((a, d) => ({ c: a.c + (d.calls || 0), t: a.t + (d.outTokens || 0), l: a.l + (d.limitedHits || 0) }), { c: 0, t: 0, l: 0 });
-  const rj = Object.values(jobs).filter(j => Date.now() - (j.createdAt || 0) < 7 * 86400000);
-  const dN = rj.filter(j => j.status === 'done').length, fN = rj.filter(j => j.status === 'failed').length; const sr = (dN + fN) ? Math.round(dN / (dN + fN) * 100) : null;
-  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*이번 주 봇 비용/사용량* (최근 ${mdays.length}일)\n호출 ${mtot.c}회 · 출력토큰 ~${Math.round(mtot.t / 1000)}k · 한도걸림 ${mtot.l}회  _(구독제라 추가 과금 없음, 활동량 참고)_` } });
-  B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `잡 완료 ${dN} / 실패 ${fN}${sr !== null ? ` (성공 ${sr}%)` : ''} · 채널에서 "봇 비용"·"전체 정지"로도 가능` }] });
-  return B.slice(0, 98); // 블록 상한 안전
+  return B.slice(0, 98); // 블록 상한 안전(Slack 하드리밋 100)
 }
 async function publishHome(client, userId) { try { await fetchThreadsStatus(); await client.views.publish({ user_id: userId, view: { type: 'home', blocks: buildHomeBlocksNew() } }); } catch (e) { try { console.log('[home] publish 실패(앱설정에서 Home 탭 켜야 함?):', String(e && e.data && e.data.error || e).slice(0, 120)); } catch (_) {} } }
 app.event('app_home_opened', async ({ event, client }) => { if (event.tab && event.tab !== 'home') return; await publishHome(client, event.user); });
