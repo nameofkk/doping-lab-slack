@@ -4465,15 +4465,22 @@ app.action(/^threads_/, async ({ ack, body, action }) => {
   await ack();
   try {
     const channel = (body.channel && body.channel.id) || (body.container && body.container.channel_id);
+    if (channel) stopTyping(channel); // 생성 스피너 제거
     const msgTs = body.message && body.message.ts;
     const aid = action.action_id;
     const lbl = aid === 'threads_approve' ? '승인' : aid === 'threads_reject' ? '거부' : '수정요청';
     const icon = aid === 'threads_approve' ? '✅' : aid === 'threads_reject' ? '❌' : '✏️';
-    if (msgTs && channel) { try { await botClient.chat.update({ channel, ts: msgTs, text: `${icon} ${lbl}`, blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `${icon} Threads 포스팅 ${lbl} 처리됨` } }] }); } catch (_) {} }
+    // 먼저 threads-bot에 포워딩해서 성공 확인 후 메시지 업데이트
+    let forwarded = false;
     try {
-      const resp = await fetch('https://threads-bot-production-7e0e.up.railway.app/slack/interaction', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ actions: [action], user: body.user, channel: body.channel, message: body.message }) });
+      const resp = await fetch('https://threads-bot-production-7e0e.up.railway.app/slack/interaction', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ actions: [action], user: body.user, channel: body.channel, message: body.message }), signal: AbortSignal.timeout(10000) });
+      forwarded = resp.ok;
       if (!resp.ok) console.log('[threads] forward fail', resp.status);
     } catch (e) { console.log('[threads] forward err', String(e).slice(0, 100)); }
+    if (msgTs && channel && botClient) {
+      const statusText = forwarded ? `${icon} Threads 포스팅 ${lbl} 처리됨` : `⚠️ Threads 포스팅 ${lbl} 전달 실패 — threads-bot 연결 확인 필요`;
+      try { await botClient.chat.update({ channel, ts: msgTs, text: statusText, blocks: [{ type: 'section', text: { type: 'mrkdwn', text: statusText } }] }); } catch (_) {}
+    }
   } catch (e) { console.log('[threads-action] err', String(e).slice(0, 120)); }
 });
 // ── Threads Bot 홈 탭 트리거 버튼 & 설정 핸들러 ──
@@ -4520,12 +4527,12 @@ app.action(/^thbot_cfg_/, async ({ ack, body, action, client }) => {
   const aid = action.action_id;
   const cfg = {};
 
-  if (aid === 'thbot_cfg_collect_interval') cfg.collect_interval = parseInt(action.selected_option.value);
-  else if (aid === 'thbot_cfg_daily_time') cfg.daily_hour = parseInt(action.selected_time.split(':')[0]);
-  else if (aid === 'thbot_cfg_daily_ch') cfg.slack_channel_id = action.selected_conversation;
-  else if (aid === 'thbot_cfg_weekly_day') cfg.weekly_day = action.selected_option.value;
-  else if (aid === 'thbot_cfg_weekly_time') cfg.weekly_hour = parseInt(action.selected_time.split(':')[0]);
-  else if (aid === 'thbot_cfg_auto_approve') cfg.auto_approve = action.value === 'true';
+  if (aid === 'thbot_cfg_collect_interval' && action.selected_option) cfg.collect_interval = parseInt(action.selected_option.value, 10);
+  else if (aid === 'thbot_cfg_daily_time' && action.selected_time) cfg.daily_hour = parseInt(action.selected_time.split(':')[0], 10);
+  else if (aid === 'thbot_cfg_daily_ch' && action.selected_conversation) cfg.slack_channel_id = action.selected_conversation;
+  else if (aid === 'thbot_cfg_weekly_day' && action.selected_option) cfg.weekly_day = action.selected_option.value;
+  else if (aid === 'thbot_cfg_weekly_time' && action.selected_time) cfg.weekly_hour = parseInt(action.selected_time.split(':')[0], 10);
+  else if (aid === 'thbot_cfg_auto_approve') cfg.auto_approve = action.value === 'true' || action.value === true;
 
   if (Object.keys(cfg).length) {
     try {
@@ -4535,8 +4542,8 @@ app.action(/^thbot_cfg_/, async ({ ack, body, action, client }) => {
         body: JSON.stringify(cfg),
         signal: AbortSignal.timeout(5000),
       });
-      if (!resp.ok) console.log('[thbot-cfg] fail', resp.status);
-    } catch (e) { console.log('[thbot-cfg] err', String(e).slice(0, 100)); }
+      if (!resp.ok) { console.log('[thbot-cfg] fail', resp.status); try { await postAs(botClient, body.user && body.user.id, undefined, byName('영듀') || LEAD, `설정 변경 실패했어 (${resp.status}), threads-bot 서비스 확인해봐`); } catch (_) {} }
+    } catch (e) { console.log('[thbot-cfg] err', String(e).slice(0, 100)); try { await postAs(botClient, body.user && body.user.id, undefined, byName('영듀') || LEAD, 'threads-bot이랑 연결이 안 돼서 설정 변경 실패했어'); } catch (_) {} }
   }
   await fetchThreadsStatus();
   try { await publishHome(client, body.user.id); } catch (_) {}
