@@ -4486,9 +4486,9 @@ app.action(/^threads_/, async ({ ack, body, action }) => {
   } catch (e) { console.log('[threads-action] err', String(e).slice(0, 120)); }
 });
 // ── Threads Bot 홈 탭 트리거 버튼 & 설정 핸들러 ──
-app.action(/^thbot_trigger_/, async ({ ack, body, action, client }) => {
+app.action(/^thbot_trigger_/, async ({ ack, body, action: triggerAction, client }) => {
   await ack();
-  const aid = (action && action.action_id) || '';
+  const aid = (triggerAction && triggerAction.action_id) || '';
   const action = aid.replace('thbot_trigger_', '');
   const notifChannel = (threadsStatus && threadsStatus.channel) || (body.user && body.user.id);
   const yD = byName('영듀') || LEAD;
