@@ -2116,11 +2116,12 @@ const EXP_FILE = process.env.EXP_FILE || '/data/experiments.json';
 let experiments = [];
 function loadExperiments() { experiments = loadJson(EXP_FILE, []) || []; }
 // ── Threads Bot 상태 캐시 (홈 탭 표시용) + 상태 변화 감지 ──
+const THBOT_URL = process.env.THREADS_BOT_URL || 'https://threads-bot-production-7e0e.up.railway.app';
 let threadsStatus = null; // { ok, status, channel, auto_approve, collect_interval, daily_hour, weekly_hour, stats: {raw,published,today}, jobs: [...] }
 let _thbotWasOnline = null; // null=아직 모름, true/false=이전 상태
 async function fetchThreadsStatus() {
   let online = false;
-  try { const r = await fetch('https://threads-bot-production-7e0e.up.railway.app/status', { signal: AbortSignal.timeout(3000) }); if (r.ok) { threadsStatus = await r.json(); online = true; } } catch (_) { /* offline */ }
+  try { const r = await fetch(`${THBOT_URL}/status`, { signal: AbortSignal.timeout(5000) }); if (r.ok) { threadsStatus = await r.json(); online = true; } } catch (_) { /* offline */ }
   // 상태 전환 감지 → 알림 (다른 에이전트 재시작 알림과 동일 패턴)
   if (_thbotWasOnline !== null && _thbotWasOnline !== online && botClient) {
     const ch = (threadsStatus && threadsStatus.channel) || process.env.THREADS_NOTIFY_CHANNEL;
@@ -4473,7 +4474,7 @@ app.action(/^threads_/, async ({ ack, body, action }) => {
     // 먼저 threads-bot에 포워딩해서 성공 확인 후 메시지 업데이트
     let forwarded = false;
     try {
-      const resp = await fetch('https://threads-bot-production-7e0e.up.railway.app/slack/interaction', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ actions: [action], user: body.user, channel: body.channel, message: body.message }), signal: AbortSignal.timeout(10000) });
+      const resp = await fetch(`${THBOT_URL}/slack/interaction`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ actions: [action], user: body.user, channel: body.channel, message: body.message }), signal: AbortSignal.timeout(10000) });
       forwarded = resp.ok;
       if (!resp.ok) console.log('[threads] forward fail', resp.status);
     } catch (e) { console.log('[threads] forward err', String(e).slice(0, 100)); }
@@ -4484,26 +4485,26 @@ app.action(/^threads_/, async ({ ack, body, action }) => {
   } catch (e) { console.log('[threads-action] err', String(e).slice(0, 120)); }
 });
 // ── Threads Bot 홈 탭 트리거 버튼 & 설정 핸들러 ──
-app.action(/^thbot_trigger_/, async ({ ack, body, client }) => {
+app.action(/^thbot_trigger_/, async ({ ack, body, action, client }) => {
   await ack();
-  const aid = (body.actions && body.actions[0] && body.actions[0].action_id) || '';
+  const aid = (action && action.action_id) || '';
   const action = aid.replace('thbot_trigger_', '');
   const notifChannel = (threadsStatus && threadsStatus.channel) || (body.user && body.user.id);
   const yD = byName('영듀') || LEAD;
   const isAsync = action === 'daily' || action === 'weekly'; // daily/weekly는 비동기(즉시 반환) — 스피너 의미 없음
   if (!isAsync) startTyping(notifChannel);
   try {
-    const resp = await fetch(`https://threads-bot-production-7e0e.up.railway.app/trigger/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(30000) });
+    const resp = await fetch(`${THBOT_URL}/trigger/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(30000) });
     const data = resp.ok ? await resp.json() : null;
     if (data && data.ok) {
       if (action === 'collect') {
         await postAs(botClient, notifChannel, undefined, yD, data.saved > 0 ? `뉴스 ${data.saved}건 새로 긁어왔어` : '새로 올라온 뉴스 없어, 다음에 또 확인할게');
       } else if (action === 'daily') {
-        const skip = data.message && data.message.includes('건너뛰');
+        const skip = data.skipped;
         await postAs(botClient, notifChannel, undefined, yD, skip ? '오늘 수집된 기사가 없어서 다이제스트는 패스할게' : '일간 다이제스트 만들고 있어, 좀 걸릴 수 있어\n다 되면 여기로 승인 요청 올릴게');
         if (!skip) startTyping(notifChannel); // 생성 완료까지 스피너 (자동 2분 만료)
       } else if (action === 'weekly') {
-        const skip = data.message && data.message.includes('건너뛰');
+        const skip = data.skipped;
         await postAs(botClient, notifChannel, undefined, yD, skip ? '이번 주 수집된 기사가 없어서 다이제스트는 패스할게' : '주간 다이제스트 만들고 있어, 좀 걸릴 수 있어\n다 되면 여기로 승인 요청 올릴게');
         if (!skip) startTyping(notifChannel); // 생성 완료까지 스피너 (자동 2분 만료)
       } else if (action === 'breaking') {
@@ -4536,7 +4537,7 @@ app.action(/^thbot_cfg_/, async ({ ack, body, action, client }) => {
 
   if (Object.keys(cfg).length) {
     try {
-      const resp = await fetch('https://threads-bot-production-7e0e.up.railway.app/config', {
+      const resp = await fetch(`${THBOT_URL}/config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(cfg),
@@ -4620,7 +4621,7 @@ async function postButtons(channel, thread_ts, buttons) {
   loadPending();
   reconcileServices(); // M1: bizData 서비스도 헬스 모니터링 받게(services 누락분 보충)
   // threads-bot 서비스 등록 (헬스 모니터링 대상 — 다른 서비스와 동일 패턴)
-  if (!services['nameofkk/threads-bot']) { registerService('nameofkk/threads-bot', 'https://threads-bot-production-7e0e.up.railway.app', null); if (services['nameofkk/threads-bot']) { services['nameofkk/threads-bot'].healthUrl = 'https://threads-bot-production-7e0e.up.railway.app/health'; persistServices(); } }
+  if (!services['nameofkk/threads-bot']) { registerService('nameofkk/threads-bot', THBOT_URL, null); if (services['nameofkk/threads-bot']) { services['nameofkk/threads-bot'].healthUrl = `${THBOT_URL}/health`; persistServices(); } }
   setInterval(persistMemory, 15000);
   setInterval(persistPendingDispatch, 8000); // 대기 제안 주기 플러시(재배포 생존)
   setInterval(() => { fetchThreadsStatus().catch(() => {}); }, 120000); // threads-bot 헬스체크 2분마다 (상태 변화 감지 → 알림)
