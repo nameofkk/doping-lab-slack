@@ -184,7 +184,9 @@ function stopTyping(channel) {
 async function replyTyping(client, channel, thread_ts, persona, gen) {
   startTyping(channel, thread_ts);
   let res; try { res = await gen(); } catch { res = {}; }
-  const text = scrubOutput((((res && res.text) || '') + '').trim()) || '…';
+  let text = scrubOutput((((res && res.text) || '') + '').trim()) || '…';
+  // 메타 서술(내부 추론 지문) 제거 — Claude가 "~하면 돼. ~만." 식 지시문을 앞에 붙이는 경우 필터링
+  text = text.replace(/^(친근하게|짧게|반말로|존댓말로|솔직하게|간단히|도구 쓸 필요 없|작업 상태는)[^\n]*\n*/gm, '').trim() || text;
   await postAs(client, channel, thread_ts, persona, text); // postAs가 스피너 삭제
   return res;
 }
