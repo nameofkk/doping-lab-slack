@@ -2113,6 +2113,9 @@ async function runBizBriefing(client, channel, manual = false, startLine = null)
 const EXP_FILE = process.env.EXP_FILE || '/data/experiments.json';
 let experiments = [];
 function loadExperiments() { experiments = loadJson(EXP_FILE, []) || []; }
+// ── Threads Bot 상태 캐시 (홈 탭 표시용) ──
+let threadsStatus = null; // { ok, status, channel, auto_approve, collect_interval, daily_hour, weekly_hour, stats: {raw,published,today}, jobs: [...] }
+async function fetchThreadsStatus() { try { const r = await fetch('http://threads-bot.railway.internal:8080/status', { signal: AbortSignal.timeout(3000) }); if (r.ok) threadsStatus = await r.json(); } catch (_) { /* offline */ } }
 // 대기 제안(pendingDispatch) 영속 — 재배포·재시작에도 발의된 제안이 안 날아가게(30분 만료는 유지). 메모리에만 있던 게 배포 때마다 사라지던 문제 해결. (pendingProject용 PENDING_FILE과 별개)
 const PENDING_DISPATCH_FILE = process.env.PENDING_DISPATCH_FILE || '/data/pending_dispatch.json';
 function loadPendingDispatch() { try { if (fs.existsSync(PENDING_DISPATCH_FILE)) { const j = JSON.parse(fs.readFileSync(PENDING_DISPATCH_FILE, 'utf8')) || {}; for (const ch of Object.keys(j)) { if (j[ch] && j[ch].at && Date.now() - j[ch].at < 30 * 60 * 1000) pendingDispatch[ch] = j[ch]; } } } catch (_) {} }
@@ -4248,9 +4251,30 @@ function buildHomeBlocksNew() {
   const dN = rj.filter(j => j.status === 'done').length, fN = rj.filter(j => j.status === 'failed').length; const sr = (dN + fN) ? Math.round(dN / (dN + fN) * 100) : null;
   B.push({ type: 'section', text: { type: 'mrkdwn', text: `*이번 주 봇 비용/사용량* (최근 ${mdays.length}일)\n호출 ${mtot.c}회 · 출력토큰 ~${Math.round(mtot.t / 1000)}k · 한도걸림 ${mtot.l}회  _(구독제라 추가 과금 없음, 활동량 참고)_` } });
   B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `잡 완료 ${dN} / 실패 ${fN}${sr !== null ? ` (성공 ${sr}%)` : ''} · 채널에서 "봇 비용"·"전체 정지"로도 가능` }] });
+  B.push({ type: 'divider' });
+  // ── Threads 뉴스 봇 (@nameofkk) ──
+  B.push({ type: 'header', text: { type: 'plain_text', text: 'Threads 뉴스 봇 (@nameofkk)', emoji: true } });
+  if (threadsStatus && threadsStatus.ok) {
+    const ts = threadsStatus;
+    const st = ts.stats || {};
+    B.push({ type: 'section', text: { type: 'mrkdwn', text: `*상태:* 🟢 가동 중 · 오늘 수집 ${st.today || 0}건 · 미가공 ${st.raw || 0}건 · 게시 ${st.published || 0}건\n*채널:* ${ts.channel ? `<#${ts.channel}>` : '미지정'} · *자동승인:* ${ts.auto_approve ? 'ON' : 'OFF'}\n*수집 간격:* ${ts.collect_interval || 15}분 · *일간:* ${ts.daily_hour || 9}시 · *주간:* ${ts.weekly_hour || 10}시` } });
+    if (ts.jobs && ts.jobs.length) {
+      const jt = ts.jobs.map(j => `${j.name}: ${j.next_run ? new Date(j.next_run).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}`).join(' · ');
+      B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `다음 실행: ${jt}` }] });
+    }
+  } else {
+    B.push({ type: 'section', text: { type: 'mrkdwn', text: '*상태:* 🔴 오프라인 또는 연결 안 됨\n_threads-bot 서비스가 꺼져 있거나 아직 시작 중일 수 있어요_' } });
+  }
+  B.push({ type: 'actions', elements: [
+    hbtn('수집 실행', 'thbot_trigger_collect', { style: 'primary' }),
+    hbtn('일간 다이제스트', 'thbot_trigger_daily'),
+    hbtn('주간 다이제스트', 'thbot_trigger_weekly'),
+    hbtn('속보 체크', 'thbot_trigger_breaking'),
+  ] });
+  B.push({ type: 'actions', elements: [chanSel('thbot_channel', threadsStatus && threadsStatus.channel || null, 'Threads 알림 채널')] });
   return B.slice(0, 98); // 블록 상한 안전
 }
-async function publishHome(client, userId) { try { await client.views.publish({ user_id: userId, view: { type: 'home', blocks: buildHomeBlocksNew() } }); } catch (e) { try { console.log('[home] publish 실패(앱설정에서 Home 탭 켜야 함?):', String(e && e.data && e.data.error || e).slice(0, 120)); } catch (_) {} } }
+async function publishHome(client, userId) { try { await fetchThreadsStatus(); await client.views.publish({ user_id: userId, view: { type: 'home', blocks: buildHomeBlocksNew() } }); } catch (e) { try { console.log('[home] publish 실패(앱설정에서 Home 탭 켜야 함?):', String(e && e.data && e.data.error || e).slice(0, 120)); } catch (_) {} } }
 app.event('app_home_opened', async ({ event, client }) => { if (event.tab && event.tab !== 'home') return; await publishHome(client, event.user); });
 // 팀장(한로로) 봇이 새 채널에 초대되면 → 나머지 직원 봇 전부 자동 초대(채널마다 일일이 초대 안 해도 됨)
 app.event('member_joined_channel', async ({ event }) => {
@@ -4418,6 +4442,26 @@ app.action(/^threads_/, async ({ ack, body, action }) => {
       if (!resp.ok) console.log('[threads] forward fail', resp.status);
     } catch (e) { console.log('[threads] forward err', String(e).slice(0, 100)); }
   } catch (e) { console.log('[threads-action] err', String(e).slice(0, 120)); }
+});
+// ── Threads Bot 홈 탭 트리거 버튼 & 채널 설정 ──
+app.action(/^thbot_trigger_/, async ({ ack, body, client }) => {
+  await ack();
+  const aid = (body.actions && body.actions[0] && body.actions[0].action_id) || '';
+  const action = aid.replace('thbot_trigger_', ''); // collect, daily, weekly, breaking
+  try {
+    const resp = await fetch(`http://threads-bot.railway.internal:8080/trigger/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(30000) });
+    const data = resp.ok ? await resp.json() : null;
+    const label = { collect: '수집', daily: '일간 다이제스트', weekly: '주간 다이제스트', breaking: '속보 체크' }[action] || action;
+    const msg = data && data.ok ? `✅ Threads ${label} 실행 완료${data.saved != null ? ` (${data.saved}건)` : ''}` : `❌ Threads ${label} 실행 실패`;
+    try { await botClient.chat.postMessage({ channel: body.user.id, text: msg }); } catch (_) {}
+  } catch (e) { console.log('[thbot-trigger] err', String(e).slice(0, 100)); try { await botClient.chat.postMessage({ channel: body.user.id, text: `❌ threads-bot 연결 실패: ${String(e).slice(0, 60)}` }); } catch (_) {} }
+  try { await publishHome(client, body.user.id); } catch (_) {}
+});
+app.action('thbot_channel', async ({ ack, body, action, client }) => {
+  await ack();
+  const ch = action.selected_conversation;
+  if (ch) { console.log('[thbot] channel set:', ch); /* TODO: threads-bot에 채널 변경 API 추가 시 연동 */ }
+  try { await publishHome(client, body.user.id); } catch (_) {}
 });
 // ── 피드백 루프 UI: 버튼 → 텍스트박스(모달) → 큐 적재 → 단계 경계에서 반영 ──
 // PR 머지 버튼 — 사람이 클릭(승인) → 봇이 CI 확인 후 머지. 프로드 무인 머지 금지(클릭 필수).
