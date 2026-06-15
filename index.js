@@ -4228,7 +4228,11 @@ function buildHomeBlocksNew() {
     timeSel('thbot_cfg_weekly_time', tsWeekly, 0),
   ] });
   // 속보
-  B.push({ type: 'section', text: { type: 'mrkdwn', text: '*속보 체크* — 수집 시 자동 확인 (수동 실행도 가능)' }, accessory: hbtn('속보 체크', 'thbot_trigger_breaking') });
+  const tsBreaking = (tsCfg && tsCfg.breaking_threshold) || 5.0;
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*속보 체크* — 임계값 ${tsBreaking} 이상이면 속보 발행 (수집 시 자동)` }, accessory: hbtn('속보 체크', 'thbot_trigger_breaking') });
+  B.push({ type: 'actions', elements: [
+    staticSel('thbot_cfg_breaking_threshold', [selOpt('3.0 (낮음)', '3'), selOpt('4.0', '4'), selOpt('5.0 (기본)', '5'), selOpt('6.0', '6'), selOpt('7.0', '7'), selOpt('8.0 (높음)', '8')], String(Math.round(tsBreaking)), '속보 임계값'),
+  ] });
   // 자동승인
   const tsAutoApprove = tsCfg ? tsCfg.auto_approve : false; // offline 시 수동 승인이 더 안전한 기본값
   B.push({ type: 'section', text: { type: 'mrkdwn', text: `*포스팅 승인* — ${tsAutoApprove ? '자동 승인 (바로 게시)' : '수동 승인 (Slack에서 확인 후 게시)'}` }, accessory: hbtn(tsAutoApprove ? '수동으로 전환' : '자동으로 전환', 'thbot_cfg_auto_approve', { style: tsAutoApprove ? 'danger' : 'primary', value: tsAutoApprove ? 'false' : 'true' }) });
@@ -4535,6 +4539,7 @@ app.action(/^thbot_cfg_/, async ({ ack, body, action, client }) => {
   else if (aid === 'thbot_cfg_weekly_day' && action.selected_option) cfg.weekly_day = action.selected_option.value;
   else if (aid === 'thbot_cfg_weekly_time' && action.selected_time) cfg.weekly_hour = parseInt(action.selected_time.split(':')[0], 10);
   else if (aid === 'thbot_cfg_auto_approve') cfg.auto_approve = action.value === 'true' || action.value === true;
+  else if (aid === 'thbot_cfg_breaking_threshold' && action.selected_option) cfg.breaking_threshold = parseFloat(action.selected_option.value);
 
   if (Object.keys(cfg).length) {
     try {
