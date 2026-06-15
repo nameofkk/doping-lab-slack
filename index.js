@@ -1134,6 +1134,14 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
     await postAs(client, channel, thread_ts, LEAD, `⏳ 제작 중에 클로드 사용량 한도에 걸렸어.${saved || ' (아직 저장할 변경은 없었어.)'} 한도 리셋되면 이어서 만들게.`);
     return;
   }
+  if (res.timedout || (!res.ok && !res.text)) {
+    // P3-timeout: 타임아웃(SIGKILL)도 limited와 동일하게 WIP 저장 → 안내 → return. 안 하면 "변경/생성된 게 없었어" 오보.
+    let saved = '';
+    try { const dirty = (await sh('git add -A && git diff --cached --quiet; echo $?', dir)).out.trim().endsWith('1'); if (dirty) { const wb = `wip/${id}-${Date.now().toString(36).slice(-4)}`; const p = await sh(`git checkout -b ${wb} && git commit -m "WIP(타임아웃) ${String(task).slice(0, 40).replace(/[\r\n"]/g, ' ')}" && git push origin ${wb} 2>&1`, dir); if (p.code === 0) { saved = ` 지금까지 만든 건 \`${wb}\` 브랜치에 저장해놨어(손실 방지 — "이어서"가 거기서 이어가).`; pausedWork[channel] = { repo, task, newProject, forcePR: true, projName, wipBranch: wb, at: Date.now() }; } } } catch (_) {}
+    jobUpdate(channel, { status: 'limited' });
+    await postAs(client, channel, thread_ts, LEAD, `⏳ 제작 중에 처리 시간 한도에 걸렸어(작업이 너무 커서 한 번에 못 끝냄).${saved || ' (아직 저장할 변경은 없었어.)'} "이어서 #${id}" 하면 이어서 할게.`);
+    return;
+  }
   jobUpdate(channel, { stage: '코드생성' }); // R9: 진행 단계 체크포인트(재시작 알림용)
   addJobTokens(channel, (res.outTokens || estTokens(res.text)) + estTokens(task) + (prd ? estTokens(prd) : 0)); // I8+Q4: 실 API 출력토큰 우선(한글 len/4 ~2배오차 제거), 없으면 추정
   // 연속완성 패스(R2 원장+재계획, I1 하드캡+반복하드스톱) — 갭이 줄어드는지 추적, 진척 없으면(스톨) 접근 바꿔 재계획. 단 재계획해도 또 막히거나(반복) 토큰/시간 캡 넘으면 하드스톱 — 무한루프·비용폭주 방지.
@@ -1156,7 +1164,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
       const replanNote = stalled ? '\n\n[중요 — 재계획] 직전 시도가 진척이 없었어(같은 게 여전히 비어있음). 똑같은 방식 반복하지 마. 왜 안 됐는지 코드를 직접 보고 원인을 짚은 다음, 다른 접근(다른 파일 구조/다른 구현 방식)으로 실제로 끝까지 구현해라.' : '';
       const cont = await runClaude(`이 저장소를 더 다듬어라.${gaps.length ? ` 특히 지금 비어있는 것: ${gaps.join(' / ')} — 데모·플레이스홀더·로렘입숨·"TODO" 금지로 실제 화면(라우트 page)·컴포넌트·핵심 플로우를 끝까지 만들어라.` : ''}${replanNote}${fbCont ? `\n\n[사용자가 방금 추가로 준 지시 — 반드시 그대로 반영]\n${fbCont}` : ''}\n\n이미 있는 서버/타입은 활용하고 npm run build 통과 유지.${prd ? '\n\n[따라야 할 PRD]\n' + prd.slice(0, 5000) : ''}`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 540000, true);
       addJobTokens(channel, (cont.outTokens || estTokens(cont.text)) + (prd ? estTokens(prd.slice(0, 5000)) : 0)); // I8+Q4: 실토큰 우선
-      if (cont.limited) { await postAs(client, channel, thread_ts, LEAD, '⏳ 이어서 채우다가 한도에 걸렸어. 지금까지 만든 만큼만 올릴게, 리셋되면 "이어서"라고 해줘.'); break; }
+      if (cont.limited || cont.timedout) { await postAs(client, channel, thread_ts, LEAD, cont.timedout ? '⏳ 이어서 채우다가 시간 한도에 걸렸어. 지금까지 만든 만큼만 올릴게, "이어서"라고 해줘.' : '⏳ 이어서 채우다가 한도에 걸렸어. 지금까지 만든 만큼만 올릴게, 리셋되면 "이어서"라고 해줘.'); break; }
     }
   }
   const repoUrl = `https://github.com/${repo}`;
@@ -4377,6 +4385,23 @@ app.action(/^verify_/, async ({ ack, body, action }) => {
     else if (!go) { try { await postAs(botClient, channel, undefined, LEAD, '오케이, 원인부터 확인하자. 결과 붙여주면 그때 맞는 수정 추려줄게.'); } catch (_) {} }
   } catch (e) { try { console.log('[verify-action] err', String(e).slice(0, 120)); } catch (_) {} }
 });
+// 재시작 알림 "이어서 #N" / "넘어가기" 게이트 버튼
+app.action(/^resume_/, async ({ ack, body, action }) => {
+  await ack();
+  try {
+    const channel = (body.channel && body.channel.id) || (body.container && body.container.channel_id); if (!channel) return;
+    const jobId = action.value ? parseInt(action.value, 10) : null;
+    const go = action.action_id === 'resume_job';
+    const lbl = go ? `이어서 #${jobId}` : '넘어가기';
+    const msgTs = body.message && body.message.ts;
+    if (msgTs) { try { await botClient.chat.update({ channel, ts: msgTs, text: `✅ ${lbl}`, blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `✅ 선택: *${lbl}*` } }] }); } catch (_) {} }
+    if (go && jobId != null) {
+      const jb = jobs[jobId];
+      if (jb && activeWork[channel]) { try { await postAs(botClient, channel, undefined, LEAD, `지금 그 채널에 도는 작업이 있어 — 끝나고 재개하거나 "이어서 #${jobId}".`); } catch (_) {} }
+      else if (jb) { await handle({ channel, user: body.user && body.user.id, ts: 'btn-resume-' + Date.now(), text: `이어서 #${jobId}` }, app.client); }
+    }
+  } catch (e) { try { console.log('[resume-action] err', String(e).slice(0, 120)); } catch (_) {} }
+});
 // ── 피드백 루프 UI: 버튼 → 텍스트박스(모달) → 큐 적재 → 단계 경계에서 반영 ──
 // PR 머지 버튼 — 사람이 클릭(승인) → 봇이 CI 확인 후 머지. 프로드 무인 머지 금지(클릭 필수).
 app.action(/^pr_(merge|later)$/, async ({ ack, body, action }) => {
@@ -4562,7 +4587,7 @@ async function postButtons(channel, thread_ts, buttons) {
       for (const j of interrupted.sort((a, b) => b.id - a.id)) {
         if (seenCh.has(j.channel)) continue; seenCh.add(j.channel);
         jobUpdateById(j.id, { resumeNotified: true });
-        postAs(botClient, j.channel, undefined, LEAD, `⚠️ 재시작 때문에 작업 #${j.id} "${j.title}"${j.stage ? '(' + j.stage + '까지 갔었어)' : ''}이 중간에 끊겼어. "이어서 #${j.id}" 하면 이어서 할게. ("작업현황"으로 다른 것도 확인)`).catch(() => {});
+        postAs(botClient, j.channel, undefined, LEAD, `⚠️ 재시작 때문에 작업 #${j.id} "${j.title}"${j.stage ? '(' + j.stage + '까지 갔었어)' : ''}이 중간에 끊겼어. "이어서 #${j.id}" 하면 이어서 할게. ("작업현황"으로 다른 것도 확인)`).then(() => postButtons(j.channel, undefined, [{ text: `▶️ 이어서 #${j.id}`, id: 'resume_job', style: 'primary', value: String(j.id) }, { text: '넘어가기', id: 'resume_skip', value: String(j.id) }])).catch(() => {});
       }
     } catch (e) {}
   }, 8000);
