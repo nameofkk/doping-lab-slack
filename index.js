@@ -2131,6 +2131,7 @@ async function fetchThreadsStatus() {
       else postAs(botClient, ch, undefined, yD, 'threads-bot 연결이 끊겼어, 재배포 중이면 금방 돌아올 거야').catch(() => {});
     }
   }
+  if (!online) threadsStatus = null; // offline이면 stale 데이터 제거 (홈 탭에서 오래된 값 표시 방지)
   _thbotWasOnline = online;
 }
 // 대기 제안(pendingDispatch) 영속 — 재배포·재시작에도 발의된 제안이 안 날아가게(30분 만료는 유지). 메모리에만 있던 게 배포 때마다 사라지던 문제 해결. (pendingProject용 PENDING_FILE과 별개)
@@ -4203,7 +4204,7 @@ function buildHomeBlocksNew() {
   const tsSt = tsCfg && tsCfg.stats || {};
   B.push({ type: 'section', text: { type: 'mrkdwn', text: tsCfg
     ? `🟢 *가동 중* · 오늘 수집 ${tsSt.today || 0}건 · 미가공(raw) ${tsSt.raw || 0}건 · 게시 ${tsSt.published || 0}건`
-    : '🔴 *오프라인* — threads-bot 서비스가 꺼져 있거나 시작 중' } });
+    : '🔴 *오프라인* — threads-bot 서비스가 꺼져 있거나 시작 중\n_아래 설정값은 마지막 확인 기준이라 실제와 다를 수 있어_' } });
   // 수집
   const tsCollect = (tsCfg && tsCfg.collect_interval) || 15;
   B.push({ type: 'section', text: { type: 'mrkdwn', text: `*뉴스 수집* — ${tsCollect}분 간격` }, accessory: hbtn('지금 수집', 'thbot_trigger_collect', { style: 'primary' }) });
@@ -4229,7 +4230,7 @@ function buildHomeBlocksNew() {
   // 속보
   B.push({ type: 'section', text: { type: 'mrkdwn', text: '*속보 체크* — 수집 시 자동 확인 (수동 실행도 가능)' }, accessory: hbtn('속보 체크', 'thbot_trigger_breaking') });
   // 자동승인
-  const tsAutoApprove = tsCfg ? tsCfg.auto_approve : true;
+  const tsAutoApprove = tsCfg ? tsCfg.auto_approve : false; // offline 시 수동 승인이 더 안전한 기본값
   B.push({ type: 'section', text: { type: 'mrkdwn', text: `*포스팅 승인* — ${tsAutoApprove ? '자동 승인 (바로 게시)' : '수동 승인 (Slack에서 확인 후 게시)'}` }, accessory: hbtn(tsAutoApprove ? '수동으로 전환' : '자동으로 전환', 'thbot_cfg_auto_approve', { style: tsAutoApprove ? 'danger' : 'primary', value: tsAutoApprove ? 'false' : 'true' }) });
   // 다음 스케줄
   if (tsCfg && tsCfg.jobs && tsCfg.jobs.length) {
