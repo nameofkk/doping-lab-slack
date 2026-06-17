@@ -205,6 +205,7 @@ function commandMenuText() {
     '',
     '🔭 *운영·모니터링*',
     '• `헬스체크` · `서비스 목록` · `서비스 등록 <레포> <url>` · `CI 점검` — GitHub Actions 상태',
+    '• `헬스 항목 <서비스> <헬스URL> [기대문구]` — 앱-레벨 헬스EP 연결 · `헬스 게이팅 <서비스> 켜기/끄기` — 헬스EP 실패를 다운으로 격상(옵트인)',
     '• `운영 브리핑` — 종합 진단 · `운영 리포트` — 사용량/성공률 · `정기 업무` — 자동 스케줄 현황',
     '',
     '사업(비즈니스)',
@@ -2557,6 +2558,7 @@ async function runBoardMeeting(client, channel, manual = false) {
 }
 // 운영 헬스체크 — 각 라이브 서비스 curl로 상태 확인 → 우정잉(QA/SRE)이 보고, 다운이면 윈터가 알림
 // 다운 시 봇이 직접 실측(curl/dig/openssl) — "너가 curl 쳐줘" 대신 봇이 앱-엣지 분기를 스스로 가른다. railway logs만 봇이 못 봐.
+const HEALTH_GATE_STREAK = 3; // health발 다운 디바운스 — 헬스EP가 이만큼 연속(체크가 이상 시 매분 도니 약 3분) 실패해야 옵트인(healthGating) 서비스를 '다운'으로 격상. 한두 번 깜빡이는 오탐 차단.
 async function runDownProbe(repo) {
   const s = services[repo] || {}; const url = s.url; const lines = [];
   let origin = ''; try { const src = ((bizData[repo] && bizData[repo].sources) || []).find(x => x.name === 'admin'); if (src && src.url) origin = src.url.replace(/^(https?:\/\/[^\/]+).*/, '$1'); } catch (_) {}
@@ -2615,24 +2617,30 @@ async function checkServices(client, channel, announce = true, onlyAlert = false
       } catch (_) {}
     }
     if (/^https:/i.test(s.url)) { const today = kstNow().day; if (s.sslDay !== today) { s.sslDay = today; try { const host = s.url.replace(/^https?:\/\//i, '').split('/')[0]; const so = await sh(`echo | timeout 12 openssl s_client -servername ${host} -connect ${host}:443 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null`); const me = (so.out || '').match(/notAfter=(.+)/); if (me) s.sslDays = Math.round((new Date(me[1]).getTime() - Date.now()) / 86400000); } catch (_) {} } if (typeof s.sslDays === 'number' && s.sslDays <= 14) issues.push(`SSL 인증서 ${s.sslDays}일 남음(갱신 필요)`); }
-    if (s.healthUrl) { try { const hr = await sh(`curl -s --max-time 12 -w "\\n%{http_code}" '${String(s.healthUrl).replace(/'/g, '')}' 2>/dev/null`); const ho = (hr.out || '').trim(); const hc = ((ho.match(/(\d{3})\s*$/) || [])[1]) || '000'; const hbody = ho.replace(/\d{3}\s*$/, ''); if (!/^2/.test(hc) || (s.healthKeyword && !hbody.includes(s.healthKeyword))) issues.push(`헬스 엔드포인트 이상(${hc}${s.healthKeyword ? ', 기대문구 없음' : ''})`); } catch (_) {} }
+    let healthBad = false, healthCode = '000';
+    if (s.healthUrl) { try { const hr = await sh(`curl -s --max-time 12 -w "\\n%{http_code}" '${String(s.healthUrl).replace(/'/g, '')}' 2>/dev/null`); const ho = (hr.out || '').trim(); const hc = ((ho.match(/(\d{3})\s*$/) || [])[1]) || '000'; const hbody = ho.replace(/\d{3}\s*$/, ''); const codeBad = !/^2/.test(hc); const kwBad = !!(s.healthKeyword && !hbody.includes(s.healthKeyword)); if (codeBad || kwBad) { healthBad = true; healthCode = hc; issues.push(`헬스 엔드포인트 이상(${hc}${kwBad ? ', 기대문구 없음' : ''})`); } } catch (_) { /* 헬스 체크 자체 실패(네트워크 도구 막힘 등)는 게이팅에 반영 안 함 — 오탐 방지 */ } }
+    // 헬스EP 연속 실패수 — 깜빡임 디바운스용. 정상이거나 헬스URL 없으면 0으로 리셋
+    s.healthFailStreak = healthBad ? ((s.healthFailStreak || 0) + 1) : 0;
+    // 옵트인(s.healthGating)된 서비스 한정: 루트는 200인데 헬스EP가 HEALTH_GATE_STREAK연속 죽었으면 '다운'으로 격상. 옵트인 안 했으면 종전대로 '주의(degraded)'로만 표시.
+    let healthGatedDown = false;
+    if (up && s.healthGating && healthBad && (s.healthFailStreak || 0) >= HEALTH_GATE_STREAK) { up = false; healthGatedDown = true; }
     const degraded = up && issues.length; s.issues = issues;
     const wasUp = s.lastStatus !== 'down';
     s.lastStatus = up ? 'up' : 'down'; s.lastCheck = Date.now(); s.wasUp = wasUp;
     s.failStreak = up ? 0 : ((s.failStreak || 0) + 1); // A1: 연속 실패수
     s.history = (s.history || []).concat([{ at: Date.now(), code, ms, up }]).slice(-20); // A1: 링버퍼(최근 20회)
     // A2: 인시던트 메모리 — 다운 시작/복구 전이를 facts에 기록(다음 다운 때 과거 플레이북 회상)
-    if (wasUp && !up) { s.downSince = s.downSince || Date.now(); s.downCode = code; } // 새로 다운
+    if (wasUp && !up) { s.downSince = s.downSince || Date.now(); s.downCode = healthGatedDown ? healthCode : code; s.downVia = healthGatedDown ? 'health' : 'http'; } // 새로 다운 — health발이면 헬스EP 실패코드를 downCode에 실어 알림에 표시
     else if (!wasUp && up && s.downSince) { // 복구
       const dur = Math.max(1, Math.round((Date.now() - s.downSince) / 60000));
       try { addFact('svc:' + s.repo, `인시던트: HTTP ${s.downCode || '?'}로 약 ${dur}분 다운 후 복구`, 'incident'); } catch (_) {}
       try { log('warn', 'incident-recovered', { repo: s.repo, code: s.downCode, downMin: dur }); } catch (_) {}
       if (s.repo !== SELF_REPO) runPostmortem(s.repo, s.downCode, dur).catch(() => {}); // Wave4: 복구 후 재발방지 교훈+예방 마일스톤
-      s.downSince = null; s.downCode = null; s.escalatedAt = 0; // D-17: 복구 시 재에스컬레이션 마크 리셋
+      s.downSince = null; s.downCode = null; s.downVia = null; s.escalatedAt = 0; // D-17: 복구 시 재에스컬레이션 마크 리셋
     }
     const tr = svcTrend(s);
     const sslTxt = (typeof s.sslDays === 'number') ? ` · SSL ${s.sslDays}일` : '';
-    const lineStr = `${degraded ? '🟡' : up ? '🟢' : '🔴'} ${s.repo} · ${s.url} (${code}${ms != null ? ', ' + ms + 'ms' : ', no response'}${size != null ? ', ' + (size > 1024 ? Math.round(size / 1024) + 'KB' : size + 'B') : ''})${sslTxt}${s.healthUrl ? ' · 헬스EP' : ''}${tr ? ' ' + tr : ''}${issues.length ? '\n    주의: ' + issues.join(' / ') : ''}`;
+    const lineStr = `${degraded ? '🟡' : up ? '🟢' : '🔴'} ${s.repo} · ${s.url} (${code}${ms != null ? ', ' + ms + 'ms' : ', no response'}${size != null ? ', ' + (size > 1024 ? Math.round(size / 1024) + 'KB' : size + 'B') : ''})${sslTxt}${s.healthUrl ? (s.healthGating ? ' · 헬스EP⚡게이팅' : ' · 헬스EP') : ''}${tr ? ' ' + tr : ''}${issues.length ? '\n    주의: ' + issues.join(' / ') : ''}`;
     lines.push(lineStr); lineByRepo[s.repo] = lineStr;
   }
   persistServices();
@@ -2643,7 +2651,7 @@ async function checkServices(client, channel, announce = true, onlyAlert = false
     for (const s of down.filter(s => s.wasUp)) {
       const tch = routed(s); if (!tch) continue;
       const h = recallFacts('svc:' + s.repo, '인시던트 다운 복구'); const past = h ? `\n   ↳ 과거 이력:${h.replace(/\n+/g, ' ').slice(0, 300)}` : '';
-      const dr = await postAlert(client, tch, sre, `🔴 방금 다운 감지: ${s.repo}(HTTP ${s.downCode || '?'}). 라이브가 죽었어, 바로 확인할게.${past}`); // 전송 실패 시 OWNER 폴백 내장
+      const dr = await postAlert(client, tch, sre, `🔴 방금 다운 감지: ${s.repo}(${s.downVia === 'health' ? '헬스EP ' : ''}HTTP ${s.downCode || '?'}). ${s.downVia === 'health' ? `루트는 200인데 헬스 엔드포인트가 ${s.healthFailStreak || HEALTH_GATE_STREAK}연속 죽었어 — 앱·DB 레벨 문제 의심.` : '라이브가 죽었어,'} 바로 확인할게.${past}`); // 전송 실패 시 OWNER 폴백 내장. health발이면 헬스EP 실패코드·정황 표시
       if (dr && OWNER_USER_ID && botClient && !settings.monitorChannel) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`🔴 [다운] ${s.repo}`) }).catch(() => {}); // 채널 성공 시에만 추가 DM(모니터링 채널 지정 시 생략)
     }
     // 새로 degraded(up이지만 이상) — 담당 채널로 1회
@@ -3663,10 +3671,21 @@ async function handle(event, client) {
       if (hc) {
         const rp = (extractRepo(hc[2]) || '').startsWith('alias:') ? resolveRepo(hc[2]) : (extractRepo(hc[2]) || resolveRepo(hc[2]));
         if (!rp || !services[rp]) { await postAs(client, channel, thread_ts, byName('윈터') || LEAD, '그 서비스가 대장에 없어. "서비스 등록"으로 먼저 올려줘.'); return; }
-        if (hc[1]) { delete services[rp].healthUrl; delete services[rp].healthKeyword; persistServices(); await postAs(client, channel, thread_ts, byName('윈터') || LEAD, `${rp.split('/').pop()} 헬스 엔드포인트 해제했어.`); return; }
+        if (hc[1]) { delete services[rp].healthUrl; delete services[rp].healthKeyword; delete services[rp].healthGating; delete services[rp].healthFailStreak; persistServices(); await postAs(client, channel, thread_ts, byName('윈터') || LEAD, `${rp.split('/').pop()} 헬스 엔드포인트 해제했어(게이팅도 같이 꺼짐).`); return; }
         if (!hc[3]) { await postAs(client, channel, thread_ts, byName('윈터') || LEAD, '형식: 헬스 항목 <서비스> <헬스URL> [정상일 때 들어있어야 할 문구]. 예) 헬스 항목 wewantpeace https://api.wewantpeace.live/health ok'); return; }
         services[rp].healthUrl = hc[3]; if (hc[4]) services[rp].healthKeyword = hc[4].trim(); else delete services[rp].healthKeyword; persistServices();
-        await postAs(client, channel, thread_ts, byName('윈터') || LEAD, `${rp.split('/').pop()} 헬스 엔드포인트 지정: ${hc[3]}${hc[4] ? ` (기대 문구: "${hc[4].trim()}")` : ''}. 이제 2분마다 이것도 확인해서 200+문구면 정상, 아니면 경보.`); return;
+        await postAs(client, channel, thread_ts, byName('윈터') || LEAD, `${rp.split('/').pop()} 헬스 엔드포인트 지정: ${hc[3]}${hc[4] ? ` (기대 문구: "${hc[4].trim()}")` : ''}. 이제 2분마다 이것도 확인해서 200+문구면 정상, 아니면 경보(주의 표시). 헬스EP 죽으면 아예 '다운'으로 보고 싶으면 "헬스 게이팅 ${rp.split('/').pop()} 켜기".`); return;
+      }
+      // 헬스 게이팅 옵트인 — 헬스EP 실패를 '주의'가 아니라 '다운'으로 격상할지 서비스별 on/off. "헬스 게이팅 <서비스> 켜기/끄기"
+      const hg = rawU.match(/^헬스\s*게이팅\s+(\S+)\s*(켜기|켜|on|끄기|꺼|off|해제)?$/i);
+      if (hg) {
+        const rp = (extractRepo(hg[1]) || '').startsWith('alias:') ? resolveRepo(hg[1]) : (extractRepo(hg[1]) || resolveRepo(hg[1]));
+        if (!rp || !services[rp]) { await postAs(client, channel, thread_ts, byName('윈터') || LEAD, '그 서비스가 대장에 없어. "서비스 등록"으로 먼저 올려줘.'); return; }
+        if (!services[rp].healthUrl) { await postAs(client, channel, thread_ts, byName('윈터') || LEAD, '먼저 "헬스 항목"으로 헬스 엔드포인트부터 지정해줘 — 게이팅은 그게 있어야 의미 있어.'); return; }
+        const off = /끄기|꺼|off|해제/i.test(hg[2] || '');
+        if (off) { delete services[rp].healthGating; delete services[rp].healthFailStreak; persistServices(); await postAs(client, channel, thread_ts, byName('윈터') || LEAD, `${rp.split('/').pop()} 헬스 게이팅 껐어. 헬스EP 실패는 다시 '주의(degraded)'로만 표시해.`); return; }
+        services[rp].healthGating = true; persistServices();
+        await postAs(client, channel, thread_ts, byName('윈터') || LEAD, `${rp.split('/').pop()} 헬스 게이팅 켰어. 이제 루트가 200이어도 헬스EP가 ${HEALTH_GATE_STREAK}연속(약 ${HEALTH_GATE_STREAK}분) 실패하면 '다운'으로 보고 경보 띄울게. 한두 번 깜빡이는 건 디바운스로 걸러.`); return;
       }
       if (/^서비스\s*(목록|리스트|대장|상태)\s*\??$/.test(raw)) {
         const ls = svcList().filter(s => s.url);
@@ -4286,7 +4305,7 @@ function buildHomeBlocksNew() {
   });
   B.push({ type: 'divider' });
   // 라이브 서비스 + 운영 메트릭 (잘리면 안 되니 당신 차례/로드맵보다 위에)
-  const sLine = s => { const last = (s.history || [])[s.history.length - 1]; const ms = last && last.ms != null ? `${last.ms}ms` : '—'; const issues = (s.issues || []).length; const icon = s.lastStatus === 'down' ? '🔴' : issues ? '🟡' : '🟢'; const extras = [typeof s.sslDays === 'number' ? `SSL ${s.sslDays}일` : null, s.healthUrl ? '헬스EP✓' : '헬스EP✗'].filter(Boolean).join(' · '); return `${icon} ${s.repo.split('/').pop()} (${ms})${extras ? ' · ' + extras : ''}${issues ? '\n   주의: ' + s.issues.join(' / ') : ''}`; };
+  const sLine = s => { const last = (s.history || [])[s.history.length - 1]; const ms = last && last.ms != null ? `${last.ms}ms` : '—'; const issues = (s.issues || []).length; const icon = s.lastStatus === 'down' ? '🔴' : issues ? '🟡' : '🟢'; const extras = [typeof s.sslDays === 'number' ? `SSL ${s.sslDays}일` : null, s.healthUrl ? (s.healthGating ? '헬스EP⚡' : '헬스EP✓') : '헬스EP✗'].filter(Boolean).join(' · '); return `${icon} ${s.repo.split('/').pop()} (${ms})${extras ? ' · ' + extras : ''}${issues ? '\n   주의: ' + s.issues.join(' / ') : ''}`; };
   B.push({ type: 'section', text: { type: 'mrkdwn', text: `*라이브 서비스 헬스* (${svcs.length}) — 2분마다 실시간 감시\n` + (svcs.length ? svcs.map(sLine).join('\n').slice(0, 2600) : '_등록된 서비스 없음_') } });
   const mdays = [...usageHist, usageStat].filter(d => d && d.day).slice(-7);
   const mtot = mdays.reduce((a, d) => ({ c: a.c + (d.calls || 0), t: a.t + (d.outTokens || 0), l: a.l + (d.limitedHits || 0) }), { c: 0, t: 0, l: 0 });
