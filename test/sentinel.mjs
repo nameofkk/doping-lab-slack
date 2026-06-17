@@ -40,5 +40,43 @@ ok(parseSvcReg('서비스 등록 wewantpeace <https://www.wewantpeace.live|WeWan
 ok(parseSvcReg('서비스 등록 sponono https://sponono.com') && parseSvcReg('서비스 등록 sponono https://sponono.com').repo === 'sponono', '평문 URL 등록 파싱');
 ok(!parseSvcReg('헬스체크'), '헬스체크는 등록 명령 아님');
 
+// ── 서비스 레지스트리 영속화: 원자쓰기 + 로드시 .bak 백업 (index.js loadServices/persistServices 복제) ──
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+function makeStore(SERVICES_FILE) {
+  let services = {};
+  function loadServices() { try { if (fs.existsSync(SERVICES_FILE)) { services = JSON.parse(fs.readFileSync(SERVICES_FILE, 'utf8')) || {}; try { fs.copyFileSync(SERVICES_FILE, SERVICES_FILE + '.bak'); } catch (_) {} } } catch { services = {}; } }
+  function persistServices() { try { const tmp = SERVICES_FILE + '.tmp.' + process.pid; fs.writeFileSync(tmp, JSON.stringify(services)); fs.renameSync(tmp, SERVICES_FILE); } catch {} }
+  return { get: () => services, set: v => { services = v; }, loadServices, persistServices };
+}
+const tdir = fs.mkdtempSync(path.join(os.tmpdir(), 'svc-'));
+const SF = path.join(tdir, 'services.json');
+
+// 1. persist가 읽어들일 수 있는 정상 JSON을 쓴다
+const s1 = makeStore(SF); s1.set({ 'a/b': { repo: 'a/b', url: 'https://x' } }); s1.persistServices();
+ok(fs.existsSync(SF) && JSON.parse(fs.readFileSync(SF, 'utf8'))['a/b'].url === 'https://x', 'persist → 정상 JSON 기록');
+// 2. 원자쓰기: rename으로 소비돼 .tmp 잔여물이 안 남는다
+ok(!fs.existsSync(SF + '.tmp.' + process.pid), 'persist 후 .tmp 임시파일 안 남음(rename으로 소비)');
+// 3. 기존 정상 파일을 다시 persist해도 깨지지 않고 갱신된다(rename 원자성)
+s1.set({ 'a/b': { repo: 'a/b', url: 'https://y' } }); s1.persistServices();
+ok(JSON.parse(fs.readFileSync(SF, 'utf8'))['a/b'].url === 'https://y', '재기록 시 원자적으로 교체됨');
+// 4. 로드 성공 시 .bak 백업 1벌이 생긴다
+const s2 = makeStore(SF); s2.loadServices();
+ok(fs.existsSync(SF + '.bak'), '로드 성공 → .bak 백업 생성');
+// 5. .bak 내용이 원본과 동일하다
+ok(fs.readFileSync(SF, 'utf8') === fs.readFileSync(SF + '.bak', 'utf8'), '.bak 내용이 원본과 일치');
+// 6. 로드된 데이터가 기록한 것과 동일하다(왕복)
+ok(s2.get()['a/b'].url === 'https://y', '왕복: persist→load 데이터 보존');
+// 7. 파일이 깨졌으면 services={}로 가고, 기존 .bak는 덮어쓰지 않는다(직전 양호 백업 보존)
+const bakBefore = fs.readFileSync(SF + '.bak', 'utf8');
+fs.writeFileSync(SF, '{이건깨진JSON');
+const s3 = makeStore(SF); s3.loadServices();
+ok(Object.keys(s3.get()).length === 0 && fs.readFileSync(SF + '.bak', 'utf8') === bakBefore, '파손 파일 → {} 복구 & 양호 .bak 보존(파손본으로 덮어쓰지 않음)');
+// 8. 파일이 아예 없으면 services={} 유지하고 .bak도 안 만든다
+const SF2 = path.join(tdir, 'none.json'); const s4 = makeStore(SF2); s4.loadServices();
+ok(Object.keys(s4.get()).length === 0 && !fs.existsSync(SF2 + '.bak'), '파일 없으면 {} 유지 & .bak 미생성');
+try { fs.rmSync(tdir, { recursive: true, force: true }); } catch (_) {}
+
 console.log(fail ? '\n❌ 센티넬 실패 ' + fail : '\n✅ 센티넬 전부 통과');
 process.exit(fail ? 1 : 0);

@@ -1806,8 +1806,8 @@ function persistPending() { try { fs.writeFileSync(PENDING_FILE, JSON.stringify(
 // ── 서비스 레지스트리 (회사가 운영하는 서비스 대장) — 운영/데이터/마케팅 루프의 공통 대상 ──
 const SERVICES_FILE = process.env.SERVICES_FILE || '/data/services.json';
 let services = {}; // repo -> { repo, url, channel, created, lastStatus, lastCheck }
-function loadServices() { try { if (fs.existsSync(SERVICES_FILE)) services = JSON.parse(fs.readFileSync(SERVICES_FILE, 'utf8')) || {}; } catch { services = {}; } }
-function persistServices() { try { fs.writeFileSync(SERVICES_FILE, JSON.stringify(services)); } catch {} }
+function loadServices() { try { if (fs.existsSync(SERVICES_FILE)) { services = JSON.parse(fs.readFileSync(SERVICES_FILE, 'utf8')) || {}; try { fs.copyFileSync(SERVICES_FILE, SERVICES_FILE + '.bak'); } catch (_) {} } } catch { services = {}; } } // 로드 성공 시 .bak 백업 1벌(파손 대비). 백업 실패는 무시(메인 로드까지 깨지지 않게)
+function persistServices() { try { const tmp = SERVICES_FILE + '.tmp.' + process.pid; fs.writeFileSync(tmp, JSON.stringify(services)); fs.renameSync(tmp, SERVICES_FILE); } catch {} } // 원자 쓰기: 임시파일에 쓴 뒤 rename(같은 FS라 원자적) → 쓰는 중 크래시에도 services.json 반파 방지
 function registerService(repo, url, channel) {
   if (!repo) return;
   const ex = services[repo] || {};
