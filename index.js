@@ -2579,8 +2579,8 @@ async function checkServices(client, channel, announce = true, onlyAlert = false
     const out = (r.out || '').trim();
     const m = out.match(/^(\d{3})\s+([\d.]+)s?\s+(\d+)?/); // 상태코드 + 응답지연(s) + 응답크기(byte)
     let code = m ? m[1] : '000'; let ms = m ? Math.round(parseFloat(m[2]) * 1000) : null; let size = m && m[3] != null ? parseInt(m[3], 10) : null;
-    // 커스텀 도메인 DNS/네트워크 실패(000) 시 Railway 원본 URL로 폴백 — 앱은 살아있는데 DNS만 죽은 건 "다운"이 아님
-    let dnsIssue = false;
+    // 커스텀 도메인 접속 실패(000/403) 시 Railway 원본 URL로 폴백 점검 — 원본이 살아있어도 사용자는 커스텀 도메인으로 들어오므로, 원본코드로 up을 뒤집지 않는다. up/down 판정은 공개 URL(code) 기준 그대로 두고, 원본 정상 사실은 dnsIssue처럼 degraded 메모로만 남긴다.
+    let dnsIssue = false; let originCode = '';
     if (code === '000' || code === '403') {
       const repo = s.repo || ''; const name = repo.split('/').pop();
       const railUrls = [`https://${name}-web-production.up.railway.app`, `https://${name}-api-production.up.railway.app`, `https://${name}-production.up.railway.app`];
@@ -2588,11 +2588,11 @@ async function checkServices(client, channel, announce = true, onlyAlert = false
         if (ru === s.url) continue;
         const fb = await sh(`curl -s -o /dev/null -w "%{http_code} %{time_total}s %{size_download}" --max-time 12 '${ru}' 2>/dev/null || echo "000 0 0"`);
         const fm = (fb.out || '').trim().match(/^(\d{3})\s+([\d.]+)s?\s+(\d+)?/);
-        if (fm && /^2\d\d|^3\d\d/.test(fm[1])) { code = fm[1]; ms = Math.round(parseFloat(fm[2]) * 1000); size = fm[3] != null ? parseInt(fm[3], 10) : null; dnsIssue = true; s.railwayUrl = ru; break; }
+        if (fm && /^2\d\d|^3\d\d/.test(fm[1])) { dnsIssue = true; originCode = fm[1]; s.railwayUrl = ru; break; } // 원본 정상이어도 code/ms/size는 공개 URL 값 유지(up 안 뒤집음)
       }
     }
     let up = /^2\d\d|^3\d\d/.test(code); const issues = []; // up이지만 문제 있으면 degraded — 매 체크마다(실시간), SSL만 일1회 캐시
-    if (dnsIssue) issues.push(`커스텀 도메인(${s.url}) DNS/접속 실패 — Railway 원본(${s.railwayUrl})은 정상. DNS 확인 필요`);
+    if (dnsIssue) issues.push(`커스텀 도메인(${s.url}) 접속 실패(${code}) — Railway 원본(${s.railwayUrl})은 정상(${originCode}). 공개 URL 기준 다운 판정, DNS/도메인 연결 확인 필요`);
     if (up && size != null && size < 200) issues.push('응답 내용 거의 빈(껍데기·에러페이지 의심)');
     // 감사 #5: 200이어도 실제 콘텐츠(JS/CSS 로드 여부)를 확인 — HTML만 오고 에셋이 깨진 케이스 감지
     if (up && size != null && size > 200 && /^2\d\d/.test(code)) {
