@@ -2591,11 +2591,27 @@ async function checkServices(client, channel, announce = true, onlyAlert = false
         if (fm && /^2\d\d|^3\d\d/.test(fm[1])) { code = fm[1]; ms = Math.round(parseFloat(fm[2]) * 1000); size = fm[3] != null ? parseInt(fm[3], 10) : null; dnsIssue = true; s.railwayUrl = ru; break; }
       }
     }
-    let up = /^2\d\d|^3\d\d/.test(code); const issues = []; // up이지만 문제 있으면 degraded — 매 체크마다(실시간), SSL만 일1회 캐시
+    let up = /^2\d\d|^3\d\d/.test(code); const rootUp = up; const issues = []; // up이지만 문제 있으면 degraded — 매 체크마다(실시간), SSL만 일1회 캐시
+    // 루트가 비2xx/3xx이고 healthUrl이 설정된 서비스는 /health를 재요청 — 200이면 앱은 살아있는 것으로 판정(루트 비정상은 degraded로 표시).
+    // healthUrl 없는 서비스는 기존 루트 로직 그대로. (예: threads-bot 루트는 뉴스백엔드라 404가 정상 — 루트만 보면 오탐)
+    // 헬스 측정은 여기서 한 번만 — (1) 루트 죽었을 때 up 승격, (2) 평소 헬스EP 이상 감지에 같이 재사용(중복 curl 방지).
+    let healthOk = null, healthCode = null;
+    if (s.healthUrl) {
+      try {
+        const hr = await sh(`curl -s --max-time 12 -w "\\n%{http_code}" '${String(s.healthUrl).replace(/'/g, '')}' 2>/dev/null`);
+        const ho = (hr.out || '').trim();
+        healthCode = ((ho.match(/(\d{3})\s*$/) || [])[1]) || '000';
+        const hbody = ho.replace(/\d{3}\s*$/, '');
+        healthOk = /^2/.test(healthCode) && (!s.healthKeyword || hbody.includes(s.healthKeyword));
+        s.healthCode = healthCode;
+        if (!rootUp && healthOk) { up = true; issues.push(`루트(${code}) 비정상이지만 헬스 엔드포인트(${s.healthUrl})는 정상 — 앱은 살아있음, 루트 점검 필요`); }
+        else if (!healthOk) issues.push(`헬스 엔드포인트 이상(${healthCode}${s.healthKeyword ? ', 기대문구 없음' : ''})`);
+      } catch (_) {}
+    }
     if (dnsIssue) issues.push(`커스텀 도메인(${s.url}) DNS/접속 실패 — Railway 원본(${s.railwayUrl})은 정상. DNS 확인 필요`);
-    if (up && size != null && size < 200) issues.push('응답 내용 거의 빈(껍데기·에러페이지 의심)');
+    if (rootUp && size != null && size < 200) issues.push('응답 내용 거의 빈(껍데기·에러페이지 의심)');
     // 감사 #5: 200이어도 실제 콘텐츠(JS/CSS 로드 여부)를 확인 — HTML만 오고 에셋이 깨진 케이스 감지
-    if (up && size != null && size > 200 && /^2\d\d/.test(code)) {
+    if (rootUp && size != null && size > 200 && /^2\d\d/.test(code)) {
       try {
         const body = (await sh(`curl -s --max-time 10 '${String(s.url).replace(/'/g, '')}' 2>/dev/null | head -100`, undefined, 15000)).out || '';
         // JS/CSS 에셋 참조가 있는데 src 경로에 서브디렉토리가 끼어있으면 base path 불일치 의심
@@ -2615,7 +2631,6 @@ async function checkServices(client, channel, announce = true, onlyAlert = false
       } catch (_) {}
     }
     if (/^https:/i.test(s.url)) { const today = kstNow().day; if (s.sslDay !== today) { s.sslDay = today; try { const host = s.url.replace(/^https?:\/\//i, '').split('/')[0]; const so = await sh(`echo | timeout 12 openssl s_client -servername ${host} -connect ${host}:443 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null`); const me = (so.out || '').match(/notAfter=(.+)/); if (me) s.sslDays = Math.round((new Date(me[1]).getTime() - Date.now()) / 86400000); } catch (_) {} } if (typeof s.sslDays === 'number' && s.sslDays <= 14) issues.push(`SSL 인증서 ${s.sslDays}일 남음(갱신 필요)`); }
-    if (s.healthUrl) { try { const hr = await sh(`curl -s --max-time 12 -w "\\n%{http_code}" '${String(s.healthUrl).replace(/'/g, '')}' 2>/dev/null`); const ho = (hr.out || '').trim(); const hc = ((ho.match(/(\d{3})\s*$/) || [])[1]) || '000'; const hbody = ho.replace(/\d{3}\s*$/, ''); if (!/^2/.test(hc) || (s.healthKeyword && !hbody.includes(s.healthKeyword))) issues.push(`헬스 엔드포인트 이상(${hc}${s.healthKeyword ? ', 기대문구 없음' : ''})`); } catch (_) {} }
     const degraded = up && issues.length; s.issues = issues;
     const wasUp = s.lastStatus !== 'down';
     s.lastStatus = up ? 'up' : 'down'; s.lastCheck = Date.now(); s.wasUp = wasUp;

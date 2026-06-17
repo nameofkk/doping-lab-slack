@@ -40,5 +40,40 @@ ok(parseSvcReg('서비스 등록 wewantpeace <https://www.wewantpeace.live|WeWan
 ok(parseSvcReg('서비스 등록 sponono https://sponono.com') && parseSvcReg('서비스 등록 sponono https://sponono.com').repo === 'sponono', '평문 URL 등록 파싱');
 ok(!parseSvcReg('헬스체크'), '헬스체크는 등록 명령 아님');
 
+// ── up/down 판정 — index.js checkServices 핵심 로직 복제(드리프트 감지) ──
+// 루트가 비2xx/3xx여도 healthUrl이 있고 /health가 200이면 up(루트 비정상은 degraded). healthUrl 없으면 루트로만 판정.
+// (예: threads-bot 루트는 뉴스백엔드라 404가 정상 — 루트만 보면 오탐)
+function judge({ code, healthUrl = null, healthCode = null, healthKeyword = null, healthBody = '' }) {
+  const rootUp = /^2\d\d|^3\d\d/.test(code); let up = rootUp; const issues = [];
+  if (healthUrl) {
+    const healthOk = /^2/.test(String(healthCode)) && (!healthKeyword || healthBody.includes(healthKeyword));
+    if (!rootUp && healthOk) { up = true; issues.push('루트 비정상이지만 헬스 정상'); }
+    else if (!healthOk) issues.push('헬스 엔드포인트 이상');
+  }
+  const degraded = up && issues.length > 0;
+  return { up, degraded, status: up ? 'up' : 'down', issues };
+}
+// 핵심 케이스: 루트 404 + healthUrl 200 → up + degraded (오탐 해소)
+let j = judge({ code: '404', healthUrl: 'https://x/health', healthCode: '200' });
+ok(j.up && j.degraded, '루트 404인데 헬스 200 → up이고 degraded(다운 아님)');
+ok(j.status === 'up', '루트 404 + 헬스 200 → 상태는 up');
+// healthUrl 없으면 기존 루트 로직 유지 → 루트 404는 down
+j = judge({ code: '404', healthUrl: null });
+ok(!j.up && j.status === 'down', 'healthUrl 없으면 루트 404는 그대로 down');
+// 루트 정상 + 헬스 정상 → up, degraded 아님
+j = judge({ code: '200', healthUrl: 'https://x/health', healthCode: '200' });
+ok(j.up && !j.degraded, '루트 200 + 헬스 200 → up, degraded 아님');
+// 루트 죽고 헬스도 503 → 진짜 down
+j = judge({ code: '500', healthUrl: 'https://x/health', healthCode: '503' });
+ok(!j.up && j.status === 'down' && j.issues.length, '루트 500 + 헬스 503 → 진짜 down + 헬스 이상 표시');
+// 루트 정상이지만 헬스가 죽음 → up이되 degraded
+j = judge({ code: '200', healthUrl: 'https://x/health', healthCode: '500' });
+ok(j.up && j.degraded, '루트 200인데 헬스 500 → up이되 degraded');
+// 헬스 200이지만 기대문구 없음 → 헬스 비정상 취급(루트 404면 down)
+j = judge({ code: '404', healthUrl: 'https://x/health', healthCode: '200', healthKeyword: 'ok', healthBody: 'nope' });
+ok(!j.up && j.status === 'down', '헬스 200이어도 기대문구 없으면 비정상 → 루트 404면 down');
+// 루트 3xx(리다이렉트)는 그대로 up
+ok(judge({ code: '301', healthUrl: null }).up, '루트 301 리다이렉트는 up');
+
 console.log(fail ? '\n❌ 센티넬 실패 ' + fail : '\n✅ 센티넬 전부 통과');
 process.exit(fail ? 1 : 0);
