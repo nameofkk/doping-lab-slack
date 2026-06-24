@@ -1461,9 +1461,6 @@ function loadSchedules() {
     schedSeq = d.seq || 0;
     let purged = 0;
     for (const s of (d.items || [])) {
-      // 자동 정리: 일회성 기능변경/제작이 반복 스케줄로 잘못 등록된 것 제거(매일 같은 코드변경을 재실행하는 버그). 반복 모니터링(점검/백업/리포트)은 유지.
-      const lbl = `${s.label || ''} ${s.task || ''}`;
-      if (s.action === 'work' && /변경|전환|바꿔|바꾸|적용|개편|형식으로|방식으로|만들|제작|구현|기능\s*(추가|넣)/.test(lbl) && !/점검|백업|리포트|헬스|모니터|스캔|갱신|업데이트|확인|정리/.test(lbl)) { purged++; continue; }
       startSchedule({ ...s }, false);
     }
     if (purged) persistSchedules();
@@ -2287,7 +2284,7 @@ async function runBizGrowth(client, channel, manual = false, startLine = null) {
       let obj; try { obj = JSON.parse(mm[0]); } catch { continue; }
       for (const e of (obj.experiments || []).slice(0, 2)) { if (!e || !e.action || !e.action.task) continue; const tk = (e.target_key && e.target_key !== 'null') ? e.target_key : null; const eid = addExperiment(rp, e.focus, tk, e.hypothesis); const tgtLabel = tk ? (BIZ_LABELS[tk] ? BIZ_LABELS[tk].ko : tk) : (e.focus || '지표'); allItems.push({ who: '그로스', repo: resolveRepo(rp), task: `[${name}·실험#${eid}] ${e.action.task} (타겟: ${tgtLabel} / 가설: ${String(e.hypothesis || '').slice(0, 60)})`, kind: ['investigate', 'build'].includes(e.action.kind) ? e.action.kind : 'investigate', targetKey: validMetricKey(tk), source: 'growth', _exp: eid }); } // H2: 아이템에 targetKey·source·_exp 부착 → 승인 시 proposed→executing 전이
     }
-    if (!allItems.length) { stopTyping(channel); if (manual) await postAs(client, channel, undefined, byName('김채원') || LEAD, '지금 데이터로 뽑을 그로스 실험이 마땅찮아. 측정 갭부터 메우자("사업 브리핑" 참고).'); return; }
+    if (!allItems.length) { stopTyping(channel); await postAs(client, channel, undefined, byName('김채원') || LEAD, '지금 데이터로 뽑을 그로스 실험이 마땅찮아. 측정 갭부터 메우자("사업 브리핑" 참고).'); return; }
     log('info', 'biz-growth', { n: allItems.length, manual });
     if (manual) { await proposeOrAuto(client, channel, allItems[0].repo, allItems, '그로스 실험 제안 (승인하면 착수, "실행 1,3"으로 골라도 됨. 효과는 다음 측정에서 baseline 대비 비교)', { forceGate: true }); }
     else { // 자동: 서비스별로 그 서비스 담당 채널에 분배 발의
@@ -2383,7 +2380,7 @@ async function runRhythmProposal(client, channel, manual = false) {
     let changes = [];
     if (jm) { try { changes = (JSON.parse(jm[0]).changes || []).filter(c => c && opsConfig[c.id] && ['cadence', 'enabled', 'hour', 'dow'].includes(c.field)).slice(0, 3); } catch (_) {} }
     const arch = byName('윈터') || LEAD;
-    if (!changes.length) { stopTyping(channel); if (manual) await postAs(client, channel, undefined, arch, `운영 리듬 점검 — 지금 스케줄 그대로 둬도 괜찮아.${prose ? '\n' + prose.slice(0, 400) : ''}`); return; }
+    if (!changes.length) { stopTyping(channel); await postAs(client, channel, undefined, arch, `운영 리듬 점검 — 지금 스케줄 그대로 둬도 괜찮아.${prose ? '\n' + prose.slice(0, 400) : ''}`); return; }
     const FV = c => c.field === 'cadence' ? (CADENCE_KO[c.value] || c.value) : c.field === 'enabled' ? ((c.value === true || c.value === 'true') ? '켜기' : '끄기') : c.field === 'hour' ? `${c.value}시` : c.field === 'dow' ? `${DOW_KO[c.value] || c.value}요일` : c.value;
     const FN = { cadence: '주기', enabled: '켜기/끄기', hour: '시각', dow: '요일' };
     const list = changes.map((c, i) => `${i + 1}. ${OPS_DEFS[c.id].label}: ${FN[c.field]} → ${FV(c)} (${c.why || ''})`).join('\n');
@@ -4691,7 +4688,7 @@ async function postButtons(channel, thread_ts, buttons) {
       // 일일 스케줄: 정확한 분만 보면 60초 인터벌 드리프트·짧은 재시작에 그 분을 놓쳐 그날 통째 누락됨. 예정시각 지나고 15분 안이면 따라잡아 1회 실행(lastRunDay로 중복 방지), 너무 늦으면 그날 스킵.
       if (s.kind === 'daily' && s.lastRunDay !== n.day) {
         const nowMin = n.h * 60 + n.m, schMin = (s.hour || 0) * 60 + (s.minute || 0);
-        if (nowMin >= schMin && nowMin - schMin <= 15 && !activeWork[s.channel]) { // 진행중이면 lastRunDay 안 박고 다음 틱(윈도우 내) 재시도 → 사용자 작업 끝나면 따라잡음
+        if (nowMin >= schMin && nowMin - schMin <= 30 && !activeWork[s.channel]) { // 진행중이면 lastRunDay 안 박고 다음 틱(윈도우 내) 재시도 → 사용자 작업 끝나면 따라잡음
           s.lastRunDay = n.day; persistSchedules(); jobFor(s)().catch(() => {});
         }
       }
