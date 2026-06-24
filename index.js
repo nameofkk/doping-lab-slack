@@ -1128,7 +1128,7 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
   if (fbBuild && repo && !newProject) addLesson(repo, `사용자가 고쳐준 것: ${fbBuild.replace(/\s+/g, ' ').slice(0, 120)}`); // Q6: 사용자 교정도 교훈으로(다음에 또 반영)
   const rmap = !newProject ? await repoMap(dir) : ''; // I8: 기존 레포는 구조 맵으로 그라운딩(신규는 빈 레포라 생략)
   const prules = await readProjectRules(dir); // L1: AGENTS.md/CLAUDE.md 컨벤션 주입
-  const res = await runClaude(`${intro}${rulesCtx(channel)}${prules}${repo ? recallFacts(repo, task) : ''}${repo ? recallSkills(repo, task) : ''}${repo ? recallLessons(repo) : ''}${repo ? recallRoadmap(repo) : ''}${repo ? ontologyQuery(task, repo) : ''}${repo ? soulContext(repo) : ''}${rmap}${PLAIN}${uiish ? DESIGN_RULE : ''}${newProject ? LAUNCH_RULE : ''}${newProject ? MONITORING_RULE : ''}${(newProject || /계측|퍼널|funnel|활성화율|리텐션\s*측정|전환율\s*측정|코호트|instrument/i.test(task)) ? INSTRUMENTATION_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}${fbBuild ? '\n\n[사용자가 추가로 준 지시 — 반드시 반영]\n' + wrapUntrusted(fbBuild) : ''}${UNTRUSTED_PREAMBLE}\n\n요청:\n${wrapUntrusted(task)}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 540000, true);
+  const res = await runClaude(`${intro}${rulesCtx(channel)}${prules}${repo ? recallFacts(repo, task) : ''}${repo ? recallSkills(repo, task) : ''}${repo ? recallLessons(repo) : ''}${repo ? recallRoadmap(repo) : ''}${repo ? ontologyQuery(task, repo) : ''}${repo ? soulContext(repo) : ''}${rmap}${PLAIN}${uiish ? DESIGN_RULE : ''}${newProject ? LAUNCH_RULE : ''}${newProject ? MONITORING_RULE : ''}${(newProject || /계측|퍼널|funnel|활성화율|리텐션\s*측정|전환율\s*측정|코호트|instrument/i.test(task)) ? INSTRUMENTATION_RULE : ''}${assetHeavy ? ASSET_RULE : ''}${prd ? '\n\n[팀이 완성한 PRD — 이걸 그대로, 벗어나지 말고 구현해라. 여기 적힌 핵심기능·화면·플로우·기술스택·차별화 훅을 전부 반영]\n' + prd : ''}${fbBuild ? '\n\n[사용자가 추가로 준 지시 — 반드시 반영]\n' + wrapUntrusted(fbBuild) : ''}${UNTRUSTED_PREAMBLE}\n\n요청:\n${wrapUntrusted(task)}\n\n끝나면 한 일을 담당 역할별로 나눠서 보고해라. 각 줄을 "역할: 한 일" 형식으로 쓰되, 딱딱한 보고체 말고 친한 동료한테 말하듯 편하게 써(역할은 PM/리서처/UX/아키텍트/보안/마케터 중 관련된 것만). 한 역할당 1~2줄, 실제 한 일만, 지어내지 마.`, MODEL.TEAM, dir, WORK_PERMISSION_MODE, 900000, true);
   if (res.limited) {
     // P3: 한도로 죽을 때 지금까지 만든 부분을 WIP 브랜치에 저장 — 전엔 /tmp 청소로 통째 손실됐음(작업 손실 = 최대 약점). 손실 0으로.
     let saved = '';
@@ -1141,8 +1141,10 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
     // P3-timeout: 타임아웃(SIGKILL)도 limited와 동일하게 WIP 저장 → 안내 → return. 안 하면 "변경/생성된 게 없었어" 오보.
     let saved = '';
     try { const dirty = (await sh('git add -A && git diff --cached --quiet; echo $?', dir)).out.trim().endsWith('1'); if (dirty) { const wb = `wip/${id}-${Date.now().toString(36).slice(-4)}`; const p = await sh(`git checkout -b ${wb} && git commit -m "WIP(타임아웃) ${String(task).slice(0, 40).replace(/[\r\n"]/g, ' ')}" && git push origin ${wb} 2>&1`, dir); if (p.code === 0) { saved = ` 지금까지 만든 건 \`${wb}\` 브랜치에 저장해놨어(손실 방지 — "이어서"가 거기서 이어가).`; pausedWork[channel] = { repo, task, newProject, forcePR: true, projName, wipBranch: wb, at: Date.now() }; } } } catch (_) {}
+    // 타임아웃도 limited와 동일하게 자동 재개 등록 — WIP 브랜치 있으면 거기서, 없으면 HEAD에서 재개. 1분 후 자동 시도.
+    const _prevLR = limitedResume[channel]; limitedResume[channel] = { ctx: { repo, task, newProject, forcePR: true, projName, wipBranch: pausedWork[channel] && pausedWork[channel].wipBranch }, at: Date.now(), lastTry: Date.now() - 19 * 60 * 1000, attempts: _prevLR ? _prevLR.attempts : 0 };
     jobUpdate(channel, { status: 'limited' });
-    await postAs(client, channel, thread_ts, LEAD, `⏳ 제작 중에 처리 시간 한도에 걸렸어(작업이 너무 커서 한 번에 못 끝냄).${saved || ' (아직 저장할 변경은 없었어.)'} "이어서 #${id}" 하면 이어서 할게.`);
+    await postAs(client, channel, thread_ts, LEAD, `⏳ 제작 중에 처리 시간 한도에 걸렸어.${saved || ' (아직 저장할 변경은 없었어.)'} 잠시 후 자동으로 이어서 만들게. (급하면 "이어서 #${id}")`);
     return;
   }
   jobUpdate(channel, { stage: '코드생성' }); // R9: 진행 단계 체크포인트(재시작 알림용)
@@ -4676,7 +4678,7 @@ async function postButtons(channel, thread_ts, buttons) {
       lr.attempts++; lr.lastTry = Date.now(); const ctx = lr.ctx;
       postAs(botClient, ch, undefined, LEAD, `한도 리셋된 것 같아 — 멈췄던 작업 자동으로 이어갈게 (재개 ${lr.attempts}회차).`).catch(() => {});
       delete pausedWork[ch];
-      launchWork(botClient, ch, undefined, ctx.repo, ctx.task, false, ctx.forcePR, ctx.projName, ctx.recoverAttempt || 0); // 기존 레포에 이어서(중단지점부터)
+      launchWork(botClient, ch, undefined, ctx.repo, ctx.task, false, ctx.forcePR, ctx.projName, ctx.recoverAttempt || 0, ctx.wipBranch); // 기존 레포에 이어서(중단지점부터, 타임아웃 WIP 브랜치도 재개)
     }
     const n = kstNow();
     for (const s of schedules) {
