@@ -2469,6 +2469,8 @@ async function runOpsTask(id, ch) {
     const startLine = `${ymd} · ${o ? (o.runCount || 1) : 1}차 ${cadKo} ${label} 자동 실행 시작할게.`;
     // 서비스별로 결과가 흩어지는 업무(그로스·사업브리핑·헬스)는 시작 멘트도 각 서비스 채널로(작업함수가 결과 바로 위에 붙임). 그 외 단일채널 업무만 여기서 시작 멘트.
     const PER_SVC = id === 'growth' || id === 'bizbrief' || id === 'health';
+    // oppscout: 아직 응답 안 한 기회가 24h 이내면 메시지·실행 둘 다 스킵 — "시작할게"만 뜨고 결과 없음 오탐 방지
+    if (id === 'oppscout' && pendingOpp[ch] && Date.now() - (pendingOpp[ch].at || 0) < 24 * 3600 * 1000) return;
     // 자동화 시작 멘트 — 작업함수의 startTyping("입력 중" 스피너)보다 먼저 올라가도록 await(레이스로 스피너가 위에 붙는 것 방지)
     if (botClient && ch && !PER_SVC) await botClient.chat.postMessage({ channel: ch, text: scrubOutput(startLine) }).catch(() => {});
     if (id === 'health') return void checkServices(botClient, null, false, false, startLine).catch(() => {}); // 전체 라이브를 서비스별 담당 채널로 분리 점검
@@ -2747,7 +2749,7 @@ async function runImprovementProposal(client, channel, manual = false) {
     const tgtRepo = resolveRepo(obj.repo || 'bot');
     const items = (obj.items || []).filter(x => x && x.task && ['investigate', 'build'].includes(x.kind)).slice(0, 3)
       .map(x => ({ ...x, kind: (x.kind === 'build' && !x.evidence && (tgtRepo === SELF_REPO || PROD_REPOS.includes(tgtRepo))) ? 'investigate' : x.kind, task: x.evidence ? `${x.task} (근거: ${String(x.evidence).slice(0, 70)})` : x.task })); // 근거 없는 코드/프로드 수정은 조사로 강등(코드 안 보고 build 금지)
-    if (!items.length) { if (manual) await postAs(client, channel, undefined, LEAD, '운영 데이터 훑어봤는데 지금 당장 착수할 개선거리는 딱히 안 보여. 깨끗해.'); return; }
+    if (!items.length) { await postAs(client, channel, undefined, LEAD, '운영 데이터 훑어봤는데 지금 당장 착수할 개선거리는 딱히 안 보여. 깨끗해.').catch(() => {}); return; }
     const repo = tgtRepo;
     logDecision(channel, 'improve-proposal', `${obj.focus || ''} (${repo})`);
     log('info', 'improve-proposal', { manual, repo, focus: (obj.focus || '').slice(0, 60), n: items.length });
@@ -2769,6 +2771,10 @@ let oppScoutAt = 0;
 async function runOppScout(client, channel, manual = false) {
   if (!manual && Date.now() - oppScoutAt < opsMinGap('oppscout')) return; // 주1회
   oppScoutAt = Date.now();
+  // pendingOpp TTL: 24h 이상 지나면 자동 만료 — 미응답 시 다음 날 자동 스카우트 차단 방지
+  if (pendingOpp[channel] && Date.now() - (pendingOpp[channel].at || 0) > 24 * 3600 * 1000) {
+    delete pendingOpp[channel]; try { persistPendingOpp(); } catch (_) {}
+  }
   if (!channel || activeWork[channel] || pendingDispatch[channel] || pendingOpp[channel]) return;
   activeWork[channel] = { task: '기회 스카우트', started: Date.now() };
   const iu = byName('아이유') || LEAD, da = byName('안다연') || LEAD, win = byName('윈터') || LEAD, yd = byName('영듀') || LEAD, lead = byName('한로로') || LEAD;
@@ -2782,7 +2788,7 @@ async function runOppScout(client, channel, manual = false) {
     stopTyping(channel);
     let cands = []; try { cands = (JSON.parse(((disc.text || '').match(/\{[\s\S]*\}/) || ['{}'])[0]).cands || []); } catch {}
     cands = cands.filter(c => c && c.title && c.demand_evidence && !oppSeenRecently(c.title)).slice(0, 5);
-    if (!cands.length) { if (manual) await postAs(client, channel, undefined, iu, '훑어봤는데 새로(중복 아닌) 근거 있는 기회가 안 잡혀. 다음에 또 볼게.'); return; }
+    if (!cands.length) { await postAs(client, channel, undefined, iu, '이번엔 새로운(중복 아닌) 기회 후보가 없었어.').catch(() => {}); return; }
     const list = cands.map((c, i) => `${i + 1}. ${c.title}\n   트렌드(${c.trend_date || '시점미상'}): ${c.trend}\n   출처: ${(c.sources || []).slice(0, 3).join(' , ') || '(없음)'}\n   수요근거: ${c.demand_evidence}\n   AI: ${c.ai_build} / 수익: ${c.monetize}`).join('\n\n');
     await postAs(client, channel, undefined, iu, `발굴 ${cands.length}개 — 이제 팀이 교차검증할게(반증·재무·획득·시장적합).`);
     // Stage 2 — 4인 병렬 교차검증
@@ -2801,7 +2807,7 @@ async function runOppScout(client, channel, manual = false) {
     stopTyping(channel);
     let finals = []; try { finals = (JSON.parse(((synth.text || '').match(/\{[\s\S]*\}/) || ['{}'])[0]).final || []); } catch {}
     finals = finals.filter(c => c && c.title && c.demand_evidence && ((c.sources && c.sources.length) || c.trend_date)).slice(0, 2);
-    if (!finals.length) { if (manual) await postAs(client, channel, undefined, lead, '교차검증 다 통과한 기회가 없어 — 후보는 있었는데 반증·재무·획득에서 깨졌어. 무리해서 안 미는 게 맞아.'); return; }
+    if (!finals.length) { await postAs(client, channel, undefined, lead, '교차검증 통과 기회 없었어 — 후보는 있었는데 반증·재무·획득에서 다 걸렸어.').catch(() => {}); return; }
     for (const f of finals) oppStore.push({ key: oppKey(f.title), title: f.title, at: Date.now(), status: 'proposed' }); persistOpps();
     const card = finals.map((c, i) => {
       const head = `${i + 1}. ${c.title}\n신뢰도 ${c.confidence || '?'} · 시장 ${c.market || '?'} · 해자 ${(c.moat || '?').split(' ')[0]} · 1차 ${c.rec === 'build' ? 'MVP 빌드' : '검증'}${c.trend_date ? ` · 트렌드 ${c.trend_date}` : ''}${c.risk_flags && c.risk_flags.length ? `\n⚠️ ${c.risk_flags.join(', ')}` : ''}`;
@@ -2888,7 +2894,7 @@ async function runSelfImproveScan(client, channel, manual = false) {
     const m = (r.text || '').match(/\{[\s\S]*\}/); if (!m) return; let obj; try { obj = JSON.parse(m[0]); } catch { return; }
     const items = (obj.items || []).filter(x => x && x.task && x.evidence && ['investigate', 'build'].includes(x.kind)).slice(0, 3) // 근거(evidence) 없는 항목은 버림 — 코드 검증된 것만
       .map(x => ({ who: '자기개선', repo: SELF_REPO, task: `${x.task} (근거: ${String(x.evidence).slice(0, 90)})`, kind: x.kind, source: 'self-improve' }));
-    if (!items.length) { if (manual) await postAs(client, channel, undefined, LEAD, '내 코드 실제로 열어서 훑었는데, 코드로 확인되는 개선거리는 지금 안 보여. 깨끗해.'); return; }
+    if (!items.length) { await postAs(client, channel, undefined, LEAD, '내 코드 훑었는데 코드로 확인되는 개선거리는 지금 없어. 깨끗해.').catch(() => {}); return; }
     logDecision(channel, 'self-improve-proposal', `${obj.focus || ''}`);
     log('info', 'self-improve-proposal', { manual, focus: (obj.focus || '').slice(0, 60), n: items.length });
     // self(bot) repo라 코드수정은 apTier에서 항상 gate(자가브릭 방지) — 조사만 자동, 머지·배포는 사람+Q1 eval
@@ -2926,7 +2932,7 @@ async function runCoverageCritic(client, channel, manual = false) {
     let obj; try { obj = JSON.parse(m[0]); } catch { return; }
     const items = (obj.blindspots || []).filter(x => x && x.task && x.gap && ['build', 'investigate', 'human'].includes(x.kind)).slice(0, 5)
       .map(x => ({ who: '사각지대', repo: SELF_REPO, task: `[${x.axis || '관측'}] ${x.task} (놓치는 것: ${String(x.gap).slice(0, 70)} · 신호원: ${String(x.signal || '').slice(0, 50)})`, kind: x.kind, source: 'coverage-critic' }));
-    if (!items.length) { if (manual) await postAs(client, channel, undefined, LEAD, '표준 관측축에 대조했는데, 지금 새로 뚫린 사각지대는 안 보여. 보던 축은 잘 보고 있어.'); return; }
+    if (!items.length) { await postAs(client, channel, undefined, LEAD, '표준 관측축 대조했는데 새로운 사각지대는 없어. 잘 보고 있어.').catch(() => {}); return; }
     logDecision(channel, 'coverage-critic', `${items.length}개 사각지대 (fable-5)`);
     log('info', 'coverage-critic', { manual, n: items.length, model: MODEL.LEAD });
     // 자기 신호체계(index.js) 확장이라 SELF_REPO = 항상 게이트(자가브릭 방지). 승인하면 그 신호를 보는 watcher를 심음.
