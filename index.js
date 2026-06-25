@@ -4701,11 +4701,15 @@ async function postButtons(channel, thread_ts, buttons) {
         postAs(botClient, ch, undefined, LEAD, '아까 그 작업이 응답이 끊긴 거 같아서 일단 풀어둘게. "다시 해"나 "이어서"라고 하면 이어갈게.').catch(() => {});
       }
     }
-    // 한도로 멈춘 작업 자동 재개 — 20분 간격으로 시도(브레이커 닫히고 한가할 때), 8회까지
+    // 한도로 멈춘 작업 자동 재개 — exponential backoff(20→40→80→120분 최대), 8회까지
+    // WIP 없이 즉시 실패한 건(진척 0) 첫 대기를 60분으로 늘려 API 일일한도 압박 완화.
     for (const ch of Object.keys(limitedResume)) {
       const lr = limitedResume[ch]; if (!lr) continue;
       if (settings.paused || activeWork[ch] || pendingDispatch[ch] || Date.now() < claudeBreaker.openUntil) continue;
-      if (Date.now() - (lr.lastTry || lr.at) < 20 * 60 * 1000) continue;
+      // WIP 없으면(즉시 실패) 첫 기준 60분, 있으면 20분. 이후 시도마다 2배 증가(최대 120분).
+      const baseMs = lr.ctx && lr.ctx.wipBranch ? 20 * 60 * 1000 : 60 * 60 * 1000;
+      const backoffMs = Math.min(baseMs * Math.pow(2, Math.max(0, lr.attempts - 1)), 120 * 60 * 1000);
+      if (Date.now() - (lr.lastTry || lr.at) < backoffMs) continue;
       if (lr.attempts >= 8) { delete limitedResume[ch]; postAs(botClient, ch, undefined, LEAD, '한도 자동 재개를 여러 번 시도했는데 계속 막혀. "이어서"로 수동 재시도해줘.').catch(() => {}); continue; }
       lr.attempts++; lr.lastTry = Date.now(); const ctx = lr.ctx;
       postAs(botClient, ch, undefined, LEAD, `한도 리셋된 것 같아 — 멈췄던 작업 자동으로 이어갈게 (재개 ${lr.attempts}회차).`).catch(() => {});
