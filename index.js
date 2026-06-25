@@ -387,7 +387,24 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
   const HONEST = facts
     ? ' 위 [프로젝트 실제 정보]를 근거로만 말해. 거기 없는 건 추측이라고 표시해.'
     : ' 이 프로젝트가 정확히 뭔지 모르면 절대 지어내지 마. 모르면 솔직히 "이거 뭔지 정확히 모르겠다"고 하고 사용자한테 어떤 건지 물어봐.';
-  let transcript = `[토론 주제]\n${idea}\n${facts}`, stopped = false; const structured = []; // R6: 구조화 핸드오프 — 각 발언의 핵심/근거/미해결을 누적
+  // 사전 해석 단계 — LEAD가 아이디어를 먼저 읽고 "원하는 것 / 아닌 것 / 가정"을 Slack에 게시.
+  // TEAM 전원이 동일 전제로 토론을 시작하게 하고, 사용자가 방향 틀렸으면 지금 잡을 수 있게.
+  let preFrame = '';
+  const frameRes = await runClaude(
+    `다음 아이디어를 읽고, 아래 세 가지를 반말로 짧게 정리해. 추측은 추측이라고 표시해. 마크다운 금지.\n아이디어: "${idea}"\n\n` +
+    `1. 사용자가 원하는 것 — 원문 단어 최대 보존, 해석 추가 금지\n` +
+    `2. 이게 아닌 것 — 이 표현에서 혼동하기 쉬운 방향 1~2개\n` +
+    `3. 내 가정 — 이 아이디어를 진행할 때 내가 전제하는 가장 minimal한 해석 한 줄\n\n` +
+    `형식 예시:\n원하는 것: ...\n이게 아닌 것: ...\n가정: ...`,
+    MODEL.LEAD
+  );
+  if (frameRes.ok !== false && frameRes.text) {
+    preFrame = frameRes.text.trim();
+    await postAs(client, channel, thread_ts, LEAD,
+      `[기획 방향 확인]\n${preFrame}\n\n이 방향 맞으면 토론 들어갈게. 다른 방향이면 지금 말해줘 (피드백 주기 버튼 또는 직접 입력).`
+    );
+  }
+  let transcript = `[토론 주제]\n${idea}${preFrame ? '\n\n[LEAD 기획 방향 해석 — 이 전제로 토론한다]\n' + preFrame : ''}\n${facts}`, stopped = false; const structured = []; // R6: 구조화 핸드오프 — 각 발언의 핵심/근거/미해결을 누적
   const TAG = '\n\n맨 끝에 딱 한 줄, 네 발언의 핵심을 이 형식 그대로 붙여라: ⟦핵심: 한 줄 주장 | 근거: 무엇에 기반(코드/사실/추측) | 미해결: 아직 확인 안 된 것⟧';
   for (let r = 1; r <= ROUNDS && !stopped; r++) {
     const rfb = drainFeedback(channel); // 라운드 사이 사용자 피드백 반영
@@ -396,7 +413,7 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
       bumpWork(channel); // 토론은 자체 스피너가 없어서 여기서 생존신호 갱신 (긴 토론이 워치독에 안 끊기게)
       if (workCancel[channel]) { stopped = true; break; } // "중단"하면 토론 즉시 멈춤
       const guide = (r === 1
-        ? '네 분야 관점에서 이 아이디어에 분명한 입장과 근거를 내. 규칙 셋: (1) 정보가 부족하거나 형태가 모호해도 사용자한테 되묻지 마라 — 가장 그럴듯한 해석을 가정으로 정하거나, 갈래가 여럿이면(예: A안/B안/C안) 각 갈래에 네 분야의 판단을 직접 내려라. "이게 뭔지 모르겠다"를 반복하는 건 토론이 아니라 회피다. (2) 앞사람이 이미 한 말·같은 질문·같은 우려는 절대 반복 금지 — 너만 줄 수 있는 새 관점·반박·구체안만 더해라. (3) 막연한 방향 말고 "그래서 이렇게 하자"까지 구체적으로.'
+        ? '네 분야 관점에서 이 아이디어에 분명한 입장과 근거를 내. 규칙 넷: (0) 발언 첫 줄에 반드시 "내 해석: [이 아이디어를 이렇게 이해했다]" 한 줄을 명시해라 — 다른 해석이 가능하면 그것도 언급. 이걸 숨기면 앞뒤가 맞지 않아도 아무도 못 잡는다. (1) 정보가 부족하거나 형태가 모호해도 사용자한테 되묻지 마라 — [LEAD 기획 방향 해석]이 있으면 그걸 전제로 삼고, 갈래가 여럿이면(예: A안/B안/C안) 각 갈래에 네 분야의 판단을 직접 내려라. "이게 뭔지 모르겠다"를 반복하는 건 토론이 아니라 회피다. (2) 앞사람이 이미 한 말·같은 질문·같은 우려는 절대 반복 금지 — 너만 줄 수 있는 새 관점·반박·구체안만 더해라. (3) 막연한 방향 말고 "그래서 이렇게 하자"까지 구체적으로.'
         : `지금 ${r}라운드야. 앞 의견에 동의만 하거나 같은 질문 반복하지 말고, 약한 부분을 콕 집어 반박하거나 네 입장을 정해서 결론 쪽으로 끌고 가. 반복·맞장구 금지.`) + HONEST + TAG;
       const struct = structured.length ? `\n\n[지금까지 핵심 주장(구조화)]\n${structured.slice(-8).map(s => `- ${s.who}: ${s.tag}`).join('\n')}` : '';
       const res = await runClaude(`${p.prompt}${STYLE}${rulesCtx(channel)}\n\n[지금까지 토론]\n${transcript.slice(-3000)}${struct}\n\n${guide}`, p.model);
@@ -1339,7 +1356,7 @@ const seen = new Set();
 // 특정 단어 없이도 메시지가 "작업 요청"인지 AI가 판단
 async function classifyIntent(text, ctx) {
   try {
-    const res = await runClaude(`${ctx ? '[최근 대화]\n' + ctx + '\n\n' : ''}다음 메시지의 의도를 판단해서 JSON만 출력해라. 설명 금지.\n메시지: ${JSON.stringify(text)}\n\n형식: {"action": "work"|"report"|"debate"|"chat", "task": "할 일/주제/볼 것을 한 문장", "newProject": true|false, "repo": "sponono|wewantpeace|myungjak|solo-lawsuit-ai|threads-bot|new 중 해당", "name": "newProject일 때만, 이 프로젝트를 잘 나타내는 영문 짧은 레포이름(소문자와 하이픈만, 예: ramen-shop-game, todo-app). 아니면 빈문자열"}\n기준: 코드를 만들/고치/추가/개선/구현하라면 action=work. 프로젝트의 현황·상태·운영·구조를 조사·보고하라면 action=report. "토론하자/논의하자/토론해줘"처럼 새로운 주제로 팀 토론을 새로 시작하라고 할 때만 action=debate(task=토론 주제). 단 "다른 의견은?", "더 말해봐", "넌 어때", "다른사람들은?" 같은 진행 중 대화의 추가 질문이나 안부·잡담·단순 질문은 action=chat. 너희(이 봇/팀원들) 자신에 대한 질문(누가 뭐 담당하냐, 무슨 모델 쓰냐, 자기소개, 인사, "각자 ~해봐" 같은 멤버 호출)은 프로젝트 보고가 아니라 action=chat. 새로 뭔가(홈페이지/사이트/포트폴리오/앱/게임/툴/서비스 등) 만들거나 개발하라면 거의 다 newProject=true 이고 repo=new. "X 만들고 싶어", "X 게임 만들어줘", "새로 ~ 하나" 같은 건 무조건 newProject=true, repo=new (기존 레포에 작업하는 게 절대 아님). 위원트피스=wewantpeace, 스포노노=sponono, 명작=myungjak, 나홀로소송=solo-lawsuit-ai, 쓰레드봇/뉴스봇=threads-bot. 사용자가 말한 프로젝트가 sponono/wewantpeace/myungjak/solo-lawsuit-ai/threads-bot 중 어느 것도 아니거나 어느 프로젝트인지 불명확하면 repo는 반드시 "unknown"으로 해. 절대 가까운 걸로 추측해서 고르지 마. 이 슬랙 봇(도핑연구소 봇/너희들 자체)을 고치라면 repo="bot".`, MODEL.FAST);
+    const res = await runClaude(`${ctx ? '[최근 대화]\n' + ctx + '\n\n' : ''}다음 메시지의 의도를 판단해서 JSON만 출력해라. 설명 금지.\n메시지: ${JSON.stringify(text)}\n\n형식: {"action": "work"|"report"|"debate"|"chat", "task": "사용자가 토론·작업을 원하는 주제/내용. 사용자가 쓴 핵심 표현을 최대한 원문 그대로 보존해서 옮겨라. 의미 추가·재해석·카테고리 분류 금지. 요약이 필요하면 원문 단어를 살려라", "newProject": true|false, "repo": "sponono|wewantpeace|myungjak|solo-lawsuit-ai|threads-bot|new 중 해당", "name": "newProject일 때만, 이 프로젝트를 잘 나타내는 영문 짧은 레포이름(소문자와 하이픈만, 예: ramen-shop-game, todo-app). 아니면 빈문자열"}\n기준: 코드를 만들/고치/추가/개선/구현하라면 action=work. 프로젝트의 현황·상태·운영·구조를 조사·보고하라면 action=report. "토론하자/논의하자/토론해줘"처럼 새로운 주제로 팀 토론을 새로 시작하라고 할 때만 action=debate(task=토론 주제). 단 "다른 의견은?", "더 말해봐", "넌 어때", "다른사람들은?" 같은 진행 중 대화의 추가 질문이나 안부·잡담·단순 질문은 action=chat. 너희(이 봇/팀원들) 자신에 대한 질문(누가 뭐 담당하냐, 무슨 모델 쓰냐, 자기소개, 인사, "각자 ~해봐" 같은 멤버 호출)은 프로젝트 보고가 아니라 action=chat. 새로 뭔가(홈페이지/사이트/포트폴리오/앱/게임/툴/서비스 등) 만들거나 개발하라면 거의 다 newProject=true 이고 repo=new. "X 만들고 싶어", "X 게임 만들어줘", "새로 ~ 하나" 같은 건 무조건 newProject=true, repo=new (기존 레포에 작업하는 게 절대 아님). 위원트피스=wewantpeace, 스포노노=sponono, 명작=myungjak, 나홀로소송=solo-lawsuit-ai, 쓰레드봇/뉴스봇=threads-bot. 사용자가 말한 프로젝트가 sponono/wewantpeace/myungjak/solo-lawsuit-ai/threads-bot 중 어느 것도 아니거나 어느 프로젝트인지 불명확하면 repo는 반드시 "unknown"으로 해. 절대 가까운 걸로 추측해서 고르지 마. 이 슬랙 봇(도핑연구소 봇/너희들 자체)을 고치라면 repo="bot".`, MODEL.FAST);
     const mm = (res.text || '').match(/\{[\s\S]*\}/);
     return mm ? JSON.parse(mm[0]) : { action: 'chat' };
   } catch { return { action: 'chat' }; }
