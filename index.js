@@ -336,7 +336,8 @@ async function runClaudeOnce(prompt, model, cwd = WORKDIR, perm = CLAUDE_PERMISS
     const args = ['-p', prompt, '--output-format', 'json', '--permission-mode', perm];
     if (model) args.push('--model', model);
     if (useMcp && mcpPath) args.push('--mcp-config', mcpPath); // R8: 병합된 MCP 설정(내장+사용자). 실제 제작 호출에만 — 분류·잡담·리포트마다 MCP 서브프로세스 띄우는 오버헤드 제거
-    const opts = { cwd, env: childEnv({ HOME: '/tmp' }), stdio: ['ignore', 'pipe', 'pipe'] }; // 감사 A-5: 민감키 제외 env
+    const _env = childEnv({ HOME: '/tmp' }); delete _env.CLAUDECODE; delete _env.CLAUDE_CODE_ENTRYPOINT; // 중첩 세션 검사 우회 — Railway 컨테이너에서 이 변수들이 전파될 경우 대비
+    const opts = { cwd, env: _env, stdio: ['ignore', 'pipe', 'pipe'] }; // 감사 A-5: 민감키 제외 env
     try { if (process.getuid && process.getuid() === 0) { opts.uid = 1000; opts.gid = 1000; } } catch (e) {}
     const child = spawn('claude', args, opts);
     let out = '', err = '', done = false;
