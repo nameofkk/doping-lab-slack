@@ -1141,8 +1141,9 @@ async function runWork(client, channel, thread_ts, repo, task, newProject, force
     // P3-timeout: 타임아웃(SIGKILL)도 limited와 동일하게 WIP 저장 → 안내 → return. 안 하면 "변경/생성된 게 없었어" 오보.
     let saved = '';
     try { const dirty = (await sh('git add -A && git diff --cached --quiet; echo $?', dir)).out.trim().endsWith('1'); if (dirty) { const wb = `wip/${id}-${Date.now().toString(36).slice(-4)}`; const p = await sh(`git checkout -b ${wb} && git commit -m "WIP(타임아웃) ${String(task).slice(0, 40).replace(/[\r\n"]/g, ' ')}" && git push origin ${wb} 2>&1`, dir); if (p.code === 0) { saved = ` 지금까지 만든 건 \`${wb}\` 브랜치에 저장해놨어(손실 방지 — "이어서"가 거기서 이어가).`; pausedWork[channel] = { repo, task, newProject, forcePR: true, projName, wipBranch: wb, at: Date.now() }; } } } catch (_) {}
-    // 타임아웃도 limited와 동일하게 자동 재개 등록 — WIP 브랜치 있으면 거기서, 없으면 HEAD에서 재개. 1분 후 자동 시도.
-    const _prevLR = limitedResume[channel]; limitedResume[channel] = { ctx: { repo, task, newProject, forcePR: true, projName, wipBranch: pausedWork[channel] && pausedWork[channel].wipBranch }, at: Date.now(), lastTry: Date.now() - 19 * 60 * 1000, attempts: _prevLR ? _prevLR.attempts : 0 };
+    // 처리 시간 한도 → limitType:'timeout' 으로 자동 재개 등록(구독 한도와 구별).
+    // WIP 브랜치 있으면 거기서, 없으면 HEAD에서 재개. 1분 후 자동 시도.
+    const _prevLR = limitedResume[channel]; limitedResume[channel] = { limitType: 'timeout', ctx: { repo, task, newProject, forcePR: true, projName, wipBranch: pausedWork[channel] && pausedWork[channel].wipBranch }, at: Date.now(), lastTry: Date.now() - 19 * 60 * 1000, attempts: _prevLR ? _prevLR.attempts : 0 };
     jobUpdate(channel, { status: 'limited' });
     await postAs(client, channel, thread_ts, LEAD, `⏳ 제작 중에 처리 시간 한도에 걸렸어.${saved || ' (아직 저장할 변경은 없었어.)'} 잠시 후 자동으로 이어서 만들게. (급하면 "이어서 #${id}")`);
     return;
@@ -3130,7 +3131,7 @@ function launchWork(client, channel, thread_ts, repo, task, newProject, forcePR,
   runWork(client, channel, thread_ts, repo, task, newProject, forcePR, projName, resumeBranch)
     .then(() => { // 한도로 멈춤 감지 → 자동 재개 대기 등록(리셋되면 틱이 이어감)
       const st = jobs[job.id] && jobs[job.id].status; const fctx = { ...ctx, repo: (activeWork[channel] && activeWork[channel].repo) || repo };
-      if (st === 'limited') { pausedWork[channel] = { ...fctx, at: Date.now() }; const prev = limitedResume[channel]; limitedResume[channel] = { ctx: fctx, at: Date.now(), lastTry: Date.now(), attempts: prev ? prev.attempts : 0 }; if (!prev && botClient) botClient.chat.postMessage({ channel, text: '한도 걸려서 멈췄어 — 리셋되면 멈춘 지점부터 자동으로 이어갈게. (급하면 "이어서")' }).catch(() => {}); }
+      if (st === 'limited') { pausedWork[channel] = { ...fctx, at: Date.now() }; const prev = limitedResume[channel]; const isUsageLimit = !prev || prev.limitType !== 'timeout'; limitedResume[channel] = { limitType: isUsageLimit ? 'usage' : 'timeout', ctx: fctx, at: Date.now(), lastTry: Date.now(), attempts: prev ? prev.attempts : 0 }; if (!prev && botClient) botClient.chat.postMessage({ channel, text: isUsageLimit ? 'CLI 구독 한도에 걸렸어 — 한도 리셋되면 "이어서"라고 해줘. (자동 재시도 안 함)' : '처리 시간 한도 걸렸어 — 잠시 후 자동으로 이어갈게. (급하면 "이어서")' }).catch(() => {}); }
       else delete limitedResume[channel]; // 정상 완료 → 자동재개 해제
     })
     .catch(e => { const err = String(e).slice(0, 300); jobUpdateById(job.id, { status: 'failed', error: err.slice(0, 200) }); const fctx = { ...ctx, repo: (activeWork[channel] && activeWork[channel].repo) || repo }; onWorkFailed(client, channel, thread_ts, job.id, err, fctx).catch(() => {}); }) // #3/#4: 실패 표시+자동복구
@@ -4701,18 +4702,19 @@ async function postButtons(channel, thread_ts, buttons) {
         postAs(botClient, ch, undefined, LEAD, '아까 그 작업이 응답이 끊긴 거 같아서 일단 풀어둘게. "다시 해"나 "이어서"라고 하면 이어갈게.').catch(() => {});
       }
     }
-    // 한도로 멈춘 작업 자동 재개 — exponential backoff(20→40→80→120분 최대), 8회까지
-    // WIP 없이 즉시 실패한 건(진척 0) 첫 대기를 60분으로 늘려 API 일일한도 압박 완화.
+    // 한도로 멈춘 작업 자동 재개 — limitType으로 분기:
+    //   'timeout'(처리 시간 초과): 20분 후 자동 재시도, exponential backoff(최대 120분), 8회.
+    //   'usage'(CLI 구독 한도): 자동 재시도 안 함 — 사용자가 "이어서"로 직접 재개.
+    //   구독 한도는 리셋 시점을 봇이 알 수 없으므로 계속 두드리면 헛수고+한도만 더 씀.
     for (const ch of Object.keys(limitedResume)) {
       const lr = limitedResume[ch]; if (!lr) continue;
       if (settings.paused || activeWork[ch] || pendingDispatch[ch] || Date.now() < claudeBreaker.openUntil) continue;
-      // WIP 없으면(즉시 실패) 첫 기준 60분, 있으면 20분. 이후 시도마다 2배 증가(최대 120분).
-      const baseMs = lr.ctx && lr.ctx.wipBranch ? 20 * 60 * 1000 : 60 * 60 * 1000;
-      const backoffMs = Math.min(baseMs * Math.pow(2, Math.max(0, lr.attempts - 1)), 120 * 60 * 1000);
+      if (lr.limitType === 'usage') continue; // 구독 한도: 자동 재시도 안 함(사용자가 "이어서"로 직접)
+      const backoffMs = Math.min(20 * 60 * 1000 * Math.pow(2, Math.max(0, lr.attempts - 1)), 120 * 60 * 1000);
       if (Date.now() - (lr.lastTry || lr.at) < backoffMs) continue;
-      if (lr.attempts >= 8) { delete limitedResume[ch]; postAs(botClient, ch, undefined, LEAD, '한도 자동 재개를 여러 번 시도했는데 계속 막혀. "이어서"로 수동 재시도해줘.').catch(() => {}); continue; }
+      if (lr.attempts >= 8) { delete limitedResume[ch]; postAs(botClient, ch, undefined, LEAD, '처리 시간 한도 자동 재개 여러 번 시도했는데 계속 막혀. "이어서"로 수동 재시도해줘.').catch(() => {}); continue; }
       lr.attempts++; lr.lastTry = Date.now(); const ctx = lr.ctx;
-      postAs(botClient, ch, undefined, LEAD, `한도 리셋된 것 같아 — 멈췄던 작업 자동으로 이어갈게 (재개 ${lr.attempts}회차).`).catch(() => {});
+      postAs(botClient, ch, undefined, LEAD, `처리 시간 풀린 것 같아 — 멈췄던 작업 자동으로 이어갈게 (재개 ${lr.attempts}회차).`).catch(() => {});
       delete pausedWork[ch];
       launchWork(botClient, ch, undefined, ctx.repo, ctx.task, false, ctx.forcePR, ctx.projName, ctx.recoverAttempt || 0, ctx.wipBranch); // 기존 레포에 이어서(중단지점부터, 타임아웃 WIP 브랜치도 재개)
     }
