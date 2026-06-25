@@ -689,7 +689,7 @@ function injectionScan(s) {
 // (c) 출력 스크럽 — 발신 직전 시크릿형 문자열 마스킹. LLM 누설·인젝션 성공 둘 다 마지막 방어. 봇 자체 env 토큰값도 동적 차단.
 const SECRET_ENV_KEYS = ['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN', 'GITHUB_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'SLACK_TOKEN_LEAD', 'SLACK_TOKEN_PM', 'SLACK_TOKEN_RESEARCH', 'SLACK_TOKEN_UX', 'SLACK_TOKEN_ARCHITECT', 'SLACK_TOKEN_SECURITY', 'SLACK_TOKEN_MARKETING', 'SLACK_TOKEN_DEVIL', 'RAILWAY_TOKEN', 'RAILWAY_API_TOKEN', 'BOT_STATS_KEY', 'LAW_OC', 'FIGMA_API_KEY', 'TWENTYFIRST_API_KEY', 'DODO_API_KEY', 'POSTGRES_CONNECTION_STRING', 'SENTRY_AUTH_TOKEN']; // 감사 A-5: 누락 키 보강
 // 감사 A-5: claude 자식 프로세스에 줄 env에서 민감키 제거 — claude는 코드작업·MCP용이라 Slack 봇토큰·stats키·railway·owner는 불필요. claude의 bash 툴이 env 읽어 외부전송하는 측면채널 차단. (sh는 git/배포에 토큰 필요해 별도 유지)
-const CHILD_ENV_DENY = new Set(['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN', 'SLACK_TOKEN_LEAD', 'SLACK_TOKEN_PM', 'SLACK_TOKEN_RESEARCH', 'SLACK_TOKEN_UX', 'SLACK_TOKEN_ARCHITECT', 'SLACK_TOKEN_SECURITY', 'SLACK_TOKEN_MARKETING', 'SLACK_TOKEN_DEVIL', 'BOT_STATS_KEY', 'RAILWAY_TOKEN', 'RAILWAY_API_TOKEN', 'ALLOWED_SLACK_USER_IDS', 'OWNER_USER_ID']);
+const CHILD_ENV_DENY = new Set(['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN', 'SLACK_TOKEN_LEAD', 'SLACK_TOKEN_PM', 'SLACK_TOKEN_RESEARCH', 'SLACK_TOKEN_UX', 'SLACK_TOKEN_ARCHITECT', 'SLACK_TOKEN_SECURITY', 'SLACK_TOKEN_MARKETING', 'SLACK_TOKEN_DEVIL', 'BOT_STATS_KEY', 'RAILWAY_TOKEN', 'RAILWAY_API_TOKEN', 'ALLOWED_SLACK_USER_IDS', 'OWNER_USER_ID', 'CLAUDECODE']); // CLAUDECODE 제거 — 중첩 세션 차단 방지
 function childEnv(extra) { const e = {}; for (const k of Object.keys(process.env)) if (!CHILD_ENV_DENY.has(k)) e[k] = process.env[k]; return Object.assign(e, extra || {}); }
 function scrubOutput(text) {
   let t = String(text == null ? '' : text);
