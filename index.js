@@ -4702,19 +4702,18 @@ async function postButtons(channel, thread_ts, buttons) {
         postAs(botClient, ch, undefined, LEAD, '아까 그 작업이 응답이 끊긴 거 같아서 일단 풀어둘게. "다시 해"나 "이어서"라고 하면 이어갈게.').catch(() => {});
       }
     }
-    // 한도로 멈춘 작업 자동 재개 — limitType으로 분기:
-    //   'timeout'(처리 시간 초과): 20분 후 자동 재시도, exponential backoff(최대 120분), 8회.
-    //   'usage'(CLI 구독 한도): 자동 재시도 안 함 — 사용자가 "이어서"로 직접 재개.
-    //   구독 한도는 리셋 시점을 봇이 알 수 없으므로 계속 두드리면 헛수고+한도만 더 씀.
+    // 한도로 멈춘 작업 자동 재개 — limitType으로 대기시간 분기, 8회까지:
+    //   'timeout'(처리 시간 초과): 20분 기준 exponential(최대 120분) — 금방 재시도 가능
+    //   'usage'(CLI 구독 한도): 30분 기준 exponential(최대 120분) — 구독 롤링 윈도우 대기
     for (const ch of Object.keys(limitedResume)) {
       const lr = limitedResume[ch]; if (!lr) continue;
       if (settings.paused || activeWork[ch] || pendingDispatch[ch] || Date.now() < claudeBreaker.openUntil) continue;
-      if (lr.limitType === 'usage') continue; // 구독 한도: 자동 재시도 안 함(사용자가 "이어서"로 직접)
-      const backoffMs = Math.min(20 * 60 * 1000 * Math.pow(2, Math.max(0, lr.attempts - 1)), 120 * 60 * 1000);
+      const baseMs = lr.limitType === 'usage' ? 30 * 60 * 1000 : 20 * 60 * 1000;
+      const backoffMs = Math.min(baseMs * Math.pow(2, Math.max(0, lr.attempts - 1)), 120 * 60 * 1000);
       if (Date.now() - (lr.lastTry || lr.at) < backoffMs) continue;
-      if (lr.attempts >= 8) { delete limitedResume[ch]; postAs(botClient, ch, undefined, LEAD, '처리 시간 한도 자동 재개 여러 번 시도했는데 계속 막혀. "이어서"로 수동 재시도해줘.').catch(() => {}); continue; }
+      if (lr.attempts >= 8) { delete limitedResume[ch]; postAs(botClient, ch, undefined, LEAD, '한도 자동 재개를 여러 번 시도했는데 계속 막혀. "이어서"로 수동 재시도해줘.').catch(() => {}); continue; }
       lr.attempts++; lr.lastTry = Date.now(); const ctx = lr.ctx;
-      postAs(botClient, ch, undefined, LEAD, `처리 시간 풀린 것 같아 — 멈췄던 작업 자동으로 이어갈게 (재개 ${lr.attempts}회차).`).catch(() => {});
+      postAs(botClient, ch, undefined, LEAD, `한도 리셋된 것 같아 — 멈췄던 작업 자동으로 이어갈게 (재개 ${lr.attempts}회차).`).catch(() => {});
       delete pausedWork[ch];
       launchWork(botClient, ch, undefined, ctx.repo, ctx.task, false, ctx.forcePR, ctx.projName, ctx.recoverAttempt || 0, ctx.wipBranch); // 기존 레포에 이어서(중단지점부터, 타임아웃 WIP 브랜치도 재개)
     }
