@@ -390,19 +390,26 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
   // 사전 해석 단계 — LEAD가 아이디어를 먼저 읽고 "원하는 것 / 아닌 것 / 가정"을 Slack에 게시.
   // TEAM 전원이 동일 전제로 토론을 시작하게 하고, 사용자가 방향 틀렸으면 지금 잡을 수 있게.
   let preFrame = '';
-  const frameRes = await runClaude(
-    `다음 아이디어를 읽고, 아래 세 가지를 반말로 짧게 정리해. 추측은 추측이라고 표시해. 마크다운 금지.\n아이디어: "${idea}"\n\n` +
-    `1. 사용자가 원하는 것 — 원문 단어 최대 보존, 해석 추가 금지\n` +
-    `2. 이게 아닌 것 — 이 표현에서 혼동하기 쉬운 방향 1~2개\n` +
-    `3. 내 가정 — 이 아이디어를 진행할 때 내가 전제하는 가장 minimal한 해석 한 줄\n\n` +
-    `형식 예시:\n원하는 것: ...\n이게 아닌 것: ...\n가정: ...`,
-    MODEL.LEAD
-  );
-  if (frameRes.ok !== false && frameRes.text) {
-    preFrame = frameRes.text.trim();
-    await postAs(client, channel, thread_ts, LEAD,
-      `[기획 방향 확인]\n${preFrame}\n\n이 방향 맞으면 토론 들어갈게. 다른 방향이면 지금 말해줘 (피드백 주기 버튼 또는 직접 입력).`
+  try {
+    const frameRes = await runClaude(
+      `다음 아이디어를 읽고, 아래 세 가지를 반말로 짧게 정리해. 추측은 추측이라고 표시해. 마크다운 금지.\n아이디어: "${idea}"\n\n` +
+      `1. 사용자가 원하는 것 — 원문 단어 최대 보존, 해석 추가 금지\n` +
+      `2. 이게 아닌 것 — 이 표현에서 혼동하기 쉬운 방향 1~2개\n` +
+      `3. 내 가정 — 이 아이디어를 진행할 때 내가 전제하는 가장 minimal한 해석 한 줄\n\n` +
+      `형식 예시:\n원하는 것: ...\n이게 아닌 것: ...\n가정: ...`,
+      MODEL.LEAD, WORKDIR, CLAUDE_PERMISSION_MODE, 60000 // 60s — 토론 블록킹 방지
     );
+    console.log('[pre-frame] ok=%s text_len=%d limited=%s', frameRes.ok, (frameRes.text || '').length, frameRes.limited);
+    if (frameRes.ok !== false && frameRes.text && frameRes.text.trim()) {
+      preFrame = frameRes.text.trim();
+      await postAs(client, channel, thread_ts, LEAD,
+        `[기획 방향 확인]\n${preFrame}\n\n이 방향 맞으면 토론 들어갈게. 다른 방향이면 지금 말해줘 (피드백 주기 버튼 또는 직접 입력).`
+      );
+    } else {
+      console.log('[pre-frame] 건너뜀 — ok=%s text=%s', frameRes.ok, JSON.stringify((frameRes.text || '').slice(0, 80)));
+    }
+  } catch (e) {
+    console.log('[pre-frame] 예외:', e);
   }
   let transcript = `[토론 주제]\n${idea}${preFrame ? '\n\n[LEAD 기획 방향 해석 — 이 전제로 토론한다]\n' + preFrame : ''}\n${facts}`, stopped = false; const structured = []; // R6: 구조화 핸드오프 — 각 발언의 핵심/근거/미해결을 누적
   const TAG = '\n\n맨 끝에 딱 한 줄, 네 발언의 핵심을 이 형식 그대로 붙여라: ⟦핵심: 한 줄 주장 | 근거: 무엇에 기반(코드/사실/추측) | 미해결: 아직 확인 안 된 것⟧';
