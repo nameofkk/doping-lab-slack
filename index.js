@@ -392,7 +392,7 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
   let preFrame = '';
   try {
     const frameRes = await runClaude(
-      `다음 아이디어를 읽고, 아래 세 가지를 반말로 짧게 정리해. 추측은 추측이라고 표시해. 마크다운 금지.\n아이디어: "${idea}"\n\n` +
+      `다음 아이디어를 읽고, 아래 세 가지를 반말로 짧게 정리해. 추측은 추측이라고 표시해. 마크다운 금지. 반드시 한국어로만 출력. 한자 절대 금지.\n아이디어: "${idea}"\n\n` +
       `1. 사용자가 원하는 것 — 원문 단어 최대 보존, 해석 추가 금지\n` +
       `2. 이게 아닌 것 — 이 표현에서 혼동하기 쉬운 방향 1~2개\n` +
       `3. 내 가정 — 이 아이디어를 진행할 때 내가 전제하는 가장 minimal한 해석 한 줄\n\n` +
@@ -403,13 +403,22 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
     if (frameRes.ok !== false && frameRes.text && frameRes.text.trim()) {
       preFrame = frameRes.text.trim();
       await postAs(client, channel, thread_ts, LEAD,
-        `[기획 방향 확인]\n${preFrame}\n\n이 방향 맞으면 토론 들어갈게. 다른 방향이면 지금 말해줘 (피드백 주기 버튼 또는 직접 입력).`
+        `[기획 방향 확인]\n${preFrame}\n\n이 방향 맞으면 토론 시작, 아니면 수정 내용 직접 입력해줘.`
       );
+      await postButtons(channel, thread_ts, [{ text: '▶️ 토론 시작', id: 'preframe_ok', style: 'primary' }, { text: '✏️ 방향 수정', id: 'preframe_edit' }]);
     } else {
       console.log('[pre-frame] 건너뜀 — ok=%s text=%s', frameRes.ok, JSON.stringify((frameRes.text || '').slice(0, 80)));
     }
   } catch (e) {
     console.log('[pre-frame] 예외:', e);
+  }
+  // 게이트: pre-frame을 올렸으면 사용자 확인 전까지 대기 (90초 timeout → 자동 진행)
+  if (preFrame) {
+    const preFrameCorrection = await new Promise(resolve => {
+      preframeGates[channel] = resolve;
+      setTimeout(() => { if (preframeGates[channel] === resolve) { delete preframeGates[channel]; resolve(null); } }, 90000);
+    });
+    if (preFrameCorrection) preFrame += `\n\n[사용자 방향 수정]\n${preFrameCorrection}`;
   }
   let transcript = `[토론 주제]\n${idea}${preFrame ? '\n\n[LEAD 기획 방향 해석 — 이 전제로 토론한다]\n' + preFrame : ''}\n${facts}`, stopped = false; const structured = []; // R6: 구조화 핸드오프 — 각 발언의 핵심/근거/미해결을 누적
   const TAG = '\n\n맨 끝에 딱 한 줄, 네 발언의 핵심을 이 형식 그대로 붙여라: ⟦핵심: 한 줄 주장 | 근거: 무엇에 기반(코드/사실/추측) | 미해결: 아직 확인 안 된 것⟧';
@@ -479,6 +488,7 @@ async function runLegalReview(client, channel, thread_ts, dir, repo, task) {
 }
 // ── 실제 작업 모드: 레포 클론 → claude 코드 작업 → 브랜치 push → PR → 보고 ──
 let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {}; const pendingPlan = {}; const pendingSchedule = {}; const pendingMcp = {}; const pendingRhythm = {}; const pendingDesign = {}; const pendingPayment = {}; const limitedResume = {}; const pendingOpp = {}; const pendingVerify = {}; const lastPR = {}; const lastRepoAt = {}; const lastDebate = {}; const pendingThreadsEdit = {}; // Threads 수정요청 게이트: { content_id, at } — 수정 내용 메시지 응답 대기
+const preframeGates = {}; // channel → resolve fn — pre-frame 방향 확인 게이트(runDebate가 사용자 확인 전까지 대기)
 const legalReviewedAt = {}; // repo → ts (법무·규제 검토 레포별 쿨다운 — 이어서/피드백 반복마다 재실행 방지)
 // 감사 C-16: 쿨다운 영속 — 봇이 자주 재배포되는데 메모리 전용이면 매 재시작마다 리셋돼 법무 재검토·중복 경보가 반복됨. (boot에서만 호출 — bizAlertSeen const 초기화 이후)
 const COOLDOWN_FILE = process.env.COOLDOWN_FILE || '/data/cooldowns.json';
@@ -3303,6 +3313,14 @@ async function handle(event, client) {
   if (event.user) lastRequester[channel] = event.user; // 완료 시 이 사람을 @멘션
   if (OWNER_USER_ID && event.user === OWNER_USER_ID && !String(event.ts || '').startsWith('btn')) awayDigest(client, channel).catch(() => {}); // Wave4: 오래 비웠다 돌아오면 그동안 요약(내부 가드)
   startTyping(channel, event.thread_ts); // 모든 대화에 "입력 중" 스피너 — 봇이 답(postAs)하면 자동 삭제
+  // pre-frame 게이트 대기 중 → 어떤 메시지든 게이트 해제 (중단 메시지는 해제 후 이하 핸들러도 실행)
+  if (preframeGates[channel]) {
+    const gateResolve = preframeGates[channel];
+    delete preframeGates[channel];
+    gateResolve(isStopMsg(raw) ? null : raw);
+    stopTyping(channel);
+    if (!isStopMsg(raw)) return;
+  }
   // 명령어 메뉴
   if (/^(명령어|도움말|메뉴|help|커맨드|commands?|\?|？|뭐\s*할\s*수\s*있어|뭐\s*시킬)/i.test(raw)) { await postAs(client, channel, event.thread_ts, LEAD, commandMenuText()); return; }
   // 내 슬랙 멤버ID 알려주기 (OWNER_USER_ID 설정용 등) — 봇이 받은 event.user가 곧 그 사람의 U… 멤버ID
@@ -4516,6 +4534,24 @@ app.action(/^verify_/, async ({ ack, body, action }) => {
     if (go && pv.acts && pv.acts.length) { await proposeOrAuto(botClient, channel, pv.acts[0].repo, pv.acts, '수정 제안 ("실행"/"실행 1,3", 버튼). 안 할 거면 "넘어가"', { forceGate: true }); await postAs(botClient, channel, undefined, LEAD, '오케이, 수정안 위에 올렸어 — "실행"으로 승인하면 착수. (원인 확정 없이 가는 거라, 결과 보고 아니다 싶으면 되돌리자)'); }
     else if (!go) { try { await postAs(botClient, channel, undefined, LEAD, '오케이, 원인부터 확인하자. 결과 붙여주면 그때 맞는 수정 추려줄게.'); } catch (_) {} }
   } catch (e) { try { console.log('[verify-action] err', String(e).slice(0, 120)); } catch (_) {} }
+});
+// pre-frame 방향 확인 버튼 — ▶️ 토론 시작 / ✏️ 방향 수정
+app.action(/^preframe_/, async ({ ack, body, action }) => {
+  await ack();
+  try {
+    const channel = (body.channel && body.channel.id) || (body.container && body.container.channel_id); if (!channel) return;
+    const ok = action.action_id === 'preframe_ok';
+    const msgTs = body.message && body.message.ts;
+    if (msgTs) { try { await botClient.chat.update({ channel, ts: msgTs, text: ok ? '✅ 토론 시작' : '✅ 방향 수정 — 어떻게 바꿀지 입력해줘', blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `✅ 선택: *${ok ? '토론 시작' : '방향 수정'}*` } }] }); } catch (_) {} }
+    if (!preframeGates[channel]) { console.log('[preframe-action] stale', channel); return; }
+    if (ok) {
+      const resolve = preframeGates[channel]; delete preframeGates[channel];
+      resolve(null); // 승인 → 수정 없이 토론 시작
+    } else {
+      await postAs(botClient, channel, undefined, LEAD, '어떤 방향으로 수정할지 입력해줘. 반영해서 토론 들어갈게.');
+      // preframeGates[channel] 유지 → 다음 사용자 텍스트 메시지에서 handle()이 해제
+    }
+  } catch (e) { console.log('[preframe-action] err', String(e).slice(0, 120)); }
 });
 // 재시작 알림 "이어서 #N" / "넘어가기" 게이트 버튼
 app.action(/^resume_/, async ({ ack, body, action }) => {
