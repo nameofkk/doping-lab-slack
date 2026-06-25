@@ -454,7 +454,7 @@ async function runLegalReview(client, channel, thread_ts, dir, repo, task) {
   } catch (_) {}
 }
 // ── 실제 작업 모드: 레포 클론 → claude 코드 작업 → 브랜치 push → PR → 보고 ──
-let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {}; const pendingPlan = {}; const pendingSchedule = {}; const pendingMcp = {}; const pendingRhythm = {}; const pendingDesign = {}; const pendingPayment = {}; const limitedResume = {}; const pendingOpp = {}; const pendingVerify = {}; const lastPR = {}; const lastRepoAt = {}; const lastDebate = {}; // 한도 재개 대기 + 기회 스카우트 게이트 + 조사 "원인 확정 먼저" 게이트 + 채널별 최근 PR + lastRepo 갱신시점 + 최근 토론 결론(신규 기획에 이어받기)
+let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {}; const pendingPlan = {}; const pendingSchedule = {}; const pendingMcp = {}; const pendingRhythm = {}; const pendingDesign = {}; const pendingPayment = {}; const limitedResume = {}; const pendingOpp = {}; const pendingVerify = {}; const lastPR = {}; const lastRepoAt = {}; const lastDebate = {}; const pendingThreadsEdit = {}; // Threads 수정요청 게이트: { content_id, at } — 수정 내용 메시지 응답 대기
 const legalReviewedAt = {}; // repo → ts (법무·규제 검토 레포별 쿨다운 — 이어서/피드백 반복마다 재실행 방지)
 // 감사 C-16: 쿨다운 영속 — 봇이 자주 재배포되는데 메모리 전용이면 매 재시작마다 리셋돼 법무 재검토·중복 경보가 반복됨. (boot에서만 호출 — bizAlertSeen const 초기화 이후)
 const COOLDOWN_FILE = process.env.COOLDOWN_FILE || '/data/cooldowns.json';
@@ -3404,6 +3404,24 @@ async function handle(event, client) {
         runDesignPreview(client, channel, thread_ts, { repo: pdg.repo, task: pdg.task, forcePR: pdg.forcePR, projName: pdg.projName }, fb).catch(() => {}); return;
       }
     }
+    // ── Threads Bot 수정요청 게이트: 수정 내용 응답 대기 ──
+    if (pendingThreadsEdit[channel]) {
+      if (pendingThreadsEdit[channel].at && Date.now() - pendingThreadsEdit[channel].at > 30 * 60 * 1000) { delete pendingThreadsEdit[channel]; } // 30분 만료
+      else if (/^(취소|넘어가|안\s?해|됐어|그만)/.test(raw.trim())) {
+        delete pendingThreadsEdit[channel];
+        const yD = byName('영듀') || LEAD;
+        await postAs(client, channel, thread_ts, yD, '수정 취소할게. 다시 만들려면 홈 탭에서 트리거 눌러줘.'); return;
+      } else if (raw.trim().length > 2) {
+        const pte = pendingThreadsEdit[channel]; delete pendingThreadsEdit[channel];
+        const yD = byName('영듀') || LEAD;
+        await postAs(client, channel, thread_ts, yD, '수정 내용 받았어, 반영해서 다시 만들고 있어. 다 되면 승인 요청 다시 올릴게.');
+        try {
+          const resp = await fetch(`${THBOT_URL}/trigger/revise`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content_id: pte.content_id, instructions: raw.trim() }), signal: AbortSignal.timeout(10000) });
+          if (!resp.ok) { await postAs(botClient, channel, thread_ts, yD, '수정 요청 보내다 에러났어, 잠깐 뒤 다시 해줘.'); }
+        } catch (e) { console.log('[threads-edit] revise err', String(e).slice(0, 100)); await postAs(botClient, channel, thread_ts, yD, '수정 요청 보내다 에러났어, 잠깐 뒤 다시 해줘.'); }
+        return;
+      }
+    }
     if (pendingPlan[channel]) {
       if (pendingPlan[channel].at && Date.now() - pendingPlan[channel].at > 30 * 60 * 1000) { delete pendingPlan[channel]; } // 30분 만료
       else if (/^(넘어가|취소|안\s?해|됐어|패스|놔둬)/.test(raw)) { delete pendingPlan[channel]; await postAs(client, channel, thread_ts, LEAD, '오케이, 이 계획은 접을게.'); return; }
@@ -4503,14 +4521,25 @@ app.action(/^threads_/, async ({ ack, body, action }) => {
     const icon = aid === 'threads_approve' ? '✅' : aid === 'threads_reject' ? '❌' : '✏️';
     // 먼저 threads-bot에 포워딩해서 성공 확인 후 메시지 업데이트
     let forwarded = false;
+    let fwdData = null;
     try {
       const resp = await fetch(`${THBOT_URL}/slack/interaction`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ actions: [action], user: body.user, channel: body.channel, message: body.message }), signal: AbortSignal.timeout(10000) });
       forwarded = resp.ok;
-      if (!resp.ok) console.log('[threads] forward fail', resp.status);
+      if (resp.ok) { try { fwdData = await resp.json(); } catch (_) {} }
+      else console.log('[threads] forward fail', resp.status);
     } catch (e) { console.log('[threads] forward err', String(e).slice(0, 100)); }
     if (msgTs && channel && botClient) {
       const statusText = forwarded ? `${icon} Threads 포스팅 ${lbl} 처리됨` : `⚠️ Threads 포스팅 ${lbl} 전달 실패 — threads-bot 연결 확인 필요`;
       try { await botClient.chat.update({ channel, ts: msgTs, text: statusText, blocks: [{ type: 'section', text: { type: 'mrkdwn', text: statusText } }] }); } catch (_) {}
+    }
+    // 수정요청 게이트: content_id 저장 후 수정 내용 안내
+    if (aid === 'threads_edit' && forwarded && channel) {
+      const contentId = (fwdData && fwdData.result && fwdData.result.content_id) || (action.value && parseInt(action.value, 10)) || null;
+      if (contentId) {
+        pendingThreadsEdit[channel] = { content_id: contentId, at: Date.now() };
+        const yD = byName('영듀') || LEAD;
+        try { await postAs(botClient, channel, undefined, yD, `✏️ 어떻게 수정할까? 수정 내용을 채팅으로 알려줘.\n(취소하려면 "취소"라고 해줘)`); } catch (_) {}
+      }
     }
   } catch (e) { console.log('[threads-action] err', String(e).slice(0, 120)); }
 });
