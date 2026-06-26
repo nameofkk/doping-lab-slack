@@ -1900,6 +1900,24 @@ function svcTrend(s) {
   }
   return '';
 }
+// 2-A: 응답시간 선형회귀 기울기 (ms/체크, 양수=상승중)
+function trendSlope(history) {
+  const pts = (history || []).filter(h => h.up && h.ms != null).slice(-10);
+  if (pts.length < 5) return 0;
+  const n = pts.length, xs = pts.map((_, i) => i), ys = pts.map(p => p.ms);
+  const mx = xs.reduce((a, b) => a + b) / n, my = ys.reduce((a, b) => a + b) / n;
+  return xs.reduce((s, x, i) => s + (x - mx) * (ys[i] - my), 0) / xs.reduce((s, x) => s + (x - mx) ** 2, 1);
+}
+// 3-A: 온톨로지 '일으킴' 관계에서 최근 30분 내 이상 있었던 선행 서비스 탐색
+function findCausalAntecedents(repo) {
+  return (ontology.rel || [])
+    .filter(r => r.r === '일으킴' && r.b === repo && (r.conf || 0) >= 0.65)
+    .map(r => r.a)
+    .filter(a => {
+      const svc = Object.values(services).find(s => s.repo === a);
+      return svc && (svc.history || []).slice(-3).some(h => !h.up);
+    });
+}
 // ── Phase A1: 사업 메트릭 수집 — 서비스 자체 stats 엔드포인트(키 0 또는 👤 토큰)에서 실수치 curl→JSON→일별 history. 추정 아님, 실데이터만. ──
 const BIZ_FILE = process.env.BIZ_FILE || '/data/biz.json';
 let bizData = {}; // bizData[repo] = { repo, sources:[{name,url,authHeader?}], history:[{day, metrics:{"src.field":num}}] }
@@ -2370,13 +2388,23 @@ async function diagnoseDown(client, channel, s) {
     const recent5 = s.causeHistory.slice(-5);
     const repeatCount = recent5.filter(c => c.cat === cat).length;
     const repeatNote = repeatCount >= 3 ? `\n⚠️ 같은 원인(${cat}) 최근 ${repeatCount}회 반복 → 근본 수정 필요` : '';
+    // 1-C: 반복 3회 이상 → 당신차례 큐에 자동 등록 (사람 개입 유도)
+    if (repeatCount >= 3) {
+      try { addBlocker(s.repo, `반복 장애 (${cat}) ${repeatCount}회 — 근본 수정 필요`, 'autonomy'); } catch (_) {}
+    }
     // 5. 과거 인시던트 이력 회상
     let pastNote = '';
     try { const past = recallFacts('svc:' + repo, '인시던트'); if (past) pastNote = `\n📋 과거: ${past.replace(/\n+/g, ' ').slice(0, 200)}`; } catch (_) {}
+    // 1-A: 과거 교훈 자동 주입 (같은 실수 반복 방지)
+    let lessonNote = '';
+    try { const lessons = recallLessons('svc:' + repo); if (lessons) lessonNote = `\n📚 과거 교훈: ${lessons.replace(/^[\s\S]*?\]\n/, '').replace(/\n- /g, ' · ').replace(/^- /, '').trim().slice(0, 300)}`; } catch (_) {}
+    // 3-A: 인과 선행 서비스 탐색 (온톨로지 '일으킴' 관계)
+    let causalNote = '';
+    try { const ants = findCausalAntecedents(repo); if (ants.length) causalNote = `\n🔗 연관 선행 장애: ${ants.join(', ')} (30분 내 이상 — 연쇄 원인 가능성)`; } catch (_) {}
     // 6. Slack 보고
     const fixTip = DOWN_CAUSE_FIXES[cat] || DOWN_CAUSE_FIXES.unknown;
     await postAs(client, channel, undefined, sre,
-      `🔍 ${repo} 원인 분석 (${detail || cat})\n수정 방향: ${fixTip}${repeatNote}${pastNote}`
+      `🔍 ${repo} 원인 분석 (${detail || cat})\n수정 방향: ${fixTip}${repeatNote}${lessonNote}${causalNote}${pastNote}`
     ).catch(() => {});
   } catch (e) { try { log('error', 'diagnose-down', { repo, e: String(e).slice(0, 120) }); } catch (_) {} }
 }
@@ -2756,8 +2784,27 @@ async function checkServices(client, channel, announce = true, onlyAlert = false
       const dur = Math.max(1, Math.round((Date.now() - s.downSince) / 60000));
       try { addFact('svc:' + s.repo, `인시던트: HTTP ${s.downCode || '?'}로 약 ${dur}분 다운 후 복구`, 'incident'); } catch (_) {}
       try { log('warn', 'incident-recovered', { repo: s.repo, code: s.downCode, downMin: dur }); } catch (_) {}
+      // 1-B: 복구 시 자동 교훈 추출 → facts(source:lesson)으로 저장, 다음 다운 시 diagnoseDown에 자동 주입
+      try { const lastCause = (s.causeHistory || []).slice(-1)[0]; const incSummary = `다운원인:${lastCause ? lastCause.cat : (s.downCode || 'unknown')}, 지속:${dur}분, 최근원인이력:${JSON.stringify((s.causeHistory || []).slice(-3))}`; extractLesson('svc:' + s.repo, incSummary).catch(() => {}); } catch (_) {}
       if (s.repo !== SELF_REPO) runPostmortem(s.repo, s.downCode, dur).catch(() => {}); // Wave4: 복구 후 재발방지 교훈+예방 마일스톤
       s.downSince = null; s.downCode = null; s.downVia = null; s.escalatedAt = 0; // D-17: 복구 시 재에스컬레이션 마크 리셋
+    }
+    // 2-A: 응답시간 상승 트렌드 경보 (자동 감시 모드에서만, 1시간 쿨다운)
+    if (onlyAlert && up && ms != null) {
+      const slope2a = trendSlope(s.history);
+      const ups2a = (s.history || []).filter(h => h.up && h.ms != null);
+      if (slope2a > 0 && ups2a.length >= 6) {
+        const baseMs2a = Math.round(ups2a.slice(0, -3).reduce((a, h) => a + h.ms, 0) / Math.max(1, ups2a.length - 3));
+        const recentMs2a = Math.round(ups2a.slice(-3).reduce((a, h) => a + h.ms, 0) / 3);
+        const now2a = Date.now();
+        if (recentMs2a > baseMs2a * 1.5 && recentMs2a > 500 && (now2a - (s.trendAlertAt || 0)) > 3600000) {
+          s.trendAlertAt = now2a;
+          const tch2a = routed(s);
+          if (tch2a) postAs(botClient || client, tch2a, undefined, byName('윈터') || LEAD,
+            `📈 ${s.repo} 응답 속도 저하 감지 — 최근 평균 ${recentMs2a}ms (기준 ${baseMs2a}ms 대비 +${Math.round((recentMs2a / baseMs2a - 1) * 100)}%). 크래시 전조일 수 있어.`
+          ).catch(() => {});
+        }
+      }
     }
     const tr = svcTrend(s);
     const sslTxt = (typeof s.sslDays === 'number') ? ` · SSL ${s.sslDays}일` : '';
