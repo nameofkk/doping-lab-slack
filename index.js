@@ -2541,6 +2541,10 @@ async function runBizSentinel(client, channel, manual = false) {
       const name = rp.split('/').pop(); const ch = settings.monitorChannel || channelForWork(rp, 'sentinel', (services[rp] && services[rp].channel) || (settings.sentinel && settings.sentinel.channel) || defCh); // 모니터링 채널 지정 시 거기로(통합)
       const lines = fresh.map(b => `- ${b.crit ? '[긴급] ' : ''}${b.label}: ${b.why}${b.pct != null ? ` (${(b.from != null ? b.from.toLocaleString() : '?')}→${b.to.toLocaleString()}, ${b.pct > 0 ? '+' : ''}${b.pct}%)` : ''}`).join('\n');
       if (ch) await postAs(client, ch, undefined, byName('김채원') || LEAD, `선제 경보 — ${name}\n지표 이상이 잡혀서 정기 회의 안 기다리고 바로 올려.\n${lines}`);
+      // Layer 5: 매출 30%+ 급감 → 크로스 도메인 신호
+      if (fresh.some(b => b.key === 'admin.monthly_revenue' && b.pct != null && b.pct <= -30)) {
+        emitCrossDomainSignal('finance', 'revenue_drop', { repo: rp, ch }).catch(() => {});
+      }
       if (OWNER_USER_ID && botClient && !settings.monitorChannel) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`[선제 경보] ${name}\n${lines}`) }).catch(() => {}); // 모니터링 채널 지정 시 DM 안 보냄
       logDecision(ch || defCh || 'sentinel', 'biz-sentinel', `${name}: ${fresh.map(b => b.label).join(', ')}`);
       if (ch) await runSentinelMini(client, ch, rp, fresh); // 긴급 미니 진단·제안(게이트)
@@ -2652,12 +2656,14 @@ const OPS_DEFS = { // id → 표시정보 + 기본값(주기/시각/요일)
   rhythm: { label: '운영 리듬 점검', desc: '스케줄을 실제 활동·지연 과제·경보 빈도에 맞게 조정 제안(승인하면 적용)', defCad: 'monthly', defHour: 10 },
   nightly_reflection: { label: '야간 반성', desc: '오늘 인시던트 패턴 분석 → 내일 리스크 예측 + 선제조치 교훈 저장 + 사람 필요 항목 blocker 등록 (Reflexion 패턴)', defCad: 'daily', defHour: 3 },
   weekly_report: { label: '주간 자율 리포트', desc: '반복 패턴 TOP3 · 봇 개선 제안 · blocker 현황 자동 요약 — 매주 월요일 오전 9시', defCad: 'weekly', defHour: 9, defDow: 1 },
+  content_gen: { label: '콘텐츠 자동 생성+게시', desc: '서비스 지표+학습 기반 SNS 포스트 자동 생성(Threads 우선), API 키 없으면 Slack 초안 게시', defCad: 'daily', defHour: 9 },
+  cx_auto: { label: 'CS 자동 분류+응답', desc: '인앱 피드백 자동 분류(bug/feature/complaint/praise/question) → 반복 패턴 답변 초안 + 로드맵 자동 연결', defCad: 'daily', defHour: 10, defMinute: 30 },
 };
-const OPS_ORDER = ['health', 'opsbrief', 'bizbrief', 'improve', 'growth', 'selfimprove', 'coverage', 'behavior', 'oppscout', 'board', 'rhythm', 'nightly_reflection', 'weekly_report'];
+const OPS_ORDER = ['health', 'opsbrief', 'bizbrief', 'improve', 'growth', 'selfimprove', 'coverage', 'behavior', 'oppscout', 'board', 'rhythm', 'nightly_reflection', 'weekly_report', 'content_gen', 'cx_auto'];
 // 감사 C-14: 함수 내부 쿨다운을 하드코딩(6일/18h) 대신 opsConfig.cadence에서 파생 — 홈에서 주기 바꾸면 쿨다운도 따라감(전엔 하드코딩이 cadence를 가려 "설정 바꿔도 안 바뀜"). 스팸 방어는 유지.
 function opsMinGap(id) { const c = opsConfig[id] && opsConfig[id].cadence; return c === 'daily' ? 18 * 3600000 : c === 'monthly' ? 25 * 86400000 : 6 * 86400000; }
 let opsConfig = {};
-function seedOpsConfig() { for (const id of OPS_ORDER) { const d = OPS_DEFS[id]; if (!opsConfig[id]) opsConfig[id] = { cadence: d.defCad, hour: d.defHour, minute: 0, dow: d.defDow != null ? d.defDow : 1, dom: 1, channel: null, enabled: true, lastRunDay: null }; } }
+function seedOpsConfig() { for (const id of OPS_ORDER) { const d = OPS_DEFS[id]; if (!opsConfig[id]) opsConfig[id] = { cadence: d.defCad, hour: d.defHour, minute: d.defMinute || 0, dow: d.defDow != null ? d.defDow : 1, dom: 1, channel: null, enabled: true, lastRunDay: null }; } }
 function loadOpsConfig() { try { if (fs.existsSync(OPS_CONFIG_FILE)) opsConfig = JSON.parse(fs.readFileSync(OPS_CONFIG_FILE, 'utf8')) || {}; } catch { opsConfig = {}; } seedOpsConfig(); }
 function persistOpsConfig() { try { fs.writeFileSync(OPS_CONFIG_FILE, JSON.stringify(opsConfig)); } catch (_) {} }
 // 업무 채널 라우팅 — 서비스×기능 단위 override(예: 스포노노 마케팅 → #스포노노-마케팅) > 서비스 기본(repoChannel) > fallback
@@ -2693,6 +2699,8 @@ async function runOpsTask(id, ch) {
     if (id === 'rhythm') return void runRhythmProposal(botClient, ch, false).catch(() => {});
     if (id === 'nightly_reflection') return void runNightlyReflection(botClient, ch, false).catch(() => {});
     if (id === 'weekly_report') return void runWeeklyReport(botClient, ch, false).catch(() => {});
+    if (id === 'content_gen') return void runContentLoop(botClient, ch, false).catch(() => {});
+    if (id === 'cx_auto') return void runCXAutoLoop(botClient, ch, false).catch(() => {});
   } catch (e) { try { log('error', 'ops-task-err', { id, e: String(e).slice(0, 120) }); } catch (_) {} }
 }
 // 4-A: 야간 반성 (Reflexion 패턴) — 오늘 인시던트 → 내일 리스크 예측 → 교훈 저장 + blocker
@@ -2729,10 +2737,273 @@ async function runWeeklyReport(client, channel, manual = false) {
     const top3 = Object.entries(catCount).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([cat, n]) => `${cat} ${n}회`).join(', ') || '없음';
     const ob = openBlockers();
     const blockerSummary = ob.length ? ob.slice(0, 5).map(b => `#${b.id} ${b.what.slice(0, 60)}`).join('\n') : '없음';
-    const r = await runClaude(`지난 주 반복 장애 패턴: ${top3}.\n미해결 blocker ${ob.length}건: ${blockerSummary}\n\n이번 주 봇 개선 제안 2~3개를 핵심만(반말, 각 1줄). 마지막에 사람 승인 필요한 blocker 요약.`, MODEL.LEAD);
+    // Layer 4: 에이전트 KPI 추가
+    const kpi = computeAgentKPI();
+    const kpiLines = [
+      kpi.escalation_rate != null ? `· 에스컬레이션율: ${kpi.escalation_rate}%(blocker 중 사람개입 필요)` : null,
+      kpi.content_performance != null ? `· 콘텐츠 성과: 평균 좋아요 ${kpi.content_performance}개` : null,
+      kpi.self_correction_rate != null ? `· 자기교정률: ${kpi.self_correction_rate}%(anti-skill 주입 후 성공)` : null,
+      kpi.ops_success_rate != null ? `· OPS 성공률: ${kpi.ops_success_rate}%(완료 잡 비율)` : null,
+      kpi.learning_velocity != null ? `· 학습속도: 이번 주 facts+skills ${kpi.learning_velocity}개 추가` : null,
+    ].filter(Boolean).join('\n');
+    const r = await runClaude(`지난 주 반복 장애 패턴: ${top3}.\n미해결 blocker ${ob.length}건: ${blockerSummary}\n\n에이전트 KPI:\n${kpiLines || '(없음)'}\n\n이번 주 봇 개선 제안 2~3개를 핵심만(반말, 각 1줄). 마지막에 사람 승인 필요한 blocker 요약.`, MODEL.LEAD);
     const text = deMd((r.text || '').trim());
-    await postAs(client, channel, undefined, LEAD, `📊 주간 자율 리포트\n\n반복 패턴: ${top3}\n\n${text}\n\n${ob.length ? `⏳ blocker 큐 (${ob.length}건):\n${blockerSummary}` : '미해결 blocker 없음'}`).catch(() => {});
+    await postAs(client, channel, undefined, LEAD, `📊 주간 자율 리포트\n\n반복 패턴: ${top3}\n\n[에이전트 KPI]\n${kpiLines || '(집계 데이터 없음)'}\n\n${text}\n\n${ob.length ? `⏳ blocker 큐 (${ob.length}건):\n${blockerSummary}` : '미해결 blocker 없음'}`).catch(() => {});
   } catch (e) { try { log('error', 'weekly-report-err', { e: String(e).slice(0, 120) }); } catch (_) {} }
+}
+// ── Layer 4: 에이전트 KPI 계산 ──
+function computeAgentKPI() {
+  const week = Date.now() - 7 * 86400000;
+  const ob = openBlockers();
+  const escalation_rate = ob.length ? Math.round(ob.filter(b => b.kind === 'decision').length / ob.length * 100) : 0;
+  const recentContent = contentLog.filter(c => c.postedAt > week && c.metrics);
+  const content_performance = recentContent.length ? Math.round(recentContent.reduce((s, c) => s + ((c.metrics && c.metrics.likes) || 0), 0) / recentContent.length) : null;
+  const allAnti = Object.values(skills).flat().filter(s => s.tier === 'anti');
+  const antiPassed = allAnti.filter(s => s.trials && (s.trials.pass || 0) > 0).length;
+  const self_correction_rate = allAnti.length ? Math.round(antiPassed / allAnti.length * 100) : null;
+  const weekJobs = Object.values(jobs).filter(j => (j.updatedAt || 0) > week && /^(done|failed|cancelled|limited)$/.test(j.status));
+  const ops_success_rate = weekJobs.length ? Math.round(weekJobs.filter(j => j.status === 'done').length / weekJobs.length * 100) : null;
+  const newFacts = Object.values(facts).flat().filter(f => (f.at || 0) > week).length;
+  const newSkills = Object.values(skills).flat().filter(s => (s.at || 0) > week).length;
+  const learning_velocity = newFacts + newSkills;
+  return { escalation_rate, content_performance, self_correction_rate, ops_success_rate, learning_velocity };
+}
+// ── Layer 1: SNS 실행 계층 — 실제 게시·초안·성과 추적·학습 연결 ──
+const CONTENT_LOG_FILE = process.env.CONTENT_LOG_FILE || '/data/content_log.json';
+let contentLog = [];
+let contentLogSeq = 0;
+function loadContentLog() {
+  try {
+    if (fs.existsSync(CONTENT_LOG_FILE)) {
+      const d = JSON.parse(fs.readFileSync(CONTENT_LOG_FILE, 'utf8'));
+      contentLog = Array.isArray(d) ? d : (d.items || []);
+      contentLogSeq = contentLog.reduce((m, x) => Math.max(m, x.id || 0), 0);
+    }
+  } catch { contentLog = []; }
+}
+function persistContentLog() { try { fs.writeFileSync(CONTENT_LOG_FILE, JSON.stringify(contentLog.slice(-200))); } catch (_) {} }
+let metricsQueue = []; // [{postId, platform, repo, checkAt}]
+function hasSocialKey(platform) {
+  if (platform === 'threads') return !!(process.env.THREADS_TOKEN && process.env.THREADS_USER_ID);
+  if (platform === 'x') return !!(process.env.X_BEARER_TOKEN && process.env.X_APP_KEY && process.env.X_APP_SECRET && process.env.X_ACCESS_TOKEN && process.env.X_ACCESS_SECRET);
+  if (platform === 'instagram') return !!(process.env.INSTAGRAM_TOKEN && process.env.INSTAGRAM_USER_ID);
+  return false;
+}
+async function postToSNS(client, ch, platform, text, opts) {
+  const safeText = String(text || '').slice(0, 600);
+  if (!hasSocialKey(platform)) {
+    const draftMsg = `📝 [${platform.toUpperCase()} 초안 — 직접 복붙해서 게시]\n${safeText}`;
+    if (ch && client) await client.chat.postMessage({ channel: ch, text: scrubOutput(draftMsg) }).catch(() => {});
+    const entry = { id: ++contentLogSeq, repo: (opts && opts.repo) || 'global', platform, text: safeText, postId: null, postedAt: Date.now(), metrics: null, learnedAt: null };
+    contentLog.push(entry); persistContentLog();
+    return { postId: null, draft: true };
+  }
+  if (platform === 'threads') {
+    try {
+      const userId = process.env.THREADS_USER_ID;
+      const token = process.env.THREADS_TOKEN;
+      const encodedText = encodeURIComponent(String(text || '').slice(0, 500));
+      const createR = await sh(`curl -s -X POST "https://graph.threads.net/v1.0/${userId}/threads" --data-urlencode "media_type=TEXT" --data-urlencode "text=${String(text || '').slice(0, 500)}" -d "access_token=${token}"`);
+      let cj = null; try { cj = JSON.parse((createR.out || '').trim()); } catch {}
+      if (!cj || !cj.id) throw new Error('Threads container failed: ' + (createR.out || '').slice(0, 80));
+      const pubR = await sh(`curl -s -X POST "https://graph.threads.net/v1.0/${userId}/threads_publish" -d "creation_id=${cj.id}" -d "access_token=${token}"`);
+      let pj = null; try { pj = JSON.parse((pubR.out || '').trim()); } catch {}
+      const postId = pj && pj.id;
+      if (!postId) throw new Error('Threads publish failed: ' + (pubR.out || '').slice(0, 80));
+      const entry = { id: ++contentLogSeq, repo: (opts && opts.repo) || 'global', platform, text: safeText, postId, postedAt: Date.now(), metrics: null, learnedAt: null };
+      contentLog.push(entry); persistContentLog();
+      try { log('info', 'sns-post', { platform, postId }); } catch (_) {}
+      return { postId, draft: false };
+    } catch (e) {
+      const draftMsg = `📝 [Threads 게시 실패 — 초안으로 대체]\n${safeText}\n오류: ${String(e).slice(0, 60)}`;
+      if (ch && client) await client.chat.postMessage({ channel: ch, text: scrubOutput(draftMsg) }).catch(() => {});
+      const entry = { id: ++contentLogSeq, repo: (opts && opts.repo) || 'global', platform, text: safeText, postId: null, postedAt: Date.now(), metrics: null, learnedAt: null };
+      contentLog.push(entry); persistContentLog();
+      return { postId: null, draft: true };
+    }
+  }
+  // X/Instagram — OAuth 서명 복잡, 초안 모드 폴백
+  const draftMsg = `📝 [${platform.toUpperCase()} 초안 — 직접 복붙해서 게시]\n${safeText}`;
+  if (ch && client) await client.chat.postMessage({ channel: ch, text: scrubOutput(draftMsg) }).catch(() => {});
+  const entry = { id: ++contentLogSeq, repo: (opts && opts.repo) || 'global', platform, text: safeText, postId: null, postedAt: Date.now(), metrics: null, learnedAt: null };
+  contentLog.push(entry); persistContentLog();
+  return { postId: null, draft: true };
+}
+async function fetchSNSMetrics(platform, postId) {
+  if (!postId) return null;
+  try {
+    if (platform === 'threads') {
+      const token = process.env.THREADS_TOKEN;
+      if (!token) return null;
+      const r = await sh(`curl -s "https://graph.threads.net/v1.0/${postId}/insights?metric=likes,replies,reposts,views&access_token=${token}"`);
+      let j = null; try { j = JSON.parse((r.out || '').trim()); } catch {}
+      if (!j || !j.data) return null;
+      const metrics = {};
+      (j.data || []).forEach(d => { if (d.name) metrics[d.name] = (d.values && d.values[0]) ? d.values[0].value : 0; });
+      return metrics;
+    }
+    return null;
+  } catch { return null; }
+}
+function scheduleMetricsCheck(postId, platform, repo, checkAt) {
+  if (!postId) return;
+  metricsQueue.push({ postId, platform, repo: repo || 'global', checkAt: checkAt || (Date.now() + 24 * 3600000) });
+}
+async function processMetricsQueue() {
+  const now = Date.now();
+  const due = metricsQueue.filter(q => q.checkAt <= now);
+  if (!due.length) return;
+  metricsQueue = metricsQueue.filter(q => q.checkAt > now);
+  for (const q of due) {
+    try {
+      const metrics = await fetchSNSMetrics(q.platform, q.postId);
+      if (!metrics) continue;
+      const entry = contentLog.find(c => c.postId === q.postId);
+      if (entry) { entry.metrics = metrics; persistContentLog(); }
+      const likes = metrics.likes || 0, reposts = metrics.reposts || 0, views = metrics.views || 0;
+      const entryText = entry ? entry.text : '';
+      if (likes + reposts > 10 || views > 500) {
+        addSkill(q.repo, 'SNS 성공 콘텐츠 패턴', 'Threads/SNS 포스트 작성 시', `좋아요${likes}+리포스트${reposts}+조회${views}: "${String(entryText).slice(0, 80)}" 같은 포맷 재사용`);
+        if (entry) { entry.learnedAt = now; persistContentLog(); }
+        try { log('info', 'sns-learned-success', { platform: q.platform, likes, reposts, views }); } catch (_) {}
+      } else if (views > 0 && likes + reposts === 0) {
+        addLesson(q.repo, `SNS 저조 패턴: 조회${views}에 반응0 — "${String(entryText).slice(0, 60)}" 같은 포맷 피하기`);
+        if (entry) { entry.learnedAt = now; persistContentLog(); }
+      }
+    } catch (_) {}
+  }
+}
+// ── Layer 2-A: 브랜드/마케팅 규칙 — 콘텐츠 생성 시 무조건 따르는 글로벌 규칙 ──
+function brandRulesCtx() {
+  const r = rules['__brand__'] || [];
+  return r.length
+    ? '\n\n[브랜드/마케팅 필수 규칙 — 콘텐츠 생성 시 무조건 지켜라]\n' + r.map((x, i) => `${i + 1}. ${x}`).join('\n')
+    : '';
+}
+// ── Layer 2: 콘텐츠 자동 생성+게시+학습 루프 (daily 09:00) ──
+let contentGenAt = 0;
+async function runContentLoop(client, channel, manual = false) {
+  if (!manual && Date.now() - contentGenAt < opsMinGap('content_gen')) return;
+  contentGenAt = Date.now();
+  if (!channel) return;
+  try {
+    const hasBrand = (rules['__brand__'] || []).length > 0;
+    const brandNote = hasBrand ? '' : '\n(브랜드 규칙 미설정 — /브랜드규칙으로 추가 권장)';
+    const repos = Object.keys(bizData);
+    if (!repos.length) {
+      await postAs(client, channel, undefined, LEAD, '콘텐츠 생성: 연결된 서비스가 없어. 먼저 사업 지표를 연결해줘.');
+      return;
+    }
+    for (const repo of repos.slice(0, 3)) {
+      try {
+        const name = repo.split('/').pop();
+        const scorecard = bizScorecard(repo);
+        const skillCtx = recallSkills(repo, 'SNS 콘텐츠 마케팅');
+        const antiCtx = recallAntiSkills(repo, 'SNS 콘텐츠');
+        const brandCtx = brandRulesCtx();
+        const prompt = `너는 ${name} 서비스의 SNS 콘텐츠 마케터다.${brandCtx}
+
+[이 서비스의 과거 성공 콘텐츠 패턴]${skillCtx || ' (없음)'}
+[피해야 할 패턴]${antiCtx || ' (없음)'}
+[현재 서비스 지표]
+${wrapUntrusted(String(scorecard).slice(0, 1000))}
+
+위 브랜드 규칙을 100% 따르면서 Threads용 포스트 1개를 생성해라.
+- 500자 이내, 첫 줄이 hook(눈길 끄는 한 문장), 해시태그 2-3개로 끝
+- 실제 게시할 수 있는 완성된 포스트 텍스트만 출력(설명·메타서술 없이)
+- 마크다운 없이 평문으로${GROUNDING_RULE}`;
+        const r = await runClaude(prompt, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 60000, true);
+        const postText = ((r && r.text) || '').trim();
+        if (!postText) continue;
+        const result = await postToSNS(client, channel, 'threads', postText, { repo });
+        if (result.postId) {
+          scheduleMetricsCheck(result.postId, 'threads', repo, Date.now() + 24 * 3600000);
+          await postAs(client, channel, undefined, LEAD, `${name} Threads 포스트 게시 완료. 24시간 후 성과 자동 체크할게.${brandNote}`).catch(() => {});
+        } else if (result.draft && brandNote) {
+          await postAs(client, channel, undefined, LEAD, brandNote.trim()).catch(() => {});
+        }
+      } catch (e) { try { log('error', 'content-loop-repo', { repo, e: String(e).slice(0, 100) }); } catch (_) {} }
+    }
+  } catch (e) { try { log('error', 'content-loop', { e: String(e).slice(0, 120) }); } catch (_) {} }
+}
+// ── Layer 3: CX 자동 분류+응답 루프 (daily 10:30) ──
+let cxAutoAt = 0;
+async function runCXAutoLoop(client, channel, manual = false) {
+  if (!manual && Date.now() - cxAutoAt < opsMinGap('cx_auto')) return;
+  cxAutoAt = Date.now();
+  if (!channel) return;
+  try {
+    const repos = Object.keys(bizData);
+    if (!repos.length) {
+      if (manual) await postAs(client, channel, undefined, LEAD, 'CX 분석: 연결된 서비스가 없어.');
+      return;
+    }
+    let totalFeedbacks = 0;
+    for (const repo of repos.slice(0, 3)) {
+      try {
+        const name = repo.split('/').pop();
+        const fb = await bizFeedback(repo);
+        if (!fb || !fb.recent || !fb.recent.length) continue;
+        const feedbacks = fb.recent.slice(0, 20);
+        totalFeedbacks += feedbacks.length;
+        const classifyPrompt = `다음은 ${name} 서비스 사용자 피드백이야. 각각을 분류해라.
+카테고리: bug | feature_request | complaint | praise | question
+${feedbacks.map((f, i) => `${i + 1}. ${String(f.text || f).slice(0, 200)}`).join('\n')}
+JSON만: {"results":[{"idx":1,"category":"bug|feature_request|complaint|praise|question","sentiment":"positive|negative|neutral","urgency":"high|medium|low"},...]}${GROUNDING_RULE}`;
+        const cr = await runClaude(classifyPrompt, MODEL.FAST, WORKDIR, CLAUDE_PERMISSION_MODE, 60000, true);
+        const jm = ((cr && cr.text) || '').match(/\{[\s\S]*"results"[\s\S]*\}/);
+        if (!jm) continue;
+        let classified = [];
+        try { classified = JSON.parse(jm[0]).results || []; } catch { continue; }
+        const catCount = {};
+        classified.forEach(c => { catCount[c.category] = (catCount[c.category] || 0) + 1; });
+        const topCat = Object.entries(catCount).sort((a, b) => b[1] - a[1]);
+        for (const [cat, cnt] of topCat.slice(0, 3)) addFact(repo, `CX 주요 피드백: ${cat} ${cnt}건`, 'cx');
+        const repeating = topCat.filter(([, cnt]) => cnt >= 3);
+        if (repeating.length) {
+          const repStr = repeating.map(([cat, cnt]) => `${cat}(${cnt}건)`).join(', ');
+          const draftPrompt = `너는 ${name} CS 담당자야. 아래 반복 피드백 카테고리에 대한 사용자 답변 초안을 작성해라.
+카테고리: ${repStr}
+피드백 예시: ${feedbacks.slice(0, 5).map(f => String(f.text || f).slice(0, 100)).join(' | ')}
+원칙: 공감 + 해결책/로드맵 언급 + CTA. 친근하지만 전문적. 200자 이내.${GROUNDING_RULE}`;
+          const dr = await runClaude(draftPrompt, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 60000, true);
+          const draftText = deMd(((dr && dr.text) || '').trim());
+          if (draftText) {
+            await postAs(client, channel, undefined, byName('고대리') || LEAD, `CS 분석 — ${name}\n카테고리: ${repStr}\n\n[답변 초안 — 검토 후 발송]\n${draftText.slice(0, 500)}`).catch(() => {});
+            addSkill(repo, 'CS 답변 패턴', `반복 피드백(${repStr}) 대응 시`, draftText.slice(0, 200));
+          }
+          for (const [cat, cnt] of repeating) {
+            if (cat === 'bug') addMilestone(repo, `버그 수정 (CX ${cnt}건 반복)`, '버그 해결', `고객 ${cnt}명 반복 신고`, 4, 2);
+            if (cat === 'feature_request') addMilestone(repo, `기능 요청 검토 (CX ${cnt}건)`, '고객 요청 기능', `고객 ${cnt}명 요청`, 3, 3);
+          }
+        }
+        const catSummary = topCat.slice(0, 5).map(([c, n]) => `${c}:${n}건`).join(', ');
+        await postAs(client, channel, undefined, LEAD, `CX 현황 — ${name}\n총 ${feedbacks.length}건: ${catSummary}`).catch(() => {});
+        const urgentCount = classified.filter(c => c.urgency === 'high').length;
+        if (urgentCount > 0) addBlocker(repo, `긴급 CX 피드백 ${urgentCount}건 미처리`, 'decision');
+        // 크로스 도메인: complaint spike
+        if ((catCount.complaint || 0) >= 5) emitCrossDomainSignal('cx', 'complaint_spike', { repo, count: catCount.complaint, ch: channel });
+      } catch (e) { try { log('error', 'cx-loop-repo', { repo, e: String(e).slice(0, 100) }); } catch (_) {} }
+    }
+    if (totalFeedbacks === 0 && manual) await postAs(client, channel, undefined, LEAD, 'CX 분석: 수집된 피드백이 없어. feedbackUrl을 연결해줘.').catch(() => {});
+  } catch (e) { try { log('error', 'cx-loop', { e: String(e).slice(0, 120) }); } catch (_) {} }
+}
+// ── Layer 5: 크로스 도메인 신호 ──
+async function emitCrossDomainSignal(fromDomain, signalType, data) {
+  try {
+    const defCh = settings.hqChannel || settings.monitorChannel || null;
+    if (!defCh || !botClient) return;
+    if (fromDomain === 'cx' && signalType === 'complaint_spike') {
+      const name = String((data && data.repo) || '').split('/').pop();
+      await botClient.chat.postMessage({ channel: defCh, text: scrubOutput(`⚠️ [크로스도메인] CX→마케팅: ${name}에서 불만 피드백 ${(data && data.count) || ''}건 급증 — 마케팅 메시지 검토 필요. "content_gen 실행"으로 대응 콘텐츠 생성 가능.`) }).catch(() => {});
+    } else if (fromDomain === 'finance' && signalType === 'revenue_drop') {
+      await botClient.chat.postMessage({ channel: defCh, text: scrubOutput(`⚠️ [크로스도메인] 재무→성장: 매출 급감 감지 — 진행 중인 성장 실험 검토 권장. "실험 현황"으로 확인.`) }).catch(() => {});
+    } else if (fromDomain === 'health' && signalType === 'recovery') {
+      const ch = (data && data.ch) || defCh;
+      setTimeout(() => runCXAutoLoop(botClient, ch, true).catch(() => {}), 5000);
+    }
+    try { log('info', 'cross-domain', { from: fromDomain, signal: signalType }); } catch (_) {}
+  } catch (e) { try { log('error', 'cross-domain-err', { e: String(e).slice(0, 80) }); } catch (_) {} }
 }
 let boardAt = 0;
 async function runBoardMeeting(client, channel, manual = false) {
@@ -2892,6 +3163,8 @@ async function checkServices(client, channel, announce = true, onlyAlert = false
       // 3-B: 동시간 이상 있었던 다른 서비스 → 인과관계 자동 온톨로지 등록
       try { const downStart = s.downSince; if (downStart) { const coDown = Object.values(services).filter(sv => sv.repo !== s.repo && (sv.causeHistory || []).some(c => c.at >= downStart - 1800000 && c.at <= downStart + 1800000)); if (coDown.length) { for (const ant of coDown) ontAddRel(ant.repo, '일으킴', s.repo, 'incident', 0.6); persistOntology(); } } } catch (_) {}
       if (s.repo !== SELF_REPO) runPostmortem(s.repo, s.downCode, dur).catch(() => {}); // Wave4: 복구 후 재발방지 교훈+예방 마일스톤
+      // Layer 5: 서비스 복구 → CX 루프 즉시 실행(고객 영향 확인)
+      try { const rCh = settings.monitorChannel || channelForWork(s.repo, 'health', s.channel || null) || settings.hqChannel || null; emitCrossDomainSignal('health', 'recovery', { repo: s.repo, ch: rCh }).catch(() => {}); } catch (_) {}
       s.downSince = null; s.downCode = null; s.downVia = null; s.escalatedAt = 0; // D-17: 복구 시 재에스컬레이션 마크 리셋
     }
     // 2-A: 응답시간 상승 트렌드 경보 (자동 감시 모드에서만, 1시간 쿨다운)
@@ -3782,6 +4055,23 @@ async function handle(event, client) {
       return;
     }
     if (/규칙\s*(초기화|전체삭제|리셋)/.test(raw)) { rules[channel] = []; persistRules(); await postAs(client, channel, thread_ts, LEAD, '규칙 다 지웠어.'); return; }
+    // 브랜드 규칙 관리 (/브랜드규칙 "..." 또는 브랜드규칙 목록/초기화)
+    if (/브랜드\s*규칙\s*(목록|보여)/.test(raw)) {
+      const br = rules['__brand__'] || [];
+      await postAs(client, channel, thread_ts, LEAD, br.length ? '브랜드/마케팅 규칙:\n' + br.map((x, i) => `${i + 1}. ${x}`).join('\n') : '아직 브랜드 규칙이 없어. `/브랜드규칙 "규칙 내용"`으로 추가해봐.');
+      return;
+    }
+    if (/브랜드\s*규칙\s*(초기화|전체삭제|리셋)/.test(raw)) { rules['__brand__'] = []; persistRules(); await postAs(client, channel, thread_ts, LEAD, '브랜드 규칙 전부 삭제했어.'); return; }
+    const brandRuleMatch = raw.match(/브랜드\s*규칙\s+["「「"']?(.+?)["」」"']?\s*$/);
+    if (brandRuleMatch) {
+      const ruleText = brandRuleMatch[1].trim();
+      if (ruleText) {
+        const arr = (rules['__brand__'] = rules['__brand__'] || []);
+        if (!arr.includes(ruleText)) { arr.push(ruleText.slice(0, 200)); if (arr.length > 30) rules['__brand__'] = arr.slice(-30); persistRules(); }
+        await postAs(client, channel, thread_ts, LEAD, `브랜드 규칙 등록했어: "${ruleText.slice(0, 80)}" — 이제 모든 콘텐츠 생성에 이 규칙이 적용돼.`);
+        return;
+      }
+    }
     // "앞으로 ~ 해라 / 항상 / 규칙 / 기억해" → 영구 규칙으로 저장하고 그렇게 일함
     if (/(앞으로|항상|규칙으로|규칙은|기억해|명심)/.test(raw) && !/[?？]|할까|할래|어때|어떻게|언제|어디|왜|뭐|뭘|될까|줄까|있을까|날까|건가|는지/.test(raw) && !/짜줘|짜봐|만들어|만들래|만들자|제작|개발해|그려줘/.test(raw)) { // 질문·작업요청에 '앞으로/항상' 들어간 거 규칙으로 오저장 방지
       addRule(channel, raw);
@@ -4989,7 +5279,7 @@ async function postButtons(channel, thread_ts, buttons) {
   loadMemory();
   loadRules();
   loadSettings();
-  loadTasks(); loadJobs(); loadFacts(); loadSkills(); loadOntology(); loadSouls(); loadOpps(); loadRoadmap(); loadBlockers(); loadWave4(); buildMcpConfig(); loadDecisions(); loadUsage(); loadBiz(); loadExperiments(); loadPendingDispatch(); loadOpsConfig(); loadCI(); loadCooldowns(); loadPendingOpp();
+  loadTasks(); loadJobs(); loadFacts(); loadSkills(); loadOntology(); loadSouls(); loadOpps(); loadRoadmap(); loadBlockers(); loadWave4(); buildMcpConfig(); loadDecisions(); loadUsage(); loadBiz(); loadExperiments(); loadPendingDispatch(); loadOpsConfig(); loadCI(); loadCooldowns(); loadPendingOpp(); loadContentLog();
   loadLastRepo();
   loadServices();
   loadPending();
@@ -5082,6 +5372,8 @@ async function postButtons(channel, thread_ts, buttons) {
     if (n.m === 0 && n.h % 4 === 0 && !settings.paused && (!settings.sentinel || settings.sentinel.enabled !== false) && Object.keys(bizData).length) {
       runBizSentinel(botClient, null, false).catch(() => {});
     }
+    // Layer 1: SNS 성과 큐 처리 — 매 틱 due된 성과 체크 실행
+    if (metricsQueue.length) processMetricsQueue().catch(() => {});
     // Q3: 드리프트 알림 — OWNER에게 DM. 잡 실패율 급증=1h 쿨다운, 한도걸림 스파이크=하루 1회(영속 dedup, 재시작에도 안 되풀이). OWNER_USER_ID 없으면 스킵.
     const driftCh = settings.monitorChannel || settings.hqChannel || OWNER_USER_ID; // 드리프트도 지정채널 우선(없으면 OWNER DM) — 자동 경보가 DM으로만 새던 것 통일
     if (driftCh) {
