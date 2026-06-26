@@ -1577,7 +1577,7 @@ let settings = { commanders: [], approval: {}, autopilot: {} };
 function loadSettings() { try { if (fs.existsSync(SET_FILE)) settings = JSON.parse(fs.readFileSync(SET_FILE, 'utf8')) || settings; } catch {} settings.commanders = settings.commanders || []; settings.approval = settings.approval || {}; settings.autopilot = settings.autopilot || {}; settings.repoChannel = settings.repoChannel || {}; settings.hqChannel = settings.hqChannel || null; settings.workRoute = settings.workRoute || {}; settings.sentinel = settings.sentinel || { enabled: true }; if (settings.monitorChannel === undefined) settings.monitorChannel = settings.sentinel && settings.sentinel.channel || null; if (settings.paused === undefined) settings.paused = false; if (settings.autoRecover === undefined) settings.autoRecover = true; if (settings.designGate === undefined) settings.designGate = true; if (settings.gateBuilds === undefined) settings.gateBuilds = true; } // 기본: 모든 빌드 PR 게이트(승인=머지). "빌드 게이트 꺼"로 비프로드 직행
 // 텍스트에서 등록된 사업 서비스(repo) 찾기 — 영문 레포명 + 한글 별칭
 function repoFromText(raw) { const t = String(raw || ''); for (const rp of Object.keys(bizData)) { const nm = rp.split('/').pop(); if (nm && new RegExp(nm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(t)) return rp; } if (/위원트피스|위피|wewantpeace/i.test(t)) return Object.keys(bizData).find(r => /wewantpeace/i.test(r)) || null; if (/스포노노|스포논|sponono/i.test(t)) return Object.keys(bizData).find(r => /sponono/i.test(r)) || null; if (/나홀로소송|solo.lawsuit/i.test(t)) return 'nameofkk/solo-lawsuit-ai'; if (/쓰레드봇|뉴스봇|threads.bot/i.test(t)) return 'nameofkk/threads-bot'; return null; }
-function persistSettings() { try { fs.writeFileSync(SET_FILE, JSON.stringify(settings)); } catch {} }
+function persistSettings() { try { fs.mkdirSync(path.dirname(SET_FILE), { recursive: true }); } catch {} saveJson(SET_FILE, settings); }
 function canCommand(user) { return !settings.commanders.length || settings.commanders.includes(user); }
 const TASK_FILE = process.env.TASKS_FILE || '/data/tasks.json';
 let tasks = {}; let taskSeq = 0;
@@ -2639,7 +2639,7 @@ async function checkServices(client, channel, announce = true, onlyAlert = false
     }
     let up = /^2\d\d|^3\d\d/.test(code); const issues = []; // up이지만 문제 있으면 degraded — 매 체크마다(실시간), SSL만 일1회 캐시
     if (dnsIssue) issues.push(`커스텀 도메인(${s.url}) 접속 실패(${code}) — Railway 원본(${s.railwayUrl})은 정상(${originCode}). 공개 URL 기준 다운 판정, DNS/도메인 연결 확인 필요`);
-    if (up && size != null && size < 200) issues.push('응답 내용 거의 빈(껍데기·에러페이지 의심)');
+    if (up && size != null && size < 200 && /^2\d\d/.test(code)) issues.push('응답 내용 거의 빈(껍데기·에러페이지 의심)'); // 3xx 리다이렉트는 본문이 원래 작으므로 제외
     // 감사 #5: 200이어도 실제 콘텐츠(JS/CSS 로드 여부)를 확인 — HTML만 오고 에셋이 깨진 케이스 감지
     if (up && size != null && size > 200 && /^2\d\d/.test(code)) {
       try {
@@ -2691,8 +2691,8 @@ async function checkServices(client, channel, announce = true, onlyAlert = false
   const down = list.filter(s => s.lastStatus === 'down');
   // onlyAlert(시간별 감시)면 새로 죽은 게 있을 때만 알림, 평소엔 조용
   if (onlyAlert) {
-    // 새로 다운 — 각 서비스의 담당 채널로(남 채널에 안 뜨게)
-    for (const s of down.filter(s => s.wasUp)) {
+    // 새로 다운 — 2연속 확인 후 알림(Railway 순간 재시작 등 1분 이내 오탐 제거)
+    for (const s of down.filter(s => (s.failStreak || 0) === 2)) {
       const tch = routed(s); if (!tch) continue;
       const h = recallFacts('svc:' + s.repo, '인시던트 다운 복구'); const past = h ? `\n   ↳ 과거 이력:${h.replace(/\n+/g, ' ').slice(0, 300)}` : '';
       const dr = await postAlert(client, tch, sre, `🔴 방금 다운 감지: ${s.repo}(${s.downVia === 'health' ? '헬스EP ' : ''}HTTP ${s.downCode || '?'}). ${s.downVia === 'health' ? `루트는 200인데 헬스 엔드포인트가 ${s.healthFailStreak || HEALTH_GATE_STREAK}연속 죽었어 — 앱·DB 레벨 문제 의심.` : '라이브가 죽었어,'} 바로 확인할게.${past}`); // 전송 실패 시 OWNER 폴백 내장. health발이면 헬스EP 실패코드·정황 표시
@@ -2703,7 +2703,7 @@ async function checkServices(client, channel, announce = true, onlyAlert = false
     // 지속 다운(2연속) → 자동 진단·픽스 제안 1회 (담당 채널에서, 프로드 픽스는 게이트)
     for (const s of list) {
       const tch = routed(s);
-      if (s.lastStatus === 'down' && s.failStreak === 2 && s.repo && s.repo !== SELF_REPO && tch && !activeWork[tch] && !settings.paused && GITHUB_TOKEN) {
+      if (s.lastStatus === 'down' && s.failStreak === 3 && s.repo && s.repo !== SELF_REPO && tch && !activeWork[tch] && !settings.paused && GITHUB_TOKEN) {
         await postAs(botClient, tch, undefined, sre, `${s.repo} 2연속 다운 — 원인 진단하고 고칠 수 있는 건 제안할게.`);
         activeWork[tch] = { task: '다운 진단', started: Date.now() };
         runDownProbe(s.repo).catch(() => '').then(probe => { if (probe) postAs(botClient, tch, undefined, sre, `직접 때려본 실측이야:\n${probe}`).catch(() => {}); return runReport(botClient, tch, undefined, sre, s.repo, `이 서비스가 방금 다운됐어(HTTP ${s.downCode || '?'}). 아래는 내가 직접 curl·dig·openssl로 때려본 실측 결과야 — 이걸 1차 근거로 원인을 코드+실측으로 확정해라. 먼저 앱 다운이냐 도메인/인증서(엣지)냐부터 가르고(실측에 답이 있다), 코드로 고칠 수 있는 건 구체 핫픽스로. 사용자한테 curl·dig 다시 시키지 마(내가 이미 했다). 정말 railway logs가 필요할 때만 그것만 사용자에게 요청. 추측 금지.\n\n[내가 직접 한 실측]\n${probe || '(실측 실패 — 네트워크 도구 막힘)'}`); }).then(out => gateReportFollowup(botClient, tch, undefined, s.repo, out, true)).catch(() => {}).finally(() => { activeWork[tch] = null; }); // 봇이 실측 직접 → 진단 → 픽스 바로 게이트(directFix)
@@ -3869,8 +3869,8 @@ async function handle(event, client) {
       await postAs(client, channel, thread_ts, byName('김채원') || LEAD, '사업 지표 이상 없나 지금 한 번 훑어볼게.');
       runBizSentinel(client, channel, true).catch(() => {}); return;
     }
-    if (/선제\s*감시\s*(켜|on|활성)/i.test(raw) && canCommand(event.user)) { settings.sentinel = { enabled: true }; persistSettings(); await postAs(client, channel, thread_ts, LEAD, '선제 감시 켰어 — 4시간마다 사업 지표 이상을 자동으로 보고 임계치 넘으면 바로 경보할게.'); return; }
-    if (/선제\s*감시\s*(꺼|off|중지|끄)/i.test(raw) && canCommand(event.user)) { settings.sentinel = { enabled: false }; persistSettings(); await postAs(client, channel, thread_ts, LEAD, '선제 감시 껐어. "선제 점검"으로 수동으론 여전히 돌릴 수 있어.'); return; }
+    if (/선제\s*감시\s*(켜|on|활성)/i.test(raw) && canCommand(event.user)) { settings.sentinel = { ...(settings.sentinel || {}), enabled: true }; persistSettings(); await postAs(client, channel, thread_ts, LEAD, '선제 감시 켰어 — 4시간마다 사업 지표 이상을 자동으로 보고 임계치 넘으면 바로 경보할게.'); return; }
+    if (/선제\s*감시\s*(꺼|off|중지|끄)/i.test(raw) && canCommand(event.user)) { settings.sentinel = { ...(settings.sentinel || {}), enabled: false }; persistSettings(); await postAs(client, channel, thread_ts, LEAD, '선제 감시 껐어. "선제 점검"으로 수동으론 여전히 돌릴 수 있어.'); return; }
     // 정기 업무 현황 — 실제 opsConfig(주기·시각·채널·켜기)를 보여줌(홈 탭과 같은 데이터, 명령으로도)
     if (/(정기\s*업무|자동\s*업무(\s*현황)?|정기\s*스케줄|자동\s*스케줄|ops\s*(설정|현황|목록)|업무\s*스케줄)\s*[?？]?\s*$/i.test(raw)) {
       const lines = OPS_ORDER.map(id => { const o = opsConfig[id], d = OPS_DEFS[id]; if (!o || !d) return null; return `${o.enabled ? '🟢' : '⚪'} ${d.label} — ${o.enabled ? opsWhen(o) : '꺼짐'}${o.channel ? ' · <#' + o.channel + '>' : ''}${d.perService ? ' · 서비스별' : ''}`; }).filter(Boolean);
@@ -4363,7 +4363,7 @@ function buildHomeBlocksNew() {
     els.push(hbtn(o.enabled ? '끄기' : '켜기', 'opscfg_tog_' + id, { value: id, style: o.enabled ? 'danger' : 'primary' }));
     B.push({ type: 'actions', elements: els.slice(0, 5) });
     if (def.perService) { // 큰 틀(업무) 내에 서비스별 채널 분기 — 드롭다운 왼쪽 정렬(라벨 위, 셀렉트 아래)
-      homeRepos.forEach((rp, ri) => { const cur = settings.workRoute[rp + ':' + id] || settings.repoChannel[rp]; B.push({ type: 'section', text: { type: 'mrkdwn', text: `↳ *${rp.split('/').pop()}*${cur ? ` → <#${cur}>` : ''}` } }); B.push({ type: 'actions', elements: [chanSel('opscfg_psc_' + id + '_' + ri, cur, '채널 선택')] }); });
+      homeRepos.forEach((rp) => { const cur = settings.workRoute[rp + ':' + id] || settings.repoChannel[rp]; const rpKey = rp.replace(/\//g, '-'); B.push({ type: 'section', text: { type: 'mrkdwn', text: `↳ *${rp.split('/').pop()}*${cur ? ` → <#${cur}>` : ''}` } }); B.push({ type: 'actions', elements: [chanSel('opscfg_psc_' + id + '_' + rpKey, cur, '채널 선택')] }); });
     }
   }
   if (schedules.length) B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '내가 등록한 스케줄: ' + schedules.map(s => `#${s.id} ${homeSchedTime(s)} ${String(s.label || s.task || '').slice(0, 20)}`).join('  ·  ').slice(0, 1900) }] });
@@ -4372,20 +4372,20 @@ function buildHomeBlocksNew() {
   B.push({ type: 'header', text: { type: 'plain_text', text: '서비스 담당 채널', emoji: true } });
   B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '여기서 정한 채널로 그 서비스의 헬스체크·다운 경보·자동 진단·사업브리핑이 가(한 채널에 남 서비스 안 섞임). 채널 안 정하면 전사 채널로 폴백. 봇을 먼저 그 채널에 초대해야 글이 가.' }] });
   B.push({ type: 'section', text: { type: 'mrkdwn', text: `*전사(경영)* — 경영회의·운영 브리핑 등 회사 전체 업무${settings.hqChannel ? '' : '  _(미지정 → 서비스 채널로 폴백)_'}` }, accessory: chanSel('svcroute_hq_x', settings.hqChannel, '전사 채널') });
-  homeRepos.forEach((rp, ri) => { const cur = settings.repoChannel[rp]; B.push({ type: 'section', text: { type: 'mrkdwn', text: `*${rp.split('/').pop()}* — 헬스·경보·브리핑 채널${cur ? ` → <#${cur}>` : '  _(미지정)_'}` }, accessory: chanSel('svcroute_' + ri + '_default', cur, '담당 채널') }); });
+  homeRepos.forEach((rp) => { const cur = settings.repoChannel[rp]; const rpKey = rp.replace(/\//g, '-'); B.push({ type: 'section', text: { type: 'mrkdwn', text: `*${rp.split('/').pop()}* — 헬스·경보·브리핑 채널${cur ? ` → <#${cur}>` : '  _(미지정)_'}` }, accessory: chanSel('svcroute_' + rpKey + '_default', cur, '담당 채널') }); });
   B.push({ type: 'divider' });
   // 부서 검토 채널 (요청 시·서비스별) — 마케팅/고객/재무/시장 검토를 서비스마다 어느 채널로
   B.push({ type: 'header', text: { type: 'plain_text', text: '부서 검토 채널 (서비스별)', emoji: true } });
   B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '홈의 부서 검토 버튼·자동 실행 시 각 서비스 검토가 여기 채널로 가 (드롭다운 순서: 마케팅 · 고객 · 재무 · 시장)' }] });
-  homeRepos.forEach((rp, ri) => {
-    const nm = rp.split('/').pop();
+  homeRepos.forEach((rp) => {
+    const nm = rp.split('/').pop(); const rpKey = rp.replace(/\//g, '-');
     const cs = ['marketing', 'cx', 'finance', 'market'].map(fn => settings.workRoute[rp + ':' + fn]).filter(Boolean).length;
     B.push({ type: 'section', text: { type: 'mrkdwn', text: `*${nm}*${cs ? ` (${cs}/4 지정)` : ''}` } });
     B.push({ type: 'actions', elements: [
-      chanSel('svcroute_' + ri + '_marketing', settings.workRoute[rp + ':marketing'], '마케팅'),
-      chanSel('svcroute_' + ri + '_cx', settings.workRoute[rp + ':cx'], '고객'),
-      chanSel('svcroute_' + ri + '_finance', settings.workRoute[rp + ':finance'], '재무'),
-      chanSel('svcroute_' + ri + '_market', settings.workRoute[rp + ':market'], '시장'),
+      chanSel('svcroute_' + rpKey + '_marketing', settings.workRoute[rp + ':marketing'], '마케팅'),
+      chanSel('svcroute_' + rpKey + '_cx', settings.workRoute[rp + ':cx'], '고객'),
+      chanSel('svcroute_' + rpKey + '_finance', settings.workRoute[rp + ':finance'], '재무'),
+      chanSel('svcroute_' + rpKey + '_market', settings.workRoute[rp + ':market'], '시장'),
     ] });
   });
   B.push({ type: 'divider' });
@@ -4444,7 +4444,7 @@ app.action(/^(home_|opscfg_|svcroute_)/, async ({ ack, body, action, client }) =
     if (aid === 'home_pause_toggle') { settings.paused = !settings.paused; persistSettings(); logDecision('home', 'global-pause', settings.paused ? 'ON' : 'OFF'); await publishHome(client, userId); return; }
     if (aid === 'home_sentinel_ch') { settings.sentinel = settings.sentinel || { enabled: true }; settings.sentinel.channel = action.selected_conversation || null; settings.monitorChannel = action.selected_conversation || null; persistSettings(); await publishHome(client, userId); return; } // 다운+선제 통합 모니터링 채널
     if (aid === 'home_deptrun_ch') { settings.deptRunChannel = action.selected_conversation || null; persistSettings(); await publishHome(client, userId); return; }
-    if (aid === 'home_sentinel_toggle') { const on = !settings.sentinel || settings.sentinel.enabled !== false; settings.sentinel = { enabled: !on }; persistSettings(); await publishHome(client, userId); return; }
+    if (aid === 'home_sentinel_toggle') { const on = !settings.sentinel || settings.sentinel.enabled !== false; settings.sentinel = { ...(settings.sentinel || {}), enabled: !on }; persistSettings(); await publishHome(client, userId); return; }
     if (aid === 'home_sentinel_run') { const ch = homeTargetChannel(userId); try { await client.chat.postMessage({ channel: userId, text: `선제 점검 돌렸어 — 이상 있으면 ${ch === userId ? '여기' : '<#' + ch + '>'}나 해당 서비스 채널로 경보가 가.` }); } catch (_) {} runBizSentinel(app.client, ch, true).catch(() => {}); setTimeout(() => publishHome(client, userId).catch(() => {}), 1500); return; }
     let m;
     // D5: 정기 업무 설정 변경(주기/요일/시각/채널/켜기)
@@ -4458,16 +4458,16 @@ app.action(/^(home_|opscfg_|svcroute_)/, async ({ ack, body, action, client }) =
       persistOpsConfig(); await publishHome(client, userId); return;
     }
     // D5: 업무 블록 내 서비스별 채널(perService task) — workRoute[repo:taskId]
-    if (m = aid.match(/^opscfg_psc_(\w+)_(\d+)$/)) {
-      const taskId = m[1], rp = homeServiceRepos()[parseInt(m[2], 10)], chosen = action.selected_conversation || null;
+    if (m = aid.match(/^opscfg_psc_(\w+)_(.+)$/)) {
+      const taskId = m[1], rp = homeServiceRepos().find(r => r.replace(/\//g, '-') === m[2]), chosen = action.selected_conversation || null;
       if (rp) { const key = rp + ':' + taskId; if (chosen) settings.workRoute[key] = chosen; else delete settings.workRoute[key]; persistSettings(); }
       await publishHome(client, userId); return;
     }
     // D5: 서비스×기능 채널 라우팅 변경
-    if (m = aid.match(/^svcroute_(hq|\d+)_(\w+)$/)) {
+    if (m = aid.match(/^svcroute_(hq|[^_]+)_(\w+)$/)) {
       const chosen = action.selected_conversation || null;
       if (m[1] === 'hq') { settings.hqChannel = chosen; }
-      else { const rp = homeServiceRepos()[parseInt(m[1], 10)]; if (rp) { if (m[2] === 'default') { if (chosen) settings.repoChannel[rp] = chosen; else delete settings.repoChannel[rp]; } else { const key = rp + ':' + m[2]; if (chosen) settings.workRoute[key] = chosen; else delete settings.workRoute[key]; } } }
+      else { const rp = homeServiceRepos().find(r => r.replace(/\//g, '-') === m[1]); if (rp) { if (m[2] === 'default') { if (chosen) settings.repoChannel[rp] = chosen; else delete settings.repoChannel[rp]; } else { const key = rp + ':' + m[2]; if (chosen) settings.workRoute[key] = chosen; else delete settings.workRoute[key]; } } }
       persistSettings(); await publishHome(client, userId); return;
     }
     if (m = aid.match(/^home_disp_(run|skip)_(.+)$/)) { // 특정 채널 대기제안 승인/넘어가
@@ -4899,7 +4899,7 @@ async function postButtons(channel, thread_ts, buttons) {
     if (draining) return; draining = true;
     try { log('warn', 'shutdown', { sig, claudeRunning, active: Object.keys(activeWork).filter(c => activeWork[c]).length }); } catch (_) {}
     try { for (const ch of Object.keys(activeWork)) { const w = activeWork[ch]; if (w && w.jobId && jobs[w.jobId] && jobs[w.jobId].status === 'running') jobUpdateById(w.jobId, { status: 'interrupted' }); } } catch (_) {}
-    try { persistJobs(); persistUsage(); persistPending(); persistPendingDispatch(); persistSchedules(); persistMemory(); } catch (_) {}
+    try { persistJobs(); persistUsage(); persistPending(); persistPendingDispatch(); persistSchedules(); persistMemory(); persistSettings(); } catch (_) {}
     const t0 = Date.now();
     const waiter = setInterval(() => {
       if (claudeRunning <= 0 || Date.now() - t0 > 10000) { clearInterval(waiter); try { log('info', 'shutdown-done', { waitedMs: Date.now() - t0, claudeRunning }); } catch (_) {} process.exit(0); }
