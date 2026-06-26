@@ -1574,7 +1574,7 @@ function rulesCtx(channel) { const r = rules[channel] || []; return r.length ? `
 // ── 설정(권한/승인) + 태스크보드 (영구) ──
 const SET_FILE = process.env.SETTINGS_FILE || '/data/settings.json';
 let settings = { commanders: [], approval: {}, autopilot: {} };
-function loadSettings() { try { if (fs.existsSync(SET_FILE)) settings = JSON.parse(fs.readFileSync(SET_FILE, 'utf8')) || settings; } catch {} settings.commanders = settings.commanders || []; settings.approval = settings.approval || {}; settings.autopilot = settings.autopilot || {}; settings.repoChannel = settings.repoChannel || {}; settings.hqChannel = settings.hqChannel || null; settings.workRoute = settings.workRoute || {}; settings.sentinel = settings.sentinel || { enabled: true }; if (settings.monitorChannel === undefined) settings.monitorChannel = settings.sentinel && settings.sentinel.channel || null; if (settings.paused === undefined) settings.paused = false; if (settings.autoRecover === undefined) settings.autoRecover = true; if (settings.designGate === undefined) settings.designGate = true; if (settings.gateBuilds === undefined) settings.gateBuilds = true; } // 기본: 모든 빌드 PR 게이트(승인=머지). "빌드 게이트 꺼"로 비프로드 직행
+function loadSettings() { try { if (fs.existsSync(SET_FILE)) settings = JSON.parse(fs.readFileSync(SET_FILE, 'utf8')) || settings; } catch {} settings.commanders = settings.commanders || []; settings.approval = settings.approval || {}; settings.autopilot = settings.autopilot || {}; settings.repoChannel = settings.repoChannel || {}; settings.hqChannel = settings.hqChannel || null; settings.workRoute = settings.workRoute || {}; settings.sentinel = settings.sentinel || { enabled: true }; if (settings.monitorChannel === undefined) settings.monitorChannel = settings.sentinel && settings.sentinel.channel || null; if (settings.paused === undefined) settings.paused = false; if (settings.autoRecover === undefined) settings.autoRecover = true; if (settings.designGate === undefined) settings.designGate = true; if (settings.gateBuilds === undefined) settings.gateBuilds = true; if (settings.contentGate === undefined) settings.contentGate = true; } // contentGate 기본 true: API 키 있을 때 SNS 게시 전 사람 승인 요구 (77% 소비자 선호)
 // 텍스트에서 등록된 사업 서비스(repo) 찾기 — 영문 레포명 + 한글 별칭
 function repoFromText(raw) { const t = String(raw || ''); for (const rp of Object.keys(bizData)) { const nm = rp.split('/').pop(); if (nm && new RegExp(nm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(t)) return rp; } if (/위원트피스|위피|wewantpeace/i.test(t)) return Object.keys(bizData).find(r => /wewantpeace/i.test(r)) || null; if (/스포노노|스포논|sponono/i.test(t)) return Object.keys(bizData).find(r => /sponono/i.test(r)) || null; if (/나홀로소송|solo.lawsuit/i.test(t)) return 'nameofkk/solo-lawsuit-ai'; if (/쓰레드봇|뉴스봇|threads.bot/i.test(t)) return 'nameofkk/threads-bot'; return null; }
 function persistSettings() { try { fs.mkdirSync(path.dirname(SET_FILE), { recursive: true }); } catch {} saveJson(SET_FILE, settings); }
@@ -2745,6 +2745,7 @@ async function runWeeklyReport(client, channel, manual = false) {
       kpi.self_correction_rate != null ? `· 자기교정률: ${kpi.self_correction_rate}%(anti-skill 주입 후 성공)` : null,
       kpi.ops_success_rate != null ? `· OPS 성공률: ${kpi.ops_success_rate}%(완료 잡 비율)` : null,
       kpi.learning_velocity != null ? `· 학습속도: 이번 주 facts+skills ${kpi.learning_velocity}개 추가` : null,
+      kpi.error_rate != null ? `· 에이전트 오류율: ${kpi.error_rate}%(게이트 거부율 — 목표 <20%)` : null,
     ].filter(Boolean).join('\n');
     const r = await runClaude(`지난 주 반복 장애 패턴: ${top3}.\n미해결 blocker ${ob.length}건: ${blockerSummary}\n\n에이전트 KPI:\n${kpiLines || '(없음)'}\n\n이번 주 봇 개선 제안 2~3개를 핵심만(반말, 각 1줄). 마지막에 사람 승인 필요한 blocker 요약.`, MODEL.LEAD);
     const text = deMd((r.text || '').trim());
@@ -2766,7 +2767,12 @@ function computeAgentKPI() {
   const newFacts = Object.values(facts).flat().filter(f => (f.at || 0) > week).length;
   const newSkills = Object.values(skills).flat().filter(s => (s.at || 0) > week).length;
   const learning_velocity = newFacts + newSkills;
-  return { escalation_rate, content_performance, self_correction_rate, ops_success_rate, learning_velocity };
+  // 개선 2: error_rate — 게이트 발의 중 사람이 거부한 비율 (에이전트 판단 오류율)
+  const recentDecisions = (typeof decisions !== 'undefined' ? decisions : []).filter(d => (d.at || 0) > week);
+  const proposed = recentDecisions.filter(d => d.kind === 'gate-propose').length;
+  const declined = recentDecisions.filter(d => d.kind === 'gate-declined' || d.kind === 'content-declined').length;
+  const error_rate = proposed >= 3 ? Math.round(declined / proposed * 100) : null; // 3건 이상일 때만 유의미
+  return { escalation_rate, content_performance, self_correction_rate, ops_success_rate, learning_velocity, error_rate };
 }
 // ── Layer 1: SNS 실행 계층 — 실제 게시·초안·성과 추적·학습 연결 ──
 const CONTENT_LOG_FILE = process.env.CONTENT_LOG_FILE || '/data/content_log.json';
@@ -2874,6 +2880,38 @@ async function processMetricsQueue() {
   }
 }
 // ── Layer 2-A: 브랜드/마케팅 규칙 — 콘텐츠 생성 시 무조건 따르는 글로벌 규칙 ──
+// 개선 1: 브랜드 규칙 준수 자동 검증 (구조 체크 → LLM 의미 체크 → 자가교정)
+async function checkBrandCompliance(text, brandRules) {
+  if (!brandRules || !brandRules.length) return { pass: true, violations: [] };
+  const violations = [];
+  // 1단계: 구조적 규칙 패턴 체크 (LLM 없이)
+  const emojiCount = (text.match(/\p{Emoji}/gu) || []).length;
+  const hashtagCount = (text.match(/#\S+/g) || []).length;
+  for (const rule of brandRules) {
+    const em = rule.match(/이모지\s*(\d+)개\s*(이하|미만)/);
+    if (em) { const lim = parseInt(em[1]) + (em[2] === '미만' ? -1 : 0); if (emojiCount > lim) violations.push(`이모지 ${emojiCount}개 사용 (규칙: ${rule})`); }
+    const hm = rule.match(/해시태그\s*(\d+)개\s*(이하|미만)/);
+    if (hm) { const lim = parseInt(hm[1]) + (hm[2] === '미만' ? -1 : 0); if (hashtagCount > lim) violations.push(`해시태그 ${hashtagCount}개 사용 (규칙: ${rule})`); }
+    const cm = rule.match(/(\d+)자\s*(이내|이하|미만)/);
+    if (cm) { const lim = parseInt(cm[1]) + (cm[2] === '미만' ? -1 : 0); if (text.length > lim) violations.push(`글자수 ${text.length}자 초과 (규칙: ${rule})`); }
+  }
+  if (violations.length) return { pass: false, violations };
+  // 2단계: 의미 체크 (MODEL.FAST)
+  try {
+    const r = await runClaude(`다음 브랜드 규칙 목록과 SNS 포스트를 보고, 위반된 규칙이 있으면 JSON으로 출력해라.
+[규칙]
+${brandRules.map((r, i) => `${i + 1}. ${r}`).join('\n')}
+[포스트]
+${String(text).slice(0, 600)}
+JSON만: {"pass":true,"violations":[]} 또는 {"pass":false,"violations":["위반 내용 1줄씩"]}${GROUNDING_RULE}`, MODEL.FAST, WORKDIR, CLAUDE_PERMISSION_MODE, 30000, true);
+    const m = ((r && r.text) || '').match(/\{[\s\S]*\}/);
+    if (!m) return { pass: true, violations: [] };
+    const result = JSON.parse(m[0]);
+    return { pass: !!result.pass, violations: Array.isArray(result.violations) ? result.violations : [] };
+  } catch { return { pass: true, violations: [] }; } // 검증 실패 = 통과로 처리(안전 방향)
+}
+// 개선 3: 콘텐츠 게이트 대기 상태
+let pendingContentGate = {}; // channel → {text, platform, repo, at, awaitingEdit, editHistory}
 function brandRulesCtx() {
   const r = rules['__brand__'] || [];
   return r.length
@@ -2913,14 +2951,57 @@ ${wrapUntrusted(String(scorecard).slice(0, 1000))}
 - 실제 게시할 수 있는 완성된 포스트 텍스트만 출력(설명·메타서술 없이)
 - 마크다운 없이 평문으로${GROUNDING_RULE}`;
         const r = await runClaude(prompt, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 60000, true);
-        const postText = ((r && r.text) || '').trim();
+        let postText = ((r && r.text) || '').trim();
         if (!postText) continue;
-        const result = await postToSNS(client, channel, 'threads', postText, { repo });
-        if (result.postId) {
-          scheduleMetricsCheck(result.postId, 'threads', repo, Date.now() + 24 * 3600000);
-          await postAs(client, channel, undefined, LEAD, `${name} Threads 포스트 게시 완료. 24시간 후 성과 자동 체크할게.${brandNote}`).catch(() => {});
-        } else if (result.draft && brandNote) {
-          await postAs(client, channel, undefined, LEAD, brandNote.trim()).catch(() => {});
+        // 개선 1: 브랜드 규칙 준수 검증 (규칙 있을 때만)
+        const brandRules = rules['__brand__'] || [];
+        if (brandRules.length) {
+          const check = await checkBrandCompliance(postText, brandRules);
+          if (!check.pass) {
+            // 위반 → 재생성 1회 (자가교정)
+            const violStr = check.violations.join('; ');
+            try { log('info', 'brand-violation', { repo, violations: violStr.slice(0, 120) }); } catch (_) {}
+            const fixPrompt = `${prompt}
+
+[방금 생성한 포스트가 다음 브랜드 규칙을 위반했어 — 반드시 수정해라]
+${violStr}
+위반 없이 다시 생성:`;
+            const fr = await runClaude(fixPrompt, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 60000, true);
+            const fixedText = ((fr && fr.text) || '').trim();
+            if (fixedText) {
+              const reCheck = await checkBrandCompliance(fixedText, brandRules);
+              if (reCheck.pass) {
+                postText = fixedText; // 자가교정 성공
+              } else {
+                // 재생성 후에도 위반 → 학습 + 게이트 강제
+                addLesson(repo, `SNS 콘텐츠 브랜드 규칙 위반 반복: ${violStr.slice(0, 100)}`);
+                await postAs(client, channel, undefined, LEAD, `${name} 콘텐츠 브랜드 규칙 재생성 후에도 위반 (${reCheck.violations.slice(0, 2).join(', ')}). 수동 검토 필요.${brandNote}`).catch(() => {});
+                const draftMsg = `📝 [${name} 초안 — 브랜드 규칙 위반 수동 수정 후 게시 요망]\n${fixedText}\n\n⚠️ 위반: ${reCheck.violations.slice(0, 2).join(' | ')}`;
+                await client.chat.postMessage({ channel, text: scrubOutput(draftMsg) }).catch(() => {});
+                continue;
+              }
+            }
+          }
+        }
+        // 개선 3: 게이트 분기 — API 키 있고 게이트 ON이면 사람 승인 먼저
+        if (hasSocialKey('threads') && settings.contentGate !== false) {
+          pendingContentGate[channel] = { text: postText, platform: 'threads', repo, at: Date.now() };
+          const previewMsg = `콘텐츠 미리보기 — ${name}${brandNote}\n\n${postText}\n\nThreads에 게시할까?`;
+          await postAs(client, channel, undefined, byName('영듀') || LEAD, previewMsg).catch(() => {});
+          await postButtons(channel, undefined, [
+            { text: '✅ Threads 게시', id: 'content_publish', style: 'primary', value: channel },
+            { text: '✏️ 수정 요청', id: 'content_edit', value: channel },
+            { text: '❌ 넘어가', id: 'content_skip', value: channel }
+          ]).catch(() => {});
+        } else {
+          // 초안 모드(API 키 없음) or 자동 모드(contentGate=false)
+          const result = await postToSNS(client, channel, 'threads', postText, { repo });
+          if (result.postId) {
+            scheduleMetricsCheck(result.postId, 'threads', repo, Date.now() + 24 * 3600000);
+            await postAs(client, channel, undefined, LEAD, `${name} Threads 포스트 게시 완료. 24시간 후 성과 자동 체크할게.${brandNote}`).catch(() => {});
+          } else if (result.draft && brandNote) {
+            await postAs(client, channel, undefined, LEAD, brandNote.trim()).catch(() => {});
+          }
         }
       } catch (e) { try { log('error', 'content-loop-repo', { repo, e: String(e).slice(0, 100) }); } catch (_) {} }
     }
@@ -3953,6 +4034,46 @@ async function handle(event, client) {
         if (chosen) { delete pendingPayment[channel]; await postAs(client, channel, thread_ts, byName('윈터') || LEAD, `오케이, ${chosen}로 연동할게.`); proceedAfterPaymentGate(client, channel, thread_ts, { repo: pp.repo, task: pp.task, forcePR: pp.forcePR, projName: pp.projName, payment: chosen }); return; }
       }
     }
+    // 개선 3: 콘텐츠 게이트 — 수정 요청 대기 중이면 다음 메시지를 수정 방향으로 처리
+    if (pendingContentGate[channel] && pendingContentGate[channel].awaitingEdit) {
+      const pg = pendingContentGate[channel];
+      if (pg.at && Date.now() - pg.at > 30 * 60 * 1000) { delete pendingContentGate[channel]; } // 30분 만료
+      else if (/^(취소|넘어가|됐어|그만)/.test(raw)) {
+        delete pendingContentGate[channel];
+        await postAs(client, channel, thread_ts, LEAD, '콘텐츠 수정 취소할게.'); return;
+      } else if (raw.length > 3 && canCommand(event.user)) {
+        const editDirection = raw;
+        delete pg.awaitingEdit;
+        pg.editHistory = (pg.editHistory || []).concat(editDirection);
+        // 수정 방향 반영해서 재생성
+        const brandCtx = brandRulesCtx();
+        const skillCtx = recallSkills(pg.repo, 'SNS 콘텐츠');
+        const editPrompt = `너는 ${(pg.repo || '').split('/').pop()} SNS 콘텐츠 마케터다.${brandCtx}
+[기존 포스트]
+${pg.text}
+[수정 방향 — 반드시 반영해라]
+${editDirection}
+[과거 성공 패턴]${skillCtx || ' (없음)'}
+위를 반영해서 Threads 포스트 재생성 (500자 이내, 마크다운 없이, 포스트 텍스트만 출력):${GROUNDING_RULE}`;
+        try {
+          await postAs(client, channel, thread_ts, byName('영듀') || LEAD, '수정 방향 반영해서 재생성할게.').catch(() => {});
+          const rr = await runClaude(editPrompt, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 60000, true);
+          const newText = ((rr && rr.text) || '').trim();
+          if (newText) {
+            pg.text = newText;
+            pg.at = Date.now();
+            const previewMsg = `수정된 콘텐츠 — ${(pg.repo || '').split('/').pop()}\n\n${newText}\n\nThreads에 게시할까?`;
+            await postAs(client, channel, thread_ts, byName('영듀') || LEAD, previewMsg).catch(() => {});
+            await postButtons(channel, undefined, [
+              { text: '✅ Threads 게시', id: 'content_publish', style: 'primary', value: channel },
+              { text: '✏️ 수정 요청', id: 'content_edit', value: channel },
+              { text: '❌ 넘어가', id: 'content_skip', value: channel }
+            ]).catch(() => {});
+          }
+        } catch (e) { try { log('error', 'content-edit-err', { e: String(e).slice(0, 80) }); } catch (_) {} }
+        return;
+      }
+    }
     // 시안 게이트 응답 — 진행/시안다시/넘어가/피드백
     if (pendingDesign[channel]) {
       const pdg = pendingDesign[channel];
@@ -4017,7 +4138,10 @@ async function handle(event, client) {
     // 토론 결론 액션아이템 실행 승인 — "실행"/"실행 1,3"으로 착수, "넘어가"로 폐기 (승인 게이트: 자동 실행 안 함)
     if (pendingDispatch[channel]) {
       if (pendingDispatch[channel].at && Date.now() - pendingDispatch[channel].at > 30 * 60 * 1000) { delete pendingDispatch[channel]; } // 30분 만료
-      else if (/^(넘어가|패스|무시|안\s?해|됐어|취소|놔둬|나중에)/.test(raw)) { delete pendingDispatch[channel]; await postAs(client, channel, thread_ts, LEAD, '오케이, 그건 안 돌릴게. 나중에 "스포노노 ~ 조사해줘"나 "작업: ..."로 직접 시켜도 돼.'); return; }
+      else if (/^(넘어가|패스|무시|안\s?해|됐어|취소|놔둬|나중에)/.test(raw)) {
+        try { logDecision(channel, 'gate-declined', `게이트 거부(${event.user || '?'})`); } catch (_) {} // 개선 2: error_rate 측정용
+        delete pendingDispatch[channel]; await postAs(client, channel, thread_ts, LEAD, '오케이, 그건 안 돌릴게. 나중에 "스포노노 ~ 조사해줘"나 "작업: ..."로 직접 시켜도 돼.'); return;
+      }
       else if (/^(그거|그것|이거|이대로|다|전부)?\s*(실행|진행|착수|돌려|고고|ㄱㄱ|승인|ok|콜)\s*(해줘|해|할게|하자|시켜(줘)?|가자|줘)?(\s*[\d,\s및과~-]+)?\s*$/i.test(raw) && canCommand(event.user)) { // 감사: 구두 "실행"/자연어 변형(실행해줘·이대로 실행·그거 실행 등)도 버튼과 동일하게 게이트 실행
         if (await guardBusy(client, channel, thread_ts)) return; // 작업 중이면 안내만, pendingDispatch 유지
         const pd = pendingDispatch[channel]; delete pendingDispatch[channel];
@@ -4055,6 +4179,17 @@ async function handle(event, client) {
       return;
     }
     if (/규칙\s*(초기화|전체삭제|리셋)/.test(raw)) { rules[channel] = []; persistRules(); await postAs(client, channel, thread_ts, LEAD, '규칙 다 지웠어.'); return; }
+    // 개선 3: 콘텐츠 게이트 토글 — "콘텐츠 자동" / "콘텐츠 게이트"
+    if (/콘텐츠\s*(자동|오토|auto)/i.test(raw) && canCommand(event.user)) {
+      settings.contentGate = false; persistSettings();
+      await postAs(client, channel, thread_ts, LEAD, '콘텐츠 자동 모드 켰어 — API 키 있으면 생성 즉시 Threads에 자동 게시. 되돌리려면 "콘텐츠 게이트".');
+      return;
+    }
+    if (/콘텐츠\s*(게이트|승인|확인|검토)/i.test(raw) && canCommand(event.user)) {
+      settings.contentGate = true; persistSettings();
+      await postAs(client, channel, thread_ts, LEAD, '콘텐츠 게이트 켰어 — 생성 후 Slack에서 승인해야 실제 게시. (현재 기본값)');
+      return;
+    }
     // 브랜드 규칙 관리 (/브랜드규칙 "..." 또는 브랜드규칙 목록/초기화)
     if (/브랜드\s*규칙\s*(목록|보여)/.test(raw)) {
       const br = rules['__brand__'] || [];
@@ -5046,6 +5181,36 @@ app.action(/^(dispatch|plan|sched|mcp|design|pay)_/, async ({ ack, body, action 
     if (action.action_id.startsWith('dispatch') && action.value && pend[channel].gid && action.value !== pend[channel].gid) { try { await botClient.chat.postMessage({ channel, text: '그 제안은 이미 다른 제안으로 교체됐어 — 최신 메시지의 버튼을 눌러줘.' }); } catch (_) {} return; }
     await handle({ channel, user: body.user && body.user.id, ts: 'btn-' + (action.action_ts || (body.actions && body.actions[0] && body.actions[0].action_ts) || '0'), text }, app.client);
   } catch (e) { try { console.log('[action] err', String(e).slice(0, 120)); } catch (_) {} }
+});
+// 개선 3: 콘텐츠 게이트 버튼 — Threads 게시 / 수정 요청 / 넘어가
+app.action(/^content_/, async ({ ack, body, action }) => {
+  await ack();
+  try {
+    const channel = (body.channel && body.channel.id) || (body.container && body.container.channel_id); if (!channel) return;
+    const lbl = action.action_id === 'content_publish' ? '✅ Threads 게시' : action.action_id === 'content_edit' ? '✏️ 수정 요청' : '❌ 넘어가';
+    const msgTs = body.message && body.message.ts;
+    if (msgTs) { try { await botClient.chat.update({ channel, ts: msgTs, text: lbl, blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `✅ 선택: *${lbl}*` } }] }); } catch (_) {} }
+    const pg = pendingContentGate[channel];
+    if (!pg) { try { console.log('[content-action] stale', action.action_id); } catch (_) {} return; }
+    if (action.action_id === 'content_skip') {
+      delete pendingContentGate[channel];
+      try { logDecision(channel, 'content-declined', `콘텐츠 게시 거부(${body.user && body.user.id || '?'})`); } catch (_) {} // error_rate 반영
+      await postAs(botClient, channel, undefined, LEAD, '오케이, 이 콘텐츠는 넘어갈게.').catch(() => {});
+    } else if (action.action_id === 'content_publish') {
+      delete pendingContentGate[channel];
+      const result = await postToSNS(botClient, channel, pg.platform, pg.text, { repo: pg.repo });
+      if (result.postId) {
+        scheduleMetricsCheck(result.postId, pg.platform, pg.repo, Date.now() + 24 * 3600000);
+        try { logDecision(channel, 'content-published', `${pg.platform} 게시 승인(${body.user && body.user.id || '?'})`); } catch (_) {}
+        await postAs(botClient, channel, undefined, LEAD, `${(pg.repo || '').split('/').pop()} Threads 게시 완료. 24시간 후 성과 자동 체크할게.`).catch(() => {});
+      } else {
+        // postToSNS가 이미 Slack에 오류 메시지 올렸음
+      }
+    } else if (action.action_id === 'content_edit') {
+      pg.awaitingEdit = true;
+      await postAs(botClient, channel, undefined, byName('영듀') || LEAD, '어떻게 수정할까? 방향 알려줘 — 반영해서 다시 생성해줄게.').catch(() => {});
+    }
+  } catch (e) { try { console.log('[content-action] err', String(e).slice(0, 120)); } catch (_) {} }
 });
 // 기회 스카우트 버튼 — 만들기/더검증/넘어가
 app.action(/^opp_/, async ({ ack, body, action }) => {
