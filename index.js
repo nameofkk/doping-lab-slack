@@ -1909,6 +1909,18 @@ function persistBiz() { saveJson(BIZ_FILE, bizData); }
 function seedBizDefaults() {
   const wwp = 'nameofkk/wewantpeace';
   if (!bizData[wwp]) bizData[wwp] = { repo: wwp, sources: [{ name: 'platform', url: 'https://api.wewantpeace.live/public/stats' }, { name: 'newsletter', url: 'https://api.wewantpeace.live/newsletter/stats' }], history: [] };
+  // 마이그레이션: services 모니터링 URL을 무거운 /public/stats → 가벼운 /health 로 교체.
+  // /public/stats는 SELECT count(*) FROM normalized_events 풀스캔을 2분마다 실행 → Supabase Disk IO 소진 → DB 연결 고갈 → 전체 서비스 크래시의 근본 원인.
+  const wwpHealthUrl = 'https://api.wewantpeace.live/health';
+  if (services[wwp] && /\/public\/stats/.test(services[wwp].url || '')) {
+    services[wwp].url = wwpHealthUrl;
+    persistServices();
+  }
+  // bizData sources에 health 항목 추가(없으면) — reconcileServices가 신규 등록 시 /health를 사용하도록
+  if (bizData[wwp] && !bizData[wwp].sources.find(s => s.name === 'health')) {
+    bizData[wwp].sources.unshift({ name: 'health', url: wwpHealthUrl });
+    persistBiz();
+  }
   // 봇 전용 admin 출입구(BOT_STATS_KEY env 있으면 자동 연결) — 회원수·DAU·구독자·매출. 키는 env에만, 코드/깃엔 없음.
   if (process.env.BOT_STATS_KEY) {
     const b = bizData[wwp];
