@@ -1970,12 +1970,18 @@ function persistBiz() { saveJson(BIZ_FILE, bizData); }
 function seedBizDefaults() {
   const wwp = 'nameofkk/wewantpeace';
   if (!bizData[wwp]) bizData[wwp] = { repo: wwp, sources: [{ name: 'platform', url: 'https://api.wewantpeace.live/public/stats' }, { name: 'newsletter', url: 'https://api.wewantpeace.live/newsletter/stats' }], history: [] };
-  // 마이그레이션: services 모니터링 URL을 무거운 /public/stats → 가벼운 /health 로 교체.
-  // /public/stats는 SELECT count(*) FROM normalized_events 풀스캔을 2분마다 실행 → Supabase Disk IO 소진 → DB 연결 고갈 → 전체 서비스 크래시의 근본 원인.
+  // 마이그레이션1: /public/stats → /health (이전 수정 — DB 풀스캔 방지)
+  // 마이그레이션2: /health → 루트(api.wewantpeace.live) — /health가 DB 체크로 10초+ 소요 → Railway curl 타임아웃 → 000 = 거짓 다운 오판.
+  // 루트는 0.5초로 정상 응답. /health는 선택적 healthUrl(informational, 게이팅 X)로 내림.
+  const wwpRootUrl = 'https://api.wewantpeace.live';
   const wwpHealthUrl = 'https://api.wewantpeace.live/health';
-  if (services[wwp] && /\/public\/stats/.test(services[wwp].url || '')) {
-    services[wwp].url = wwpHealthUrl;
-    persistServices();
+  if (services[wwp]) {
+    if (/\/public\/stats|\/health/.test(services[wwp].url || '')) {
+      services[wwp].url = wwpRootUrl; // 루트로 교정 — 빠름(0.5s), 다운 판정 기준
+      if (!services[wwp].healthUrl) services[wwp].healthUrl = wwpHealthUrl; // DB/Redis 상세는 healthUrl로
+      services[wwp].lastStatus = null; services[wwp].failStreak = 0; services[wwp].downSince = null; // 거짓 다운 카운터 리셋
+      persistServices();
+    }
   }
   // bizData sources에 health 항목 추가(없으면) — reconcileServices가 신규 등록 시 /health를 사용하도록
   if (bizData[wwp] && !bizData[wwp].sources.find(s => s.name === 'health')) {
