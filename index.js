@@ -434,7 +434,13 @@ async function runDebate(client, channel, thread_ts, idea, repo) {
         : `지금 ${r}라운드야. 앞 의견에 동의만 하거나 같은 질문 반복하지 말고, 약한 부분을 콕 집어 반박하거나 네 입장을 정해서 결론 쪽으로 끌고 가. 반복·맞장구 금지.`) + HONEST + TAG;
       const struct = structured.length ? `\n\n[지금까지 핵심 주장(구조화)]\n${structured.slice(-8).map(s => `- ${s.who}: ${s.tag}`).join('\n')}` : '';
       const res = await runClaude(`${p.prompt}${STYLE}${rulesCtx(channel)}\n\n[지금까지 토론]\n${transcript.slice(-3000)}${struct}\n\n${guide}`, p.model);
-      if (res.limited) { await postAs(client, channel, thread_ts, LEAD, '⏳ 한도 걸려서 토론 더 못 돌려. 리셋되면 다시 하자.'); return; }
+      if (res.limited) {
+        pausedDebate[channel] = { idea, repo: repo || null, at: Date.now() };
+        const _prevLR = limitedResume[channel];
+        limitedResume[channel] = { limitType: 'usage', debateIdea: idea, debateRepo: repo || null, at: Date.now(), lastTry: Date.now() - 29 * 60 * 1000, attempts: _prevLR ? _prevLR.attempts : 0 };
+        await postAs(client, channel, thread_ts, LEAD, '⏳ 한도 걸려서 토론 더 못 돌려. 한도 리셋되면 자동으로 다시 돌릴게 — 급하면 "이어서"로 수동 재개도 돼.');
+        return;
+      }
       const full = (res.text || '(무응답)').trim();
       const tagM = full.match(/⟦([\s\S]*?)⟧/);
       if (tagM) structured.push({ who: p.name, tag: tagM[1].replace(/\s+/g, ' ').trim().slice(0, 200) }); // 구조화 태그 누적
@@ -490,6 +496,7 @@ async function runLegalReview(client, channel, thread_ts, dir, repo, task) {
 // ── 실제 작업 모드: 레포 클론 → claude 코드 작업 → 브랜치 push → PR → 보고 ──
 let workSeq = 0; const workCancel = {}; const activeWork = {}; const lastRepo = {}; const lastRequester = {}; const pendingProject = {}; const feedback = {}; const pausedWork = {}; const pendingDispatch = {}; const pendingPlan = {}; const pendingSchedule = {}; const pendingMcp = {}; const pendingRhythm = {}; const pendingDesign = {}; const pendingPayment = {}; const limitedResume = {}; const pendingOpp = {}; const pendingVerify = {}; const lastPR = {}; const lastRepoAt = {}; const lastDebate = {}; const pendingThreadsEdit = {}; // Threads 수정요청 게이트: { content_id, at } — 수정 내용 메시지 응답 대기
 const preframeGates = {}; // channel → resolve fn — pre-frame 방향 확인 게이트(runDebate가 사용자 확인 전까지 대기)
+const pausedDebate = {}; // channel → { idea, repo, at } — 한도로 중단된 토론 (이어서/limitedResume 재개)
 const legalReviewedAt = {}; // repo → ts (법무·규제 검토 레포별 쿨다운 — 이어서/피드백 반복마다 재실행 방지)
 // 감사 C-16: 쿨다운 영속 — 봇이 자주 재배포되는데 메모리 전용이면 매 재시작마다 리셋돼 법무 재검토·중복 경보가 반복됨. (boot에서만 호출 — bizAlertSeen const 초기화 이후)
 const COOLDOWN_FILE = process.env.COOLDOWN_FILE || '/data/cooldowns.json';
@@ -3378,6 +3385,17 @@ async function handle(event, client) {
     }
     // 재개 — 중단했던 작업을 새로 만들지 말고 그대로 이어감
     const resumeRe = raw => /^(이어서|이어가|이어|계속(해|하자|진행)?|마저|아까\s*거|이전\s*거)/.test(raw) || /^다시(\s*(해|해줘|진행|시작|시켜|돌려|돌려줘))?\s*$/.test(raw) || /(이전에|전에|아까)\s*하던\s*거|하던\s*거\s*(그대로|다시|이어)/.test(raw);
+    // 한도 중단 토론 재개 — 6시간 이내 pausedDebate 있으면 이어서 토론 다시 시작
+    if (!activeWork[channel] && pausedDebate[channel] && resumeRe(raw)) {
+      const pd = pausedDebate[channel];
+      if (Date.now() - (pd.at || 0) > 6 * 3600000) { delete pausedDebate[channel]; delete limitedResume[channel]; }
+      else {
+        delete pausedDebate[channel]; delete limitedResume[channel];
+        await postAs(client, channel, thread_ts, LEAD, `${mention(channel)}오케이, 아까 멈췄던 토론("${(pd.idea || '').slice(0, 40)}") 다시 이어갈게.`);
+        runDebate(client, channel, thread_ts, pd.idea, pd.repo || undefined);
+        return;
+      }
+    }
     // 중단작업 재개 — 단 6시간 지난 오래된 것은 자동 재개 안 함(stale 컨텍스트가 무관한 옛 작업을 잡는 것 방지)
     if (!activeWork[channel] && pausedWork[channel] && resumeRe(raw)) {
       const pw = pausedWork[channel];
@@ -4745,6 +4763,7 @@ async function postButtons(channel, thread_ts, buttons) {
   // threads-bot 서비스 등록 (헬스 모니터링 대상 — 다른 서비스와 동일 패턴)
   if (!services['nameofkk/threads-bot']) { registerService('nameofkk/threads-bot', THBOT_URL, null); if (services['nameofkk/threads-bot']) { services['nameofkk/threads-bot'].healthUrl = `${THBOT_URL}/health`; persistServices(); } }
   setInterval(persistMemory, 15000);
+  setInterval(persistSchedules, 30000); // 스케줄 주기 저장 — SIGTERM 시 볼륨 언마운트 경쟁으로 마지막 save 실패해도 30초 이내 최신본 보존
   setInterval(persistPendingDispatch, 8000); // 대기 제안 주기 플러시(재배포 생존)
   setInterval(() => { fetchThreadsStatus().catch(() => {}); }, 120000); // threads-bot 헬스체크 2분마다 (상태 변화 감지 → 알림)
   setTimeout(() => { fetchThreadsStatus().catch(() => {}); }, 5000); // 부팅 5초 후 첫 체크
@@ -4773,10 +4792,17 @@ async function postButtons(channel, thread_ts, buttons) {
       const backoffMs = Math.min(baseMs * Math.pow(2, Math.max(0, lr.attempts - 1)), 120 * 60 * 1000);
       if (Date.now() - (lr.lastTry || lr.at) < backoffMs) continue;
       if (lr.attempts >= 8) { delete limitedResume[ch]; postAs(botClient, ch, undefined, LEAD, '한도 자동 재개를 여러 번 시도했는데 계속 막혀. "이어서"로 수동 재시도해줘.').catch(() => {}); continue; }
-      lr.attempts++; lr.lastTry = Date.now(); const ctx = lr.ctx;
-      postAs(botClient, ch, undefined, LEAD, `한도 리셋된 것 같아 — 멈췄던 작업 자동으로 이어갈게 (재개 ${lr.attempts}회차).`).catch(() => {});
-      delete pausedWork[ch];
-      launchWork(botClient, ch, undefined, ctx.repo, ctx.task, false, ctx.forcePR, ctx.projName, ctx.recoverAttempt || 0, ctx.wipBranch); // 기존 레포에 이어서(중단지점부터, 타임아웃 WIP 브랜치도 재개)
+      lr.attempts++; lr.lastTry = Date.now();
+      postAs(botClient, ch, undefined, LEAD, `한도 리셋된 것 같아 — 멈췄던 ${lr.debateIdea ? '토론' : '작업'} 자동으로 이어갈게 (재개 ${lr.attempts}회차).`).catch(() => {});
+      if (lr.debateIdea) {
+        // 토론 자동 재개
+        delete pausedDebate[ch]; delete limitedResume[ch];
+        runDebate(botClient, ch, undefined, lr.debateIdea, lr.debateRepo || undefined);
+      } else {
+        const ctx = lr.ctx;
+        delete pausedWork[ch];
+        launchWork(botClient, ch, undefined, ctx.repo, ctx.task, false, ctx.forcePR, ctx.projName, ctx.recoverAttempt || 0, ctx.wipBranch); // 기존 레포에 이어서(중단지점부터, 타임아웃 WIP 브랜치도 재개)
+      }
     }
     const n = kstNow();
     for (const s of schedules) {
