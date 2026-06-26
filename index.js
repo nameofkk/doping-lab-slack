@@ -4599,6 +4599,8 @@ app.action(/^threads_/, async ({ ack, body, action }) => {
     const aid = action.action_id;
     const lbl = aid === 'threads_approve' ? '승인' : aid === 'threads_reject' ? '거부' : '수정요청';
     const icon = aid === 'threads_approve' ? '✅' : aid === 'threads_reject' ? '❌' : '✏️';
+    // 수정요청 시작 즉시 기존 pendingThreadsEdit 클리어 (레이스 컨디션 방지: 이전 content_id 소비 차단)
+    if (aid === 'threads_edit' && channel) delete pendingThreadsEdit[channel];
     // 먼저 threads-bot에 포워딩해서 성공 확인 후 메시지 업데이트
     let forwarded = false;
     let fwdData = null;
