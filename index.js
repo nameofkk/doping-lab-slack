@@ -1634,7 +1634,8 @@ function addFact(key, text, source, ev) {
   const conf = factConf(source);
   if (dup >= 0) { arr[dup] = { text: t, at: Date.now(), source: source || arr[dup].source, conf: Math.min(0.98, Math.max(conf, arr[dup].conf || 0.7) + 0.05), ev: ev || arr[dup].ev }; persistFacts(); return; } // 코로보레이션 → 최신·신뢰도↑
   arr.push({ text: t, at: Date.now(), source: source || 'work', conf, ev: ev || null });
-  if (arr.length > 40) facts[key] = arr.slice(-40); persistFacts();
+  if (arr.length > 40 && source !== 'archive') { compressOldFacts(key, arr.slice(0, arr.length - 38)).catch(() => {}); facts[key] = arr.slice(-38); } // 4-C: 삭제 전 핵심 압축 보존
+  persistFacts();
 }
 function recallFacts(key, taskText) {
   const now = Date.now(); const arr = (facts[key] || []).filter(f => now - (f.at || 0) < FACT_TTL_MS); // I6: 만료 사실 제외
@@ -1660,8 +1661,34 @@ async function extractLesson(repo, contextText) { // 실패 맥락에서 "다음
   try {
     const r = await runClaude(`다음은 방금 작업이 막히거나 심사에서 미충족된 상황이야. 여기서 "다음에 같은 실수를 안 하려면 기억할 교훈" 딱 1줄만 뽑아(없으면 빈 출력). 일회성·뻔한 말 빼고, 이 레포에서 또 걸릴 구체적인 함정만. 30~60자, 마크다운·번호 없이.\n\n${String(contextText || '').slice(0, 2000)}`, MODEL.FAST);
     const line = (r.text || '').split('\n').map(s => s.replace(/^[-*\d.\s]+/, '').trim()).filter(Boolean)[0];
-    if (line && line.length >= 8) addLesson(repo, line);
+    if (line && line.length >= 8) { addLesson(repo, line); extractAntiSkill(repo, contextText).catch(() => {}); } // 4-B: 실패에서 anti-skill 병렬 추출
   } catch {}
+}
+// 4-B: 실패 맥락에서 "절대 하지 말아야 할 방식" anti-skill 추출 (Voyager 역패턴)
+async function extractAntiSkill(key, contextText) {
+  if (!key) return;
+  try {
+    const r = await runClaude(`다음은 작업이 실패했거나 사용자가 수정을 요청한 상황이야. "다음에 이 방식을 쓰면 안 된다"는 금지 패턴을 0~1개만 뽑아. 형식(JSON 배열만): [{"name":"금지패턴 이름","when":"어떤 상황에서","recipe":"왜 안 되고 대신 뭘 해야 하는지 1~2문장"}]. 없으면 [].\n\n${String(contextText || '').slice(0, 2000)}`, MODEL.FAST);
+    const m = (r.text || '').match(/\[[\s\S]*\]/); const arr = m ? JSON.parse(m[0]) : [];
+    const srcId = skillHash(String(contextText || '').slice(0, 200));
+    for (const sk of (Array.isArray(arr) ? arr : []).slice(0, 1)) {
+      if (!sk || !sk.name || !sk.recipe) continue;
+      const antiName = '[금지] ' + String(sk.name).slice(0, 50);
+      const arr2 = (skills[key] = skills[key] || []);
+      if (!arr2.find(x => x.name === antiName)) {
+        arr2.push({ name: antiName, when: String(sk.when || '').slice(0, 120), recipe: String(sk.recipe).slice(0, 400), tier: 'anti', corrob: 1, srcs: srcId ? [srcId] : [], uses: 0, trials: { pass: 0, fail: 0 }, at: Date.now() });
+        if (arr2.length > 40) skills[key] = arr2.slice(-40); persistSkills();
+      }
+    }
+  } catch {}
+}
+// 4-B: anti-skill 회상 — 현재 작업과 관련된 금지 패턴 경고
+function recallAntiSkills(key, taskText) {
+  const arr = (skills[key] || []).filter(s => s.tier === 'anti'); if (!arr.length) return '';
+  const words = String(taskText || '').toLowerCase().match(/[a-z가-힣0-9]{2,}/g) || [];
+  const rel = arr.map(s => ({ s, sc: words.filter(w => (s.name + ' ' + s.when + ' ' + s.recipe).toLowerCase().includes(w)).length })).filter(x => x.sc > 0).sort((a, b) => b.sc - a.sc).slice(0, 2).map(x => x.s);
+  if (!rel.length) return '';
+  return '\n\n[⛔ 이전에 실패한 방식 — 절대 이렇게 하지 마라]\n' + rel.map(s => `· ${s.name}: ${s.recipe}`).join('\n');
 }
 async function extractFacts(key, contextText, source) { // 작업/대화(신뢰소스: 봇이 코드/실행으로 확인한 결과)에서 durable 사실 0~3개 뽑아 저장
   if (!key) return;
@@ -1716,7 +1743,7 @@ function bumpSkills(key, taskText, ok) {
   if (changed) persistSkills();
 }
 // 사업 추론(부서검토·경영회의·그로스·브리핑·선제)용 학습 주입 — 서비스별 스킬+사실 + 전역. 닫힌 루프의 "학습→다음 제안 반영"을 사업 쪽도 닫음.
-function recallForBiz(repos, taskText) { const rs = (Array.isArray(repos) ? repos : [repos]).filter(Boolean); let out = ''; for (const rp of rs) out += recallSkills(rp, taskText) + recallFacts(rp, taskText); out += recallSkills('global', taskText) + ontologyQuery(taskText, rs[0]); return out; } // 그래프 슬라이스도 함께 회상(GraphRAG-lite)
+function recallForBiz(repos, taskText) { const rs = (Array.isArray(repos) ? repos : [repos]).filter(Boolean); let out = ''; for (const rp of rs) out += recallSkills(rp, taskText) + recallAntiSkills(rp, taskText) + recallFacts(rp, taskText); out += recallSkills('global', taskText) + recallAntiSkills('global', taskText) + ontologyQuery(taskText, rs[0]); return out; } // 그래프 슬라이스 + anti-skill 금지패턴도 함께 회상
 async function extractSkill(key, contextText) { // 성공한 작업에서 재사용 레시피 0~2개 추출
   if (!key) return;
   try {
@@ -1917,6 +1944,22 @@ function findCausalAntecedents(repo) {
       const svc = Object.values(services).find(s => s.repo === a);
       return svc && (svc.history || []).slice(-3).some(h => !h.up);
     });
+}
+// 2-B: 개인화 베이스라인 계산 (history 링버퍼 기반 p50/p95)
+function computeBaseline(s) {
+  const ms = (s.history || []).filter(h => h.up && h.ms != null).map(h => h.ms).sort((a, b) => a - b);
+  if (ms.length < 5) return null;
+  return { p50_ms: ms[Math.floor(ms.length * 0.5)], p95_ms: ms[Math.min(ms.length - 1, Math.floor(ms.length * 0.95))], computed_at: Date.now(), n: ms.length };
+}
+// 4-C: 오래된 facts를 Claude로 1줄 압축 → source:'archive'로 재저장 (핵심 인사이트 보존)
+async function compressOldFacts(key, oldFacts) {
+  if (!oldFacts || !oldFacts.length) return;
+  try {
+    const combined = oldFacts.map(f => f.text).join(' | ');
+    const r = await runClaude(`다음 여러 사실들을 핵심 인사이트 1줄로 압축해(15~50자, 구체적). 영속적 패턴·결정만 남기고 나머지는 버려.\n\n${combined.slice(0, 1500)}`, MODEL.FAST);
+    const compressed = (r.text || '').split('\n')[0].replace(/^[-*\d.\s]+/, '').trim().slice(0, 200);
+    if (compressed && compressed.length >= 10) addFact(key, compressed, 'archive');
+  } catch {}
 }
 // ── Phase A1: 사업 메트릭 수집 — 서비스 자체 stats 엔드포인트(키 0 또는 👤 토큰)에서 실수치 curl→JSON→일별 history. 추정 아님, 실데이터만. ──
 const BIZ_FILE = process.env.BIZ_FILE || '/data/biz.json';
@@ -2406,6 +2449,17 @@ async function diagnoseDown(client, channel, s) {
     await postAs(client, channel, undefined, sre,
       `🔍 ${repo} 원인 분석 (${detail || cat})\n수정 방향: ${fixTip}${repeatNote}${lessonNote}${causalNote}${pastNote}`
     ).catch(() => {});
+    // 5-A: 반복 3회 이상 + 검증된 active 수정 스킬 있으면 자동 수정 게이트 발의
+    if (repeatCount >= 3 && s.repo && channel) {
+      try {
+        const catWords = cat.replace(/_/g, ' ').split(' ');
+        const fixSk = (skills[s.repo] || skills['svc:' + s.repo] || []).filter(sk => sk.tier === 'active' && catWords.some(w => w.length > 2 && ((sk.when || '') + ' ' + (sk.name || '') + ' ' + (sk.recipe || '')).toLowerCase().includes(w)));
+        if (fixSk.length) {
+          const sk = fixSk[0];
+          await proposeOrAuto(client, channel, s.repo, [{ who: '자율수정', repo: s.repo, task: `[${repo.split('/').pop()}] ${sk.name}: ${sk.recipe}`, kind: 'build', source: 'autofix' }], `🔧 검증된 수정 레시피 있음 (${cat} ${repeatCount}회 반복) — 승인하면 적용`, { forceGate: true }).catch(() => {});
+        }
+      } catch (_) {}
+    }
   } catch (e) { try { log('error', 'diagnose-down', { repo, e: String(e).slice(0, 120) }); } catch (_) {} }
 }
 async function awayDigest(client, channel) { // 오너가 오래 비웠다 돌아오면 "그동안+막힌 것" 요약
@@ -2590,8 +2644,10 @@ const OPS_DEFS = { // id → 표시정보 + 기본값(주기/시각/요일)
   board: { label: '전략 경영회의', desc: '부서 검토 수렴→CEO 우선순위→반론→최종결정→승인. 회사 이사회', defCad: 'weekly', defHour: 10, defDow: 5 },
   oppscout: { label: '기회 스카우트', desc: '인터넷 트렌드·핫이슈 모니터링→수익 가능한 AI 에이전트 사업화 기회 발굴(근거 기반 채점)→승인 게이트', defCad: 'weekly', defHour: 10, defDow: 4 },
   rhythm: { label: '운영 리듬 점검', desc: '스케줄을 실제 활동·지연 과제·경보 빈도에 맞게 조정 제안(승인하면 적용)', defCad: 'monthly', defHour: 10 },
+  nightly_reflection: { label: '야간 반성', desc: '오늘 인시던트 패턴 분석 → 내일 리스크 예측 + 선제조치 교훈 저장 + 사람 필요 항목 blocker 등록 (Reflexion 패턴)', defCad: 'daily', defHour: 3 },
+  weekly_report: { label: '주간 자율 리포트', desc: '반복 패턴 TOP3 · 봇 개선 제안 · blocker 현황 자동 요약 — 매주 월요일 오전 9시', defCad: 'weekly', defHour: 9, defDow: 1 },
 };
-const OPS_ORDER = ['health', 'opsbrief', 'bizbrief', 'improve', 'growth', 'selfimprove', 'coverage', 'behavior', 'oppscout', 'board', 'rhythm'];
+const OPS_ORDER = ['health', 'opsbrief', 'bizbrief', 'improve', 'growth', 'selfimprove', 'coverage', 'behavior', 'oppscout', 'board', 'rhythm', 'nightly_reflection', 'weekly_report'];
 // 감사 C-14: 함수 내부 쿨다운을 하드코딩(6일/18h) 대신 opsConfig.cadence에서 파생 — 홈에서 주기 바꾸면 쿨다운도 따라감(전엔 하드코딩이 cadence를 가려 "설정 바꿔도 안 바뀜"). 스팸 방어는 유지.
 function opsMinGap(id) { const c = opsConfig[id] && opsConfig[id].cadence; return c === 'daily' ? 18 * 3600000 : c === 'monthly' ? 25 * 86400000 : 6 * 86400000; }
 let opsConfig = {};
@@ -2629,7 +2685,48 @@ async function runOpsTask(id, ch) {
     if (id === 'oppscout') return void runOppScout(botClient, ch, false).catch(() => {});
     if (id === 'board') { if (!activeWork[ch]) { activeWork[ch] = { task: '경영회의', started: Date.now() }; runBoardMeeting(botClient, ch, false).catch(() => {}).finally(() => { activeWork[ch] = null; }); } return; }
     if (id === 'rhythm') return void runRhythmProposal(botClient, ch, false).catch(() => {});
+    if (id === 'nightly_reflection') return void runNightlyReflection(botClient, ch, false).catch(() => {});
+    if (id === 'weekly_report') return void runWeeklyReport(botClient, ch, false).catch(() => {});
   } catch (e) { try { log('error', 'ops-task-err', { id, e: String(e).slice(0, 120) }); } catch (_) {} }
+}
+// 4-A: 야간 반성 (Reflexion 패턴) — 오늘 인시던트 → 내일 리스크 예측 → 교훈 저장 + blocker
+let nightlyReflectAt = 0;
+async function runNightlyReflection(client, channel, manual = false) {
+  if (!manual && Date.now() - nightlyReflectAt < opsMinGap('nightly_reflection')) return;
+  nightlyReflectAt = Date.now();
+  try {
+    const today = Date.now() - 86400000;
+    const incidents = Object.values(services).filter(s => s.causeHistory && s.causeHistory.length).map(s => {
+      const todays = (s.causeHistory || []).filter(c => c.at > today);
+      return todays.length ? `${s.repo}: ${todays.map(c => c.cat + (c.detail ? '(' + c.detail + ')' : '')).join(', ')}` : null;
+    }).filter(Boolean);
+    if (!incidents.length && !manual) return; // 오늘 이슈 없으면 skip(조용한 날 불필요한 Claude 호출 방지)
+    const incText = incidents.length ? incidents.join('\n') : '오늘 인시던트 없음';
+    const r = await runClaude(`오늘 서비스 이슈:\n${incText}\n\n위 패턴에서 내일 예상 리스크와 선제조치를 분석해. 자동화 가능한 것과 사람이 해야 할 것을 구분해. 3~6줄 반말로.`, MODEL.LEAD);
+    const text = deMd((r.text || '').trim()); if (!text) return;
+    await extractFacts('global', text, 'reflection'); // 통찰을 global facts로 저장
+    if (/사람|직접|승인|👤|확인 필요/.test(text)) try { addBlocker(null, `야간 반성 사람 필요: ${text.slice(0, 100)}`, 'decision'); } catch (_) {}
+    if (channel) await postAs(client, channel, undefined, LEAD, `🌙 야간 반성\n${text}`).catch(() => {});
+    else if (OWNER_USER_ID && botClient) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`🌙 야간 반성\n${text}`) }).catch(() => {});
+  } catch (e) { try { log('error', 'nightly-reflect-err', { e: String(e).slice(0, 120) }); } catch (_) {} }
+}
+// 5-B: 주간 자율 리포트 — 반복 패턴 TOP3 + 개선 제안 + blocker 현황
+let weeklyReportAt = 0;
+async function runWeeklyReport(client, channel, manual = false) {
+  if (!manual && Date.now() - weeklyReportAt < opsMinGap('weekly_report')) return;
+  weeklyReportAt = Date.now();
+  if (!channel) return;
+  try {
+    const week = Date.now() - 7 * 86400000;
+    const incidents = Object.values(services).flatMap(s => (s.causeHistory || []).filter(c => c.at > week).map(c => c.cat));
+    const catCount = {}; incidents.forEach(cat => { catCount[cat] = (catCount[cat] || 0) + 1; });
+    const top3 = Object.entries(catCount).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([cat, n]) => `${cat} ${n}회`).join(', ') || '없음';
+    const ob = openBlockers();
+    const blockerSummary = ob.length ? ob.slice(0, 5).map(b => `#${b.id} ${b.what.slice(0, 60)}`).join('\n') : '없음';
+    const r = await runClaude(`지난 주 반복 장애 패턴: ${top3}.\n미해결 blocker ${ob.length}건: ${blockerSummary}\n\n이번 주 봇 개선 제안 2~3개를 핵심만(반말, 각 1줄). 마지막에 사람 승인 필요한 blocker 요약.`, MODEL.LEAD);
+    const text = deMd((r.text || '').trim());
+    await postAs(client, channel, undefined, LEAD, `📊 주간 자율 리포트\n\n반복 패턴: ${top3}\n\n${text}\n\n${ob.length ? `⏳ blocker 큐 (${ob.length}건):\n${blockerSummary}` : '미해결 blocker 없음'}`).catch(() => {});
+  } catch (e) { try { log('error', 'weekly-report-err', { e: String(e).slice(0, 120) }); } catch (_) {} }
 }
 let boardAt = 0;
 async function runBoardMeeting(client, channel, manual = false) {
@@ -2786,6 +2883,8 @@ async function checkServices(client, channel, announce = true, onlyAlert = false
       try { log('warn', 'incident-recovered', { repo: s.repo, code: s.downCode, downMin: dur }); } catch (_) {}
       // 1-B: 복구 시 자동 교훈 추출 → facts(source:lesson)으로 저장, 다음 다운 시 diagnoseDown에 자동 주입
       try { const lastCause = (s.causeHistory || []).slice(-1)[0]; const incSummary = `다운원인:${lastCause ? lastCause.cat : (s.downCode || 'unknown')}, 지속:${dur}분, 최근원인이력:${JSON.stringify((s.causeHistory || []).slice(-3))}`; extractLesson('svc:' + s.repo, incSummary).catch(() => {}); } catch (_) {}
+      // 3-B: 동시간 이상 있었던 다른 서비스 → 인과관계 자동 온톨로지 등록
+      try { const downStart = s.downSince; if (downStart) { const coDown = Object.values(services).filter(sv => sv.repo !== s.repo && (sv.causeHistory || []).some(c => c.at >= downStart - 1800000 && c.at <= downStart + 1800000)); if (coDown.length) { for (const ant of coDown) ontAddRel(ant.repo, '일으킴', s.repo, 'incident', 0.6); persistOntology(); } } } catch (_) {}
       if (s.repo !== SELF_REPO) runPostmortem(s.repo, s.downCode, dur).catch(() => {}); // Wave4: 복구 후 재발방지 교훈+예방 마일스톤
       s.downSince = null; s.downCode = null; s.downVia = null; s.escalatedAt = 0; // D-17: 복구 시 재에스컬레이션 마크 리셋
     }
@@ -2811,6 +2910,8 @@ async function checkServices(client, channel, announce = true, onlyAlert = false
     const lineStr = `${degraded ? '🟡' : up ? '🟢' : '🔴'} ${s.repo} · ${s.url} (${code}${ms != null ? ', ' + ms + 'ms' : ', no response'}${size != null ? ', ' + (size > 1024 ? Math.round(size / 1024) + 'KB' : size + 'B') : ''})${sslTxt}${s.healthUrl ? (s.healthGating ? ' · 헬스EP⚡게이팅' : ' · 헬스EP') : ''}${tr ? ' ' + tr : ''}${issues.length ? '\n    주의: ' + issues.join(' / ') : ''}`;
     lines.push(lineStr); lineByRepo[s.repo] = lineStr;
   }
+  // 2-B: 개인화 베이스라인 갱신 (full check 또는 수동 헬스체크 때 — 매 daily health 자동실행 포함)
+  if (!onlyAlert) { for (const sv of list) { const bl = computeBaseline(sv); if (bl) sv.baseline = bl; } }
   persistServices();
   const down = list.filter(s => s.lastStatus === 'down');
   // onlyAlert(시간별 감시)면 새로 죽은 게 있을 때만 알림, 평소엔 조용
