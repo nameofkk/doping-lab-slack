@@ -3577,16 +3577,34 @@ async function checkServices(client, channel, announce = true, onlyAlert = false
   const down = list.filter(s => s.lastStatus === 'down');
   // onlyAlert(시간별 감시)면 새로 죽은 게 있을 때만 알림, 평소엔 조용
   if (onlyAlert) {
-    // 새로 다운 — 2연속 확인 후 알림(Railway 순간 재시작 등 1분 이내 오탐 제거)
+    // 새로 다운 — 2연속 확인 후 알림. 반복 다운(1시간 내 재발)은 경보 억제하고 요약만.
     for (const s of down.filter(s => (s.failStreak || 0) === 2)) {
       const tch = routed(s); if (!tch) continue;
+      const now = Date.now();
+      // 반복 다운 억제: 최근 1시간 내에 이미 경보를 보낸 적 있으면 조용히 진단만
+      const recentAlert = s.lastDownAlertAt && (now - s.lastDownAlertAt) < 3600000;
+      const recentCount = (s.causeHistory || []).filter(c => now - (c.at || 0) < 3600000).length;
+      if (recentAlert) {
+        // 반복 다운: 경보 대신 로그만. 매 5회마다 요약 1회 전송.
+        if (recentCount > 0 && recentCount % 5 === 0) {
+          await postAs(client, tch, undefined, sre, `⚠️ ${s.repo} 반복 장애 — 최근 1시간 내 ${recentCount}회 다운·복구 반복 중. 간헐적 인프라 문제(DB 디스크·워커·메모리) 점검 필요. 개별 경보는 억제 중.`);
+        }
+        diagnoseDown(botClient || client, tch, s).catch(() => {}); // 진단은 계속 수행
+        continue;
+      }
+      s.lastDownAlertAt = now;
       const h = recallFacts('svc:' + s.repo, '인시던트 다운 복구'); const past = h ? `\n   ↳ 과거 이력:${h.replace(/\n+/g, ' ').slice(0, 300)}` : '';
-      const dr = await postAlert(client, tch, sre, `🔴 방금 다운 감지: ${s.repo}(${s.downVia === 'health' ? '헬스EP ' : ''}HTTP ${s.downCode || '?'}). ${s.downVia === 'health' ? `루트는 200인데 헬스 엔드포인트가 ${s.healthFailStreak || HEALTH_GATE_STREAK}연속 죽었어 — 앱·DB 레벨 문제 의심.` : '라이브가 죽었어,'} 바로 확인할게.${past}`); // 전송 실패 시 OWNER 폴백 내장. health발이면 헬스EP 실패코드·정황 표시
-      if (dr && OWNER_USER_ID && botClient && !settings.monitorChannel) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`🔴 [다운] ${s.repo}`) }).catch(() => {}); // 채널 성공 시에만 추가 DM(모니터링 채널 지정 시 생략)
-      diagnoseDown(botClient || client, tch, s).catch(() => {}); // A+C: /health 파싱 기반 즉각 원인분석 → Slack 보고 + causeHistory 저장
+      const dr = await postAlert(client, tch, sre, `🔴 방금 다운 감지: ${s.repo}(${s.downVia === 'health' ? '헬스EP ' : ''}HTTP ${s.downCode || '?'}). ${s.downVia === 'health' ? `루트는 200인데 헬스 엔드포인트가 ${s.healthFailStreak || HEALTH_GATE_STREAK}연속 죽었어 — 앱·DB 레벨 문제 의심.` : '라이브가 죽었어,'} 바로 확인할게.${past}`);
+      if (dr && OWNER_USER_ID && botClient && !settings.monitorChannel) botClient.chat.postMessage({ channel: OWNER_USER_ID, text: scrubOutput(`🔴 [다운] ${s.repo}`) }).catch(() => {});
+      diagnoseDown(botClient || client, tch, s).catch(() => {});
     }
-    // 새로 degraded(up이지만 이상) — 담당 채널로 1회
-    for (const s of list) { const has = (s.issues || []).length; const tch = routed(s); if (s.lastStatus !== 'down' && has && !s.degAlerted && tch) { s.degAlerted = true; await postAs(client, tch, undefined, sre, `🟡 ${s.repo} 이상 감지(다운은 아닌데): ${s.issues.join(' / ')}. 확인 필요.`); } if (!has) s.degAlerted = false; }
+    // 새로 degraded(up이지만 이상) — 담당 채널로 1회. 반복 다운 중이면 억제.
+    for (const s of list) {
+      const has = (s.issues || []).length; const tch = routed(s);
+      const recentDownAlert = s.lastDownAlertAt && (Date.now() - s.lastDownAlertAt) < 3600000;
+      if (s.lastStatus !== 'down' && has && !s.degAlerted && !recentDownAlert && tch) { s.degAlerted = true; await postAs(client, tch, undefined, sre, `🟡 ${s.repo} 이상 감지(다운은 아닌데): ${s.issues.join(' / ')}. 확인 필요.`); }
+      if (!has) s.degAlerted = false;
+    }
     // 지속 다운(2연속) → 자동 진단·픽스 제안 1회 (담당 채널에서, 프로드 픽스는 게이트)
     for (const s of list) {
       const tch = routed(s);
