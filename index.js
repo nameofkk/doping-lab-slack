@@ -5305,47 +5305,58 @@ function buildHomeBlocksNew() {
     B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `다음 실행: ${jt}` }] });
   }
   B.push({ type: 'divider' });
-  // 정기 업무(자동) — 주기·시각·요일·채널·켜기를 홈에서 직접 편집
-  B.push({ type: 'header', text: { type: 'plain_text', text: '정기 업무 (자동) — 주기·시각·채널 설정', emoji: true } });
-  const cadOpts = [selOpt('매일', 'daily'), selOpt('매주', 'weekly'), selOpt('매월', 'monthly')];
-  const dowOpts = DOW_KO.map((d, i) => selOpt(d + '요일', i));
-  const homeRepos = homeServiceRepos();
-  for (const id of OPS_ORDER) {
-    const o = opsConfig[id], def = OPS_DEFS[id]; if (!o) continue;
-    const chTxt = def.perService ? '서비스별 (아래에서 각각 지정)' : (o.channel ? `<#${o.channel}>` : (settings.hqChannel ? `<#${settings.hqChannel}>(기본)` : '기본 채널'));
-    B.push({ type: 'section', text: { type: 'mrkdwn', text: `*${def.label}*${o.enabled ? '' : '  _(꺼짐)_'}\n_${def.desc}_\n현재: ${opsWhen(o)} · ${chTxt}` } });
-    const els = [staticSel('opscfg_cad_' + id, cadOpts, o.cadence, '주기')];
-    if (o.cadence === 'weekly') els.push(staticSel('opscfg_day_' + id, dowOpts, o.dow, '요일'));
-    els.push(timeSel('opscfg_time_' + id, o.hour, o.minute));
-    if (!def.perService) els.push(chanSel('opscfg_ch_' + id, o.channel, '실행 채널'));
-    els.push(hbtn(o.enabled ? '끄기' : '켜기', 'opscfg_tog_' + id, { value: id, style: o.enabled ? 'danger' : 'primary' }));
-    B.push({ type: 'actions', elements: els.slice(0, 5) });
-    if (def.perService) { // 큰 틀(업무) 내에 서비스별 채널 분기 — 드롭다운 왼쪽 정렬(라벨 위, 셀렉트 아래)
-      homeRepos.forEach((rp) => { const cur = settings.workRoute[rp + ':' + id] || settings.repoChannel[rp]; const rpKey = rp.replace(/\//g, '-'); B.push({ type: 'section', text: { type: 'mrkdwn', text: `↳ *${rp.split('/').pop()}*${cur ? ` → <#${cur}>` : ''}` } }); B.push({ type: 'actions', elements: [chanSel('opscfg_psc_' + id + '_' + rpKey, cur, '채널 선택')] }); });
+  // 정기 업무(자동) — 토글로 접기/펼치기 (블록 수 절약)
+  const opsExpanded = !!settings.homeOpsExpanded;
+  const opsOnCount = OPS_ORDER.filter(id => opsConfig[id] && opsConfig[id].enabled).length;
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*정기 업무 (자동)* — ${opsOnCount}/${OPS_ORDER.length}개 가동 중` }, accessory: hbtn(opsExpanded ? '접기 ▲' : '펼치기 ▼', 'home_toggle_ops') });
+  if (opsExpanded) {
+    const cadOpts = [selOpt('매일', 'daily'), selOpt('매주', 'weekly'), selOpt('매월', 'monthly')];
+    const dowOpts = DOW_KO.map((d, i) => selOpt(d + '요일', i));
+    const homeRepos = homeServiceRepos();
+    for (const id of OPS_ORDER) {
+      const o = opsConfig[id], def = OPS_DEFS[id]; if (!o) continue;
+      const chTxt = def.perService ? '서비스별 (아래에서 각각 지정)' : (o.channel ? `<#${o.channel}>` : (settings.hqChannel ? `<#${settings.hqChannel}>(기본)` : '기본 채널'));
+      B.push({ type: 'section', text: { type: 'mrkdwn', text: `*${def.label}*${o.enabled ? '' : '  _(꺼짐)_'}\n_${def.desc}_\n현재: ${opsWhen(o)} · ${chTxt}` } });
+      const els = [staticSel('opscfg_cad_' + id, cadOpts, o.cadence, '주기')];
+      if (o.cadence === 'weekly') els.push(staticSel('opscfg_day_' + id, dowOpts, o.dow, '요일'));
+      els.push(timeSel('opscfg_time_' + id, o.hour, o.minute));
+      if (!def.perService) els.push(chanSel('opscfg_ch_' + id, o.channel, '실행 채널'));
+      els.push(hbtn(o.enabled ? '끄기' : '켜기', 'opscfg_tog_' + id, { value: id, style: o.enabled ? 'danger' : 'primary' }));
+      B.push({ type: 'actions', elements: els.slice(0, 5) });
+      if (def.perService) {
+        homeRepos.forEach((rp) => { const cur = settings.workRoute[rp + ':' + id] || settings.repoChannel[rp]; const rpKey = rp.replace(/\//g, '-'); B.push({ type: 'section', text: { type: 'mrkdwn', text: `↳ *${rp.split('/').pop()}*${cur ? ` → <#${cur}>` : ''}` } }); B.push({ type: 'actions', elements: [chanSel('opscfg_psc_' + id + '_' + rpKey, cur, '채널 선택')] }); });
+      }
     }
+    if (schedules.length) B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '내가 등록한 스케줄: ' + schedules.map(s => `#${s.id} ${homeSchedTime(s)} ${String(s.label || s.task || '').slice(0, 20)}`).join('  ·  ').slice(0, 1900) }] });
+  } else {
+    // 접힌 상태: 요약만 보여줌
+    const opsSummary = OPS_ORDER.map(id => { const o = opsConfig[id], d = OPS_DEFS[id]; if (!o || !d) return null; return `${o.enabled ? '✅' : '⬜'} ${d.label} (${opsWhen(o)})`; }).filter(Boolean).join('\n');
+    B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: opsSummary.slice(0, 2900) }] });
   }
-  if (schedules.length) B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '내가 등록한 스케줄: ' + schedules.map(s => `#${s.id} ${homeSchedTime(s)} ${String(s.label || s.task || '').slice(0, 20)}`).join('  ·  ').slice(0, 1900) }] });
   B.push({ type: 'divider' });
-  // 서비스 담당 채널 — 이 서비스의 헬스·다운 경보·진단·브리핑·정기업무(채널 미지정 시)가 모두 여기로
-  B.push({ type: 'header', text: { type: 'plain_text', text: '서비스 담당 채널', emoji: true } });
-  B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '여기서 정한 채널로 그 서비스의 헬스체크·다운 경보·자동 진단·사업브리핑이 가(한 채널에 남 서비스 안 섞임). 채널 안 정하면 전사 채널로 폴백. 봇을 먼저 그 채널에 초대해야 글이 가.' }] });
-  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*전사(경영)* — 경영회의·운영 브리핑 등 회사 전체 업무${settings.hqChannel ? '' : '  _(미지정 → 서비스 채널로 폴백)_'}` }, accessory: chanSel('svcroute_hq_x', settings.hqChannel, '전사 채널') });
-  homeRepos.forEach((rp) => { const cur = settings.repoChannel[rp]; const rpKey = rp.replace(/\//g, '-'); B.push({ type: 'section', text: { type: 'mrkdwn', text: `*${rp.split('/').pop()}* — 헬스·경보·브리핑 채널${cur ? ` → <#${cur}>` : '  _(미지정)_'}` }, accessory: chanSel('svcroute_' + rpKey + '_default', cur, '담당 채널') }); });
-  B.push({ type: 'divider' });
-  // 부서 검토 채널 (요청 시·서비스별) — 마케팅/고객/재무/시장 검토를 서비스마다 어느 채널로
-  B.push({ type: 'header', text: { type: 'plain_text', text: '부서 검토 채널 (서비스별)', emoji: true } });
-  B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '홈의 부서 검토 버튼·자동 실행 시 각 서비스 검토가 여기 채널로 가 (드롭다운 순서: 마케팅 · 고객 · 재무 · 시장)' }] });
-  homeRepos.forEach((rp) => {
-    const nm = rp.split('/').pop(); const rpKey = rp.replace(/\//g, '-');
-    const cs = ['marketing', 'cx', 'finance', 'market'].map(fn => settings.workRoute[rp + ':' + fn]).filter(Boolean).length;
-    B.push({ type: 'section', text: { type: 'mrkdwn', text: `*${nm}*${cs ? ` (${cs}/4 지정)` : ''}` } });
-    B.push({ type: 'actions', elements: [
-      chanSel('svcroute_' + rpKey + '_marketing', settings.workRoute[rp + ':marketing'], '마케팅'),
-      chanSel('svcroute_' + rpKey + '_cx', settings.workRoute[rp + ':cx'], '고객'),
-      chanSel('svcroute_' + rpKey + '_finance', settings.workRoute[rp + ':finance'], '재무'),
-      chanSel('svcroute_' + rpKey + '_market', settings.workRoute[rp + ':market'], '시장'),
-    ] });
-  });
+  // 서비스 담당 채널 + 부서 검토 채널 — 토글로 접기/펼치기
+  const chExpanded = !!settings.homeChExpanded;
+  const homeReposForCh = homeServiceRepos();
+  const chSetCount = homeReposForCh.filter(rp => settings.repoChannel[rp]).length;
+  B.push({ type: 'section', text: { type: 'mrkdwn', text: `*채널 라우팅 설정* — 서비스 ${chSetCount}/${homeReposForCh.length}개 지정${settings.hqChannel ? ` · 전사 <#${settings.hqChannel}>` : ''}` }, accessory: hbtn(chExpanded ? '접기 ▲' : '펼치기 ▼', 'home_toggle_ch') });
+  if (chExpanded) {
+    B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '서비스별 헬스·경보·브리핑 채널 + 부서 검토 채널 설정. 봇을 먼저 채널에 초대해야 글이 감.' }] });
+    B.push({ type: 'section', text: { type: 'mrkdwn', text: `*전사(경영)* — 경영회의·운영 브리핑${settings.hqChannel ? '' : '  _(미지정)_'}` }, accessory: chanSel('svcroute_hq_x', settings.hqChannel, '전사 채널') });
+    homeReposForCh.forEach((rp) => { const cur = settings.repoChannel[rp]; const rpKey = rp.replace(/\//g, '-'); B.push({ type: 'section', text: { type: 'mrkdwn', text: `*${rp.split('/').pop()}* — 헬스·경보·브리핑${cur ? ` → <#${cur}>` : '  _(미지정)_'}` }, accessory: chanSel('svcroute_' + rpKey + '_default', cur, '담당 채널') }); });
+    B.push({ type: 'divider' });
+    B.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '*부서 검토 채널* — 마케팅·고객·재무·시장 검토가 이 채널로 감' }] });
+    homeReposForCh.forEach((rp) => {
+      const nm = rp.split('/').pop(); const rpKey = rp.replace(/\//g, '-');
+      const cs = ['marketing', 'cx', 'finance', 'market'].map(fn => settings.workRoute[rp + ':' + fn]).filter(Boolean).length;
+      B.push({ type: 'section', text: { type: 'mrkdwn', text: `*${nm}*${cs ? ` (${cs}/4 지정)` : ''}` } });
+      B.push({ type: 'actions', elements: [
+        chanSel('svcroute_' + rpKey + '_marketing', settings.workRoute[rp + ':marketing'], '마케팅'),
+        chanSel('svcroute_' + rpKey + '_cx', settings.workRoute[rp + ':cx'], '고객'),
+        chanSel('svcroute_' + rpKey + '_finance', settings.workRoute[rp + ':finance'], '재무'),
+        chanSel('svcroute_' + rpKey + '_market', settings.workRoute[rp + ':market'], '시장'),
+      ] });
+    });
+  }
   B.push({ type: 'divider' });
   // 라이브 서비스 + 운영 메트릭 (잘리면 안 되니 당신 차례/로드맵보다 위에)
   const sLine = s => { const last = (s.history || [])[s.history.length - 1]; const ms = last && last.ms != null ? `${last.ms}ms` : '—'; const issues = (s.issues || []).length; const icon = s.lastStatus === 'down' ? '🔴' : issues ? '🟡' : '🟢'; const extras = [typeof s.sslDays === 'number' ? `SSL ${s.sslDays}일` : null, s.healthUrl ? (s.healthGating ? '헬스EP⚡' : '헬스EP✓') : '헬스EP✗'].filter(Boolean).join(' · '); return `${icon} ${s.repo.split('/').pop()} (${ms})${extras ? ' · ' + extras : ''}${issues ? '\n   주의: ' + s.issues.join(' / ') : ''}`; };
@@ -5403,6 +5414,8 @@ app.action(/^(home_|opscfg_|svcroute_)/, async ({ ack, body, action, client }) =
     if (aid === 'home_sentinel_ch') { settings.sentinel = settings.sentinel || { enabled: true }; settings.sentinel.channel = action.selected_conversation || null; settings.monitorChannel = action.selected_conversation || null; persistSettings(); await publishHome(client, userId); return; } // 다운+선제 통합 모니터링 채널
     if (aid === 'home_deptrun_ch') { settings.deptRunChannel = action.selected_conversation || null; persistSettings(); await publishHome(client, userId); return; }
     if (aid === 'home_sentinel_toggle') { const on = !settings.sentinel || settings.sentinel.enabled !== false; settings.sentinel = { ...(settings.sentinel || {}), enabled: !on }; persistSettings(); await publishHome(client, userId); return; }
+    if (aid === 'home_toggle_ops') { settings.homeOpsExpanded = !settings.homeOpsExpanded; persistSettings(); await publishHome(client, userId); return; }
+    if (aid === 'home_toggle_ch') { settings.homeChExpanded = !settings.homeChExpanded; persistSettings(); await publishHome(client, userId); return; }
     if (aid === 'home_sentinel_run') { const ch = homeTargetChannel(userId); try { await client.chat.postMessage({ channel: userId, text: `선제 점검 돌렸어 — 이상 있으면 ${ch === userId ? '여기' : '<#' + ch + '>'}나 해당 서비스 채널로 경보가 가.` }); } catch (_) {} runBizSentinel(app.client, ch, true).catch(() => {}); setTimeout(() => publishHome(client, userId).catch(() => {}), 1500); return; }
     let m;
     // D5: 정기 업무 설정 변경(주기/요일/시각/채널/켜기)
@@ -5810,7 +5823,13 @@ async function postButtons(channel, thread_ts, buttons) {
       const defCh = settings.hqChannel || settings.monitorChannel || [...new Set(svcList().filter(s => s.url && s.channel).map(s => s.channel))][0] || null;
       // P4: 한도 압박 시 우선순위 — 한도걸림 잦거나 브레이커 열린 상태면 비핵심 정기업무(브리핑·스카우트·제안 등 토큰 많이 먹는 것)는 미룬다. 치명적인 헬스체크만 유지(다운진단은 checkServices가 별도로 돎). lastRunDay 안 박아서 한도 풀리면 따라잡음.
       const limitPressure = (usageStat.limitedHits || 0) >= 8 || Date.now() < claudeBreaker.openUntil;
-      for (const id of OPS_ORDER) {
+      // weekly/monthly를 daily보다 우선 (놓치면 다음 주/달까지 못 돌아서)
+      const opsPriority = [...OPS_ORDER].sort((a, b) => {
+        const ca = opsConfig[a] && opsConfig[a].cadence, cb = opsConfig[b] && opsConfig[b].cadence;
+        const rank = c => c === 'monthly' ? 0 : c === 'weekly' ? 1 : 2;
+        return rank(ca) - rank(cb);
+      });
+      for (const id of opsPriority) {
         const o = opsConfig[id]; if (!o || !o.enabled || o.lastRunDay === n.day) continue;
         if (limitPressure && id !== 'health') continue; // 한도 압박 → 헬스만, 나머지 정기업무는 양보(다음 틱 재시도)
         const due = o.cadence === 'weekly' ? (n.dow === (o.dow != null ? o.dow : 1)) : o.cadence === 'monthly' ? (n.dom === (o.dom || 1)) : true;
