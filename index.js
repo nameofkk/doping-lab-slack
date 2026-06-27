@@ -2060,17 +2060,19 @@ function seedBizDefaults() {
   const wwpRootUrl = 'https://api.wewantpeace.live';
   const wwpHealthUrl = 'https://api.wewantpeace.live/health';
   if (services[wwp]) {
-    if (/\/public\/stats|\/health/.test(services[wwp].url || '')) {
-      services[wwp].url = wwpRootUrl; // 루트로 교정 — 빠름(0.5s), 다운 판정 기준
-      if (!services[wwp].healthUrl) services[wwp].healthUrl = wwpHealthUrl; // DB/Redis 상세는 healthUrl로
-      services[wwp].lastStatus = null; services[wwp].failStreak = 0; services[wwp].downSince = null; // 거짓 다운 카운터 리셋
-      persistServices();
+    // 무조건 루트로 강제 — 이전 마이그레이션이 조건부여서 잘못된 URL이 남을 수 있었음
+    if (services[wwp].url !== wwpRootUrl) {
+      services[wwp].url = wwpRootUrl;
+      services[wwp].lastStatus = null; services[wwp].failStreak = 0; services[wwp].downSince = null;
     }
+    if (!services[wwp].healthUrl) services[wwp].healthUrl = wwpHealthUrl;
+    persistServices();
   }
-  // bizData sources에 health 항목 추가(없으면) — reconcileServices가 신규 등록 시 /health를 사용하도록
-  if (bizData[wwp] && !bizData[wwp].sources.find(s => s.name === 'health')) {
-    bizData[wwp].sources.unshift({ name: 'health', url: wwpHealthUrl });
-    persistBiz();
+  // bizData sources에 root 항목 추가(없으면) — reconcileServices가 신규 등록 시 루트(빠른) URL 사용하도록
+  if (bizData[wwp]) {
+    const hasRoot = bizData[wwp].sources.find(s => s.name === 'root');
+    if (!hasRoot) { bizData[wwp].sources.unshift({ name: 'root', url: wwpRootUrl }); persistBiz(); }
+    if (!bizData[wwp].sources.find(s => s.name === 'health')) { bizData[wwp].sources.push({ name: 'health', url: wwpHealthUrl }); persistBiz(); }
   }
   // 봇 전용 admin 출입구(BOT_STATS_KEY env 있으면 자동 연결) — 회원수·DAU·구독자·매출. 키는 env에만, 코드/깃엔 없음.
   if (process.env.BOT_STATS_KEY) {
