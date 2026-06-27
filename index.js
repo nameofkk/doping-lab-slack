@@ -2750,8 +2750,8 @@ const OPS_ORDER = ['health', 'opsbrief', 'bizbrief', 'improve', 'growth', 'selfi
 function opsMinGap(id) { const c = opsConfig[id] && opsConfig[id].cadence; return c === 'daily' ? 18 * 3600000 : c === 'monthly' ? 25 * 86400000 : 6 * 86400000; }
 let opsConfig = {};
 function seedOpsConfig() { for (const id of OPS_ORDER) { const d = OPS_DEFS[id]; if (!opsConfig[id]) opsConfig[id] = { cadence: d.defCad, hour: d.defHour, minute: d.defMinute || 0, dow: d.defDow != null ? d.defDow : 1, dom: 1, channel: null, enabled: true, lastRunDay: null }; } }
-function loadOpsConfig() { try { if (fs.existsSync(OPS_CONFIG_FILE)) opsConfig = JSON.parse(fs.readFileSync(OPS_CONFIG_FILE, 'utf8')) || {}; } catch { opsConfig = {}; } seedOpsConfig(); }
-function persistOpsConfig() { try { fs.writeFileSync(OPS_CONFIG_FILE, JSON.stringify(opsConfig)); } catch (_) {} }
+function loadOpsConfig() { opsConfig = loadJson(OPS_CONFIG_FILE, {}); seedOpsConfig(); }
+function persistOpsConfig() { saveJson(OPS_CONFIG_FILE, opsConfig); }
 // 업무 채널 라우팅 — 서비스×기능 단위 override(예: 스포노노 마케팅 → #스포노노-마케팅) > 서비스 기본(repoChannel) > fallback
 function channelForWork(repo, func, fallback) { try { return (settings.workRoute && settings.workRoute[repo + ':' + func]) || (settings.repoChannel && settings.repoChannel[repo]) || fallback || null; } catch { return fallback || null; } }
 const CADENCE_KO = { daily: '매일', weekly: '매주', monthly: '매월' };
@@ -5932,7 +5932,7 @@ async function postButtons(channel, thread_ts, buttons) {
     if (draining) return; draining = true;
     try { log('warn', 'shutdown', { sig, claudeRunning, active: Object.keys(activeWork).filter(c => activeWork[c]).length }); } catch (_) {}
     try { for (const ch of Object.keys(activeWork)) { const w = activeWork[ch]; if (w && w.jobId && jobs[w.jobId] && jobs[w.jobId].status === 'running') jobUpdateById(w.jobId, { status: 'interrupted' }); } } catch (_) {}
-    try { persistJobs(); persistUsage(); persistPending(); persistPendingDispatch(); persistSchedules(); persistMemory(); persistSettings(); } catch (_) {}
+    try { persistJobs(); persistUsage(); persistPending(); persistPendingDispatch(); persistSchedules(); persistMemory(); persistSettings(); persistOpsConfig(); } catch (_) {}
     const t0 = Date.now();
     const waiter = setInterval(() => {
       if (claudeRunning <= 0 || Date.now() - t0 > 10000) { clearInterval(waiter); try { log('info', 'shutdown-done', { waitedMs: Date.now() - t0, claudeRunning }); } catch (_) {} process.exit(0); }
