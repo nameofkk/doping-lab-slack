@@ -2937,9 +2937,10 @@ function hasSocialKey(platform) {
   return false;
 }
 async function postToSNS(client, ch, platform, text, opts) {
-  const safeText = String(text || '').slice(0, 600);
+  const fullText = String(text || '').trim();
+  const safeText = fullText.slice(0, 500); // Threads 500자 제한용
   if (!hasSocialKey(platform)) {
-    const draftMsg = `📝 [${platform.toUpperCase()} 초안 — 직접 복붙해서 게시]\n${safeText}`;
+    const draftMsg = `📝 [${platform.toUpperCase()} 초안 — 직접 복붙해서 게시]\n${fullText}`;
     if (ch && client) await client.chat.postMessage({ channel: ch, text: scrubOutput(draftMsg) }).catch(() => {});
     const entry = { id: ++contentLogSeq, repo: (opts && opts.repo) || 'global', platform, text: safeText, postId: null, postedAt: Date.now(), metrics: null, learnedAt: null };
     contentLog.push(entry); persistContentLog();
@@ -2949,8 +2950,7 @@ async function postToSNS(client, ch, platform, text, opts) {
     try {
       const userId = process.env.THREADS_USER_ID;
       const token = process.env.THREADS_TOKEN;
-      const encodedText = encodeURIComponent(String(text || '').slice(0, 500));
-      const createR = await sh(`curl -s -X POST "https://graph.threads.net/v1.0/${userId}/threads" --data-urlencode "media_type=TEXT" --data-urlencode "text=${String(text || '').slice(0, 500)}" -d "access_token=${token}"`);
+      const createR = await sh(`curl -s -X POST "https://graph.threads.net/v1.0/${userId}/threads" --data-urlencode "media_type=TEXT" --data-urlencode "text=${safeText}" -d "access_token=${token}"`);
       let cj = null; try { cj = JSON.parse((createR.out || '').trim()); } catch {}
       if (!cj || !cj.id) throw new Error('Threads container failed: ' + (createR.out || '').slice(0, 80));
       const pubR = await sh(`curl -s -X POST "https://graph.threads.net/v1.0/${userId}/threads_publish" -d "creation_id=${cj.id}" -d "access_token=${token}"`);
@@ -2962,7 +2962,7 @@ async function postToSNS(client, ch, platform, text, opts) {
       try { log('info', 'sns-post', { platform, postId }); } catch (_) {}
       return { postId, draft: false };
     } catch (e) {
-      const draftMsg = `📝 [Threads 게시 실패 — 초안으로 대체]\n${safeText}\n오류: ${String(e).slice(0, 60)}`;
+      const draftMsg = `📝 [Threads 게시 실패 — 초안으로 대체]\n${fullText}\n오류: ${String(e).slice(0, 60)}`;
       if (ch && client) await client.chat.postMessage({ channel: ch, text: scrubOutput(draftMsg) }).catch(() => {});
       const entry = { id: ++contentLogSeq, repo: (opts && opts.repo) || 'global', platform, text: safeText, postId: null, postedAt: Date.now(), metrics: null, learnedAt: null };
       contentLog.push(entry); persistContentLog();
@@ -2970,7 +2970,7 @@ async function postToSNS(client, ch, platform, text, opts) {
     }
   }
   // X/Instagram — OAuth 서명 복잡, 초안 모드 폴백
-  const draftMsg = `📝 [${platform.toUpperCase()} 초안 — 직접 복붙해서 게시]\n${safeText}`;
+  const draftMsg = `📝 [${platform.toUpperCase()} 초안 — 직접 복붙해서 게시]\n${fullText}`;
   if (ch && client) await client.chat.postMessage({ channel: ch, text: scrubOutput(draftMsg) }).catch(() => {});
   const entry = { id: ++contentLogSeq, repo: (opts && opts.repo) || 'global', platform, text: safeText, postId: null, postedAt: Date.now(), metrics: null, learnedAt: null };
   contentLog.push(entry); persistContentLog();
@@ -3177,8 +3177,11 @@ ${wrapUntrusted(String(scorecard).slice(0, 1000))}
 
 위 브랜드 규칙을 100% 따르면서 Threads용 포스트 1개를 생성해라.
 - 500자 이내, 첫 줄이 hook(눈길 끄는 한 문장), 해시태그 2-3개로 끝
-- 실제 게시할 수 있는 완성된 포스트 텍스트만 출력(설명·메타서술 없이)
-- 마크다운 없이 평문으로${GROUNDING_RULE}`;
+- 실제 게시할 수 있는 완성된 포스트 텍스트만 출력(설명·메타서술·면책문구·주석·※ 일절 없이 포스트 본문만)
+- 마크다운 없이 평문으로
+- 말투: 실제 한국인이 SNS에 올리듯 자연스럽고 친근한 구어체 반말. 딱딱한 문어체·번역투·AI 느낌 말투 금지. "~습니다/~에요" 존댓말도 금지.
+- 지표가 부족하거나 불확실하면 그냥 빼고 써. "데이터가 없어서" "검증할 수 없어서" 같은 변명이나 메타 서술은 절대 포스트에 넣지 마.
+- 서비스가 뭘 하는지 모르면 지표에서 유추하되, 확신 없는 기능 설명은 빼고 분위기·가치 중심으로 써.`;
         const r = await runClaude(prompt, MODEL.TEAM, WORKDIR, CLAUDE_PERMISSION_MODE, 60000, true);
         let postText = ((r && r.text) || '').trim();
         if (!postText) continue;
